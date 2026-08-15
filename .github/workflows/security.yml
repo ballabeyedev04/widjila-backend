@@ -1,0 +1,56 @@
+name: Security scans
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  npm-audit:
+    name: npm audit (dépendances)
+    runs-on: ubuntu-latest
+    # CORRECTIF (audit — Admin/structure git) : `backend` et `admin` sont deux
+    # dépôts GitHub séparés — ce workflow tourne DANS le dépôt backend, dont
+    # la racine contient déjà package.json. `working-directory: backend` et
+    # `cache-dependency-path: backend/package-lock.json` supposaient un
+    # sous-dossier `backend/` qui n'existe pas dans ce dépôt : ce job aurait
+    # échoué au premier `npm ci` (répertoire introuvable) dès qu'il aurait
+    # réellement tourné.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install deps (prod uniquement)
+        run: npm ci --omit=dev --no-fund
+
+      - name: npm audit
+        run: npm audit --omit=dev --audit-level=moderate
+
+  secret-scan:
+    name: Gitleaks (secrets commités)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    name: Dependency Review (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high

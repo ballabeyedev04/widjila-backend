@@ -1,0 +1,105 @@
+# ============================================================
+#  Suivi Chantier API — Docker Compose DÉVELOPPEMENT
+#  Usage : docker compose up --build
+#  Pour la production : docker compose -f docker-compose.prod.yml up -d
+# ============================================================
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: suivie_chantier_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${DB_NAME:-suivie_chantier}
+      POSTGRES_USER:     ${DB_USER:-chantieruser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-chantierpassword}
+    volumes:
+      - suivie_chantier_postgres_data_dev:/var/lib/postgresql/data
+    # En dev uniquement : exposer le port pour se connecter via pgAdmin / DBeaver.
+    #
+    # CORRECTIF (PostgreSQL ouvert à Internet) : la publication était "5432:5432",
+    # donc sur 0.0.0.0. Docker insère ses règles DNAT dans la chaîne PREROUTING
+    # (table nat) EN AMONT des règles UFW : un `ufw default deny incoming` ne
+    # bloque donc RIEN de ce qui est publié par Docker. Un simple
+    # `docker compose up` lancé sur le serveur exposait PostgreSQL au monde,
+    # avec en prime le mot de passe de repli faible ci-dessus.
+    # Restreint au loopback comme le fait docker-compose.prod.yml pour le backend.
+    # L'usage dev n'est pas cassé : pgAdmin/DBeaver se connectent à
+    # localhost:5432 depuis la même machine, et le backend passe par le réseau
+    # Docker (DB_HOST=postgres), pas par le port publié.
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - suivie_chantier_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-chantieruser} -d ${DB_NAME:-suivie_chantier}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis (audit — Sécurité §3 / Charge à 10 000 utilisateurs §4) ───────────
+  # Voir le commentaire équivalent dans docker-compose.prod.yml.
+  redis:
+    image: redis:7-alpine
+    container_name: suivie_chantier_redis_dev
+    restart: unless-stopped
+    # En dev uniquement : port exposé pour inspecter le cache/rate-limit via redis-cli.
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - suivie_chantier_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Backend Node.js ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: suivie_chantier_backend_dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV:  development
+      PORT:      3000
+      # Même correctif qu'en prod : le .env charge HOST=127.0.0.1 (valeur
+      # bare-metal). En conteneur ce bind vise la loopback DU CONTENEUR et rend
+      # le service injoignable depuis la publication de port. On force 0.0.0.0.
+      HOST:      0.0.0.0
+      DB_HOST:   postgres
+      DB_PORT:   5432
+      DB_NAME:   ${DB_NAME:-suivie_chantier}
+      DB_USER:   ${DB_USER:-chantieruser}
+      DB_PASSWORD: ${DB_PASSWORD:-chantierpassword}
+      DB_SSL_CA: ""
+      LOG_DIR:   /app/logs
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      # En dev : montage du code source pour hot-reload (commenté en prod)
+      # - ./src:/app/src
+    networks:
+      - suivie_chantier_network
+
+networks:
+  suivie_chantier_network:
+    driver: bridge
+
+volumes:
+  suivie_chantier_postgres_data_dev:

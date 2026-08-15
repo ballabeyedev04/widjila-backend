@@ -1,0 +1,108 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # ── Tests (audit — Bugs & fiabilité §1) ──────────────────────────────────
+  # CORRECTIF : 51+ tests existaient déjà dans le dépôt (src/__tests__/) sans
+  # qu'aucune étape du pipeline ne les exécute — `npm test` ne tournait nulle
+  # part avant le déploiement. Un test qui ne bloque pas un déploiement n'est
+  # que de la documentation : cette étape fait échouer le workflow AVANT le
+  # job `deploy` (voir `needs: test` ci-dessous) si la suite ne passe pas.
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    # CORRECTIF (audit — Admin/structure git) : `backend` est un dépôt GitHub
+    # séparé d'`admin` — ce workflow tourne DANS ce dépôt, dont la racine
+    # contient déjà package.json. `working-directory: backend` (copié depuis
+    # security.yml, qui avait la même erreur) supposait un sous-dossier
+    # `backend/` inexistant ici : ce job aurait échoué au premier `npm ci`.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # `npm ci` (pas --omit=dev) : jest et supertest sont des devDependencies,
+      # nécessaires pour exécuter la suite mais jamais embarquées dans l'image
+      # de production (voir .dockerignore : *.test.js, __tests__/ exclus).
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite
+        run: npm test
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: test   # le déploiement ne démarre jamais si les tests échouent
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # Le build Docker (apt + npm ci pour Puppeteer/Sharp/canvas) dépasse
+          # à lui seul les 10 minutes par défaut d'appleboy/ssh-action, ce qui
+          # coupe la connexion SSH avant même `docker compose up -d` — d'où le
+          # "Run Command Timeout" alors que l'image finit de se construire.
+          command_timeout: "30m"
+          script: |
+            set -e
+            cd /var/www/suivie-chantier
+
+            # Récupérer le nouveau code — `set -e` fait échouer tout le
+            # déploiement si le pull échoue (ex: problème d'authentification),
+            # au lieu de continuer silencieusement avec l'ancien code.
+            # --rebase : le VPS peut avoir des commits locaux (ex: config
+            # docker-compose spécifique à cette machine, jamais poussés) —
+            # un pull classique diverge dès que GitHub avance, --rebase les
+            # rejoue proprement par-dessus à chaque déploiement.
+            git pull --rebase origin main
+
+            # Rebuilder et relancer uniquement le backend (PostgreSQL reste intact).
+            #
+            # Les migrations ne sont PLUS lancées ici : l'entrypoint du conteneur
+            # (docker-entrypoint.sh) attend la base et les applique avant de
+            # démarrer l'application. Deux gains :
+            #   - un `docker compose restart` ou un redémarrage du VPS migre aussi,
+            #     alors que ce workflow ne couvrait que le push sur main ;
+            #   - une migration en échec empêche le conteneur de démarrer, au lieu
+            #     de laisser l'application servir du trafic sur un schéma périmé.
+            docker compose -f docker-compose.prod.yml up -d --build backend
+
+            # Attendre que Docker déclare le conteneur healthy (le HEALTHCHECK
+            # interroge /health toutes les 30 s, start-period 40 s). On sonde
+            # l'état réel plutôt qu'un `sleep` fixe : une migration longue ne
+            # fait plus échouer le déploiement à tort.
+            echo "Attente du démarrage (migrations incluses)…"
+            for i in $(seq 1 40); do
+              etat=$(docker inspect -f '{{.State.Health.Status}}' \
+                "$(docker compose -f docker-compose.prod.yml ps -q backend)" 2>/dev/null || echo "absent")
+              [ "$etat" = "healthy" ] && break
+              if [ "$etat" = "absent" ]; then
+                echo "Le conteneur n'est plus lancé — migrations probablement en échec :"
+                docker compose -f docker-compose.prod.yml logs --tail=50 backend
+                exit 1
+              fi
+              sleep 5
+            done
+
+            if [ "$etat" != "healthy" ]; then
+              echo "Conteneur non healthy après 200 s — journaux :"
+              docker compose -f docker-compose.prod.yml logs --tail=50 backend
+              exit 1
+            fi
+
+            # Contrôle final depuis l'hôte (valide aussi la publication du port)
+            curl -fsS http://127.0.0.1:3000/health || exit 1
+            echo "Déploiement terminé — backend healthy."

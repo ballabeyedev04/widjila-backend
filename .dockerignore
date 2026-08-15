@@ -1,0 +1,65 @@
+# Dépendances — réinstallées dans le conteneur
+node_modules
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Variables d'environnement — JAMAIS dans l'image
+.env
+.env.*
+!.env.example
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Docker (évite de copier les Dockerfiles eux-mêmes via COPY .)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+*.md
+docs/
+
+# Uploads & logs — montés via volumes
+uploads/
+logs/
+backups/
+
+# Certificats & clés
+*.pem
+*.key
+*.crt
+*.p12
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / éditeurs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Coverage / tests
+coverage/
+.nyc_output/
+*.test.js
+*.spec.js
+__tests__/
+
+# Cache
+.cache/
+.eslintcache
+.npm/
+
+# Scripts de déploiement (pas nécessaires dans le conteneur)
+deploy/
+
+# Sequelize
+*.sqlite

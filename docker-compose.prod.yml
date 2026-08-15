@@ -1,0 +1,169 @@
+# ============================================================
+#  Suivi Chantier API — Docker Compose PRODUCTION
+#  Usage : docker compose -f docker-compose.prod.yml up -d --build
+#
+#  Prérequis :
+#   • Fichier .env rempli (copie de .env.example)
+#   • Certificats Nginx / Let's Encrypt installés sur l'hôte
+#   • Répertoires /var/www/suivie-chantier/logs et /var/www/suivie-chantier/uploads existants
+# ============================================================
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: suivie_chantier_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:            ${DB_NAME}
+      POSTGRES_USER:          ${DB_USER}
+      POSTGRES_PASSWORD:      ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS:   "--encoding=UTF8 --locale=C"
+    volumes:
+      - suivie_chantier_postgres_data:/var/lib/postgresql/data
+      # Script d'init optionnel (ex: création extension pgcrypto)
+      - ./deploy/initdb:/docker-entrypoint-initdb.d:ro
+    # PAS d'exposition du port en production — accessible uniquement via le réseau Docker
+    expose:
+      - "5432"
+    # Durcissement (audit M8) : pas de capabilities étendues, pas d'escalade de privilèges
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - suivie_chantier_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Limite mémoire pour PostgreSQL (évite qu'il absorbe toute la RAM du VPS)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Redis (audit — Sécurité §3 / Charge à 10 000 utilisateurs §4) ───────────
+  # Store partagé pour le rate limiting (voir middlewares/rateLimit.middleware.js)
+  # et le cache court des statistiques dashboard (voir utils/cache.js). Sans ce
+  # service, `express-rate-limit` compte PAR PROCESS — en cluster PM2 (4
+  # workers, voir ecosystem.config.js), la limite anti brute-force réelle est
+  # divisée par le nombre de workers.
+  redis:
+    image: redis:7-alpine
+    container_name: suivie_chantier_redis
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    # Pas d'exposition du port en production — accessible uniquement via le réseau Docker
+    expose:
+      - "6379"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - suivie_chantier_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 160M
+
+  # ── Backend Node.js ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Pas de cache lors d'un déploiement propre : ajouter --no-cache si besoin
+    image: suivie-chantier-api:latest
+    container_name: suivie_chantier_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # En production : Nginx écoute sur 443 et proxifie vers 127.0.0.1:3000
+    # On publie uniquement sur 127.0.0.1 (loopback) pour que Nginx seul y accède
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV:    production
+      PORT:        3000
+      # CORRECTIF (déploiement Docker impossible à démarrer) :
+      # .env.example fixe HOST=127.0.0.1 (valeur correcte en bare-metal derrière
+      # nginx) et setup-server.sh fait `cp .env.example .env`. Ce bloc surchargeait
+      # NODE_ENV/PORT/DB_HOST/DB_PORT/LOG_DIR mais PAS HOST : via env_file, Node
+      # écoutait donc la loopback DU CONTENEUR. La publication
+      # "127.0.0.1:3000:3000" route vers l'IP du conteneur sur le réseau bridge,
+      # pas vers sa loopback → nginx recevait « connection refused ».
+      # En conteneur, le bind DOIT être 0.0.0.0 ; l'isolation réseau est déjà
+      # assurée par la publication limitée au loopback de l'HÔTE (ports: ci-dessus).
+      HOST:        0.0.0.0
+      DB_HOST:     postgres
+      DB_PORT:     5432
+      LOG_DIR:     /app/logs
+      REDIS_URL:   redis://redis:6379
+    # Durcissement (audit M8) : rootfs en lecture seule + tmpfs pour les fichiers
+    # temporaires + aucune capability étendue + pas d'escalade de privilèges.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - suivie_chantier_uploads_data:/app/uploads
+      - suivie_chantier_logs_data:/app/logs
+    networks:
+      - suivie_chantier_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    # Limites ressources (adapter selon VPS)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+networks:
+  suivie_chantier_network:
+    driver: bridge
+    # Réseau bridge : les conteneurs se voient entre eux, et le backend a besoin
+    # d'ACCÈS SORTANT pour Resend et R2 — d'où internal:false.
+    # L'exposition au monde extérieur est maîtrisée ailleurs : le port backend
+    # n'est publié que sur 127.0.0.1 (loopback), PostgreSQL n'expose rien.
+    internal: false
+
+volumes:
+  suivie_chantier_postgres_data:
+    driver: local
+  suivie_chantier_uploads_data:
+    driver: local
+  suivie_chantier_logs_data:
+    driver: local

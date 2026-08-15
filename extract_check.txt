@@ -1,0 +1,339 @@
+--- page 1 ---
+SUIVIE CHANTIER
+ Guide de Déploiement
+ Backend (API) & Admin (interface web)
+ Node.js · Express · PostgreSQL · Redis · Docker · Nginx · React (Vite)
+ SERVEUR VPS CONTABO — PRODUCTION
+ Node.js 22
+ PostgreSQL
+ 16
+ Redis 7
+ Docker
+ Nginx
+ Let's Encrypt
+ SSL
+ React 19
+Ce guide vous accompagne pas à pas depuis la connexion SSH jusqu'à votre API et votre interface d'administration en ligne, avec
+HTTPS, sauvegardes automatiques testées avec restauration réelle, protection anti brute-force partagée (Redis) et déploiement
+continu (push GitHub → mise en production automatique).
+
+
+--- page 2 ---
+SOMMAIRE
+PARTIE A — BACKEND (API)
+1   Prérequis et informations du serveur
+2   Connexion SSH et mise à jour du système
+3   Installation de Docker
+4   Installation de Nginx
+5   Cloner le projet backend
+6   Configurer le fichier .env de production
+7   Configurer Nginx (API + admin, même domaine)
+8   Lancer les conteneurs Docker (Postgres + Redis + Backend)
+9   Vérifier migrations et compte admin (automatiques)
+10   Installer le SSL avec Let's Encrypt (HTTPS)
+11   Vérifier que tout fonctionne
+12   Déploiement continu (CI/CD GitHub Actions)
+13   Commandes utiles au quotidien
+14   Sauvegardes automatiques et restauration
+PARTIE B — ADMIN (interface web)
+15   Prérequis admin
+16   Cloner le dépôt admin
+17   Configurer le fichier .env admin
+18   Générer le build de production
+19   Déployer le build (Nginx statique)
+20   Déploiement continu admin (CI/CD)
+21   Checklist finale admin
+ANNEXES
+A   Toutes les variables d'environnement — backend
+B   Toutes les variables d'environnement — admin
+C   Résumé des commandes essentielles
+
+
+--- page 3 ---
+PARTIE A — DÉPLOIEMENT DU BACKEND (API)
+ÉTAPE 1 — PRÉREQUIS ET INFORMATIONS DU SERVEUR
+Ce dont vous avez besoin avant de commencer
+Serveur Contabo
+VPS Cloud 4 vCPU / 8 Go RAM recommandé (le mode cluster et le pool
+PostgreSQL sont dimensionnés pour 4 cœurs — voir ecosystem.config.js).
+Ubuntu 22.04 ou 24.04 LTS.
+Adresse IP publique
+Notez l'IP de votre VPS depuis le panel Contabo (ex : 185.12.34.56).
+Nom de domaine
+Ex : suivie-chantier.com — achetez sur Namecheap, OVH, Gandi, etc. Un seul
+domaine suffit : ce projet sert l'admin ET l'API depuis la même origine (voir
+étape 7).
+Client SSH
+Windows : PuTTY ou Windows Terminal. Mac/Linux : terminal intégré.
+Code source
+Deux dépôts GitHub séparés — un pour le backend, un pour l'admin. Chacun a
+son propre pipeline de déploiement continu (étapes 12 et 20).
+■  Notez ces informations maintenant : IP serveur ____________________  |  Domaine ____________________
+ |  Mot de passe root ____________________  |  URL dépôt backend ____________________  |  URL dépôt
+admin ____________________
+ÉTAPE 2 — CONNEXION SSH ET MISE À JOUR DU SYSTÈME
+2.1 — Se connecter au serveur
+Ouvrez un terminal et connectez-vous avec l'adresse IP fournie par Contabo. Remplacez 185.12.34.56 par
+votre vraie IP.
+# Depuis votre PC (Windows Terminal, Mac, Linux)
+ssh root@185.12.34.56
+# Entrez le mot de passe reçu par email Contabo
+# Vous verrez : root@vps:~#
+■  La première connexion demande de confirmer l'empreinte SSH. Tapez “yes” et appuyez sur Entrée.
+2.2 — Mettre à jour le système
+apt update && apt upgrade -y
+# Installer les outils essentiels
+apt install -y curl git nano ufw htop unzip
+
+
+--- page 8 ---
+7.3 — Tester et recharger
+sudo nginx -t
+# Attendu : configuration file /etc/nginx/nginx.conf test is successful
+sudo systemctl reload nginx
+■  À ce stade, une visite sur https://votre-domaine.com/ renverra une erreur — le dossier
+/var/www/suivie-chantier-admin/dist n'existe pas encore (Partie B) et le certificat SSL n'est pas encore actif (étape
+10). C'est normal, poursuivez.
+ÉTAPE 8 — LANCER LES CONTENEURS DOCKER
+Docker lance trois conteneurs : PostgreSQL, Redis et le backend Node.js — reliés par un réseau Docker
+interne, aucun des trois n'expose de port directement sur Internet à part le backend, en loopback uniquement.
+8.1 — Premier lancement
+cd /var/www/suivie-chantier
+docker compose -f docker-compose.prod.yml up -d --build
+# 1re fois : 3 à 5 min (téléchargement des images) — ensuite ~30 s
+8.2 — Vérifier que les conteneurs tournent
+docker compose -f docker-compose.prod.yml ps
+# Attendu :
+# suivie_chantier_postgres Up (healthy)
+# suivie_chantier_redis Up (healthy)
+# suivie_chantier_backend Up (healthy)
+docker compose -f docker-compose.prod.yml logs -f backend
+# Cherchez : "Connexion PostgreSQL établie" et "Serveur lancé sur"
+# Quitter les logs : Ctrl+C
+8.3 — Tester que l'API répond
+curl http://localhost:3000/health
+# {"status":"ok","db":"connected","uptime":...}
+ÉTAPE 9 — VÉRIFIER MIGRATIONS ET COMPTE ADMIN
+
+
+--- page 9 ---
+✔  Contrairement à un déploiement manuel classique, rien à lancer à la main ici : docker-entrypoint.sh attend la
+base puis applique les migrations avant de démarrer le serveur, et le compte super-admin (ADMIN_EMAIL /
+ADMIN_PASSWORD du .env) est créé automatiquement par le worker principal au premier démarrage. Une
+migration en échec empêche le conteneur de démarrer — le healthcheck de l'étape 8.2 est donc déjà la preuve
+que le schéma est à jour.
+9.1 — Vérifier quand même (recommandé au premier déploiement)
+docker compose -f docker-compose.prod.yml exec backend npx sequelize-cli
+db:migrate:status
+# Toutes les migrations doivent afficher "up", notamment :
+# up 20260809000000-create-remaining-tables-and-indexes.js
+# up 20260809000001-create-utilisateur.js
+# up 20260809000002-module-extensions.js
+■  20260809000000-create-remaining-tables-and-indexes.js crée toutes les tables et index d'après les modèles
+Sequelize actuels — idempotente, elle ne modifie jamais une table déjà existante et peut être rejouée sans
+risque.
+9.2 — Vérifier la connexion admin
+Une fois l'admin déployé (Partie B), connectez-vous avec ADMIN_EMAIL / ADMIN_PASSWORD tels que
+définis dans le .env à l'étape 6. Activez le MFA depuis le profil dès la première connexion : il est obligatoire
+pour accéder aux routes super-admin (/admin/*) de la plateforme.
+ÉTAPE 10 — INSTALLER LE SSL AVEC LET'S ENCRYPT (HTTPS)
+Votre domaine doit pointer sur l'IP du serveur AVANT cette étape.
+10.1 — Configurer les DNS
+Type
+Nom / Host
+Valeur
+TTL
+A
+@
+185.12.34.56 (votre IP Contabo)
+3600
+A
+www
+185.12.34.56 (optionnel)
+3600
+■  Attendez 5 à 30 minutes de propagation DNS. Vérifiez avec : ping votre-domaine.com → doit retourner
+votre IP.
+10.2 — Installer Certbot et obtenir le certificat
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d votre-domaine.com -d www.votre-domaine.com
+# Email pour les alertes, accepter les conditions : O
+# Résultat attendu : Successfully received certificate.
+
+
+--- page 10 ---
+10.3 — Vérifier le renouvellement automatique
+sudo certbot renew --dry-run
+# Attendu : Congratulations, all simulated renewals succeeded
+# Renouvellement automatique géré par un timer systemd, 2x/jour
+ÉTAPE 11 — VÉRIFIER QUE TOUT FONCTIONNE
+11.1 — Tests depuis le serveur
+curl https://votre-domaine.com/health
+# {"status":"ok","db":"connected","storage":"connected"}
+curl -I https://votre-domaine.com/health
+# Cherchez : HTTP/2 200 et les en-têtes de sécurité
+11.2 — Checklist finale (backend)
+■   docker compose ps → les 3 conteneurs en “Up (healthy)”
+■   https://votre-domaine.com/health → {"status":"ok",...}
+■   Icône cadenas vert dans le navigateur → SSL actif
+■   db:migrate:status → toutes les migrations “up”
+■   Logs propres : docker compose -f docker-compose.prod.yml logs backend
+ÉTAPE 12 — DÉPLOIEMENT CONTINU (CI/CD GITHUB ACTIONS)
+Une fois ce paramétrage fait, un simple git push sur main suffit : plus besoin de se reconnecter en SSH pour
+chaque mise à jour.
+12.1 — Ce que fait le pipeline (déjà dans le dépôt)
+Job “test”
+npm ci + npm test (suite Jest) — le déploiement ne démarre JAMAIS si un test
+échoue.
+Job “deploy”
+SSH vers le VPS, git pull, docker compose up -d --build backend, attente
+“healthy”, contrôle final via /health.
+security.yml
+npm audit + scan de secrets committés (Gitleaks) à chaque push et pull request.
+12.2 — Configurer les secrets GitHub (une seule fois)
+Dans le dépôt backend sur GitHub : Settings → Secrets and variables → Actions → New repository secret.
+VPS_HOST
+IP ou domaine du serveur
+VPS_USER
+nodeapp
+VPS_SSH_KEY
+Clé privée SSH de nodeapp (la clé publique correspondante doit être dans
+~/.ssh/authorized_keys sur le VPS)
+
+
+--- page 26 ---
+7.3 — Tester et recharger
+sudo nginx -t
+# Attendu : configuration file /etc/nginx/nginx.conf test is successful
+sudo systemctl reload nginx
+■  À ce stade, une visite sur https://votre-domaine.com/ renverra une erreur — le dossier
+/var/www/suivie-chantier-admin/dist n'existe pas encore (Partie B) et le certificat SSL n'est pas encore actif (étape
+10). C'est normal, poursuivez.
+ÉTAPE 8 — LANCER LES CONTENEURS DOCKER
+Docker lance trois conteneurs : PostgreSQL, Redis et le backend Node.js — reliés par un réseau Docker
+interne, aucun des trois n'expose de port directement sur Internet à part le backend, en loopback uniquement.
+8.1 — Premier lancement
+cd /var/www/suivie-chantier
+docker compose -f docker-compose.prod.yml up -d --build
+# 1re fois : 3 à 5 min (téléchargement des images) — ensuite ~30 s
+8.2 — Vérifier que les conteneurs tournent
+docker compose -f docker-compose.prod.yml ps
+# Attendu :
+# suivie_chantier_postgres Up (healthy)
+# suivie_chantier_redis Up (healthy)
+# suivie_chantier_backend Up (healthy)
+docker compose -f docker-compose.prod.yml logs -f backend
+# Cherchez : "Connexion PostgreSQL établie" et "Serveur lancé sur"
+# Quitter les logs : Ctrl+C
+8.3 — Tester que l'API répond
+curl http://localhost:3000/health
+# {"status":"ok","db":"connected","uptime":...}
+ÉTAPE 9 — VÉRIFIER MIGRATIONS ET COMPTE ADMIN
+Suivie Chantier — Guide de déploiement
+Page 8 / 18
+
+
+--- page 27 ---
+✔  Contrairement à un déploiement manuel classique, rien à lancer à la main ici : docker-entrypoint.sh attend la
+base puis applique les migrations avant de démarrer le serveur, et le compte super-admin (ADMIN_EMAIL /
+ADMIN_PASSWORD du .env) est créé automatiquement par le worker principal au premier démarrage. Une
+migration en échec empêche le conteneur de démarrer — le healthcheck de l'étape 8.2 est donc déjà la preuve
+que le schéma est à jour.
+9.1 — Vérifier quand même (recommandé au premier déploiement)
+docker compose -f docker-compose.prod.yml exec backend npx sequelize-cli
+db:migrate:status
+# Toutes les migrations doivent afficher "up", notamment :
+# up 20260809000000-create-remaining-tables-and-indexes.js
+# up 20260809000001-create-utilisateur.js
+# up 20260809000002-module-extensions.js
+■  20260809000000-create-remaining-tables-and-indexes.js crée toutes les tables et index d'après les modèles
+Sequelize actuels — idempotente, elle ne modifie jamais une table déjà existante et peut être rejouée sans
+risque.
+9.2 — Vérifier la connexion admin
+Une fois l'admin déployé (Partie B), connectez-vous avec ADMIN_EMAIL / ADMIN_PASSWORD tels que
+définis dans le .env à l'étape 6. Activez le MFA depuis le profil dès la première connexion : il est obligatoire
+pour accéder aux routes super-admin (/admin/*) de la plateforme.
+ÉTAPE 10 — INSTALLER LE SSL AVEC LET'S ENCRYPT (HTTPS)
+Votre domaine doit pointer sur l'IP du serveur AVANT cette étape.
+10.1 — Configurer les DNS
+Type
+Nom / Host
+Valeur
+TTL
+A
+@
+185.12.34.56 (votre IP Contabo)
+3600
+A
+www
+185.12.34.56 (optionnel)
+3600
+■  Attendez 5 à 30 minutes de propagation DNS. Vérifiez avec : ping votre-domaine.com → doit retourner
+votre IP.
+10.2 — Installer Certbot et obtenir le certificat
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d votre-domaine.com -d www.votre-domaine.com
+# Email pour les alertes, accepter les conditions : O
+# Résultat attendu : Successfully received certificate.
+Suivie Chantier — Guide de déploiement
+Page 9 / 18
+
+
+--- page 36 ---
+ANNEXE B — VARIABLES D'ENVIRONNEMENT — ADMIN
+Variable
+Exemple
+Oblig. ?
+Description
+VITE_API_BASE_URL
+/api/v1
+OUI
+Chemin RELATIF — même
+origine que l'API (étape 7)
+VITE_STRIPE_PUBLISHABLE_
+KEY
+pk_xxx
+Si Stripe activé
+Clé publique Stripe Elements
+VITE_USE_PAYTECH
+false
+Non
+Active le paiement mobile en
+plus de Stripe
+VITE_SENTRY_DSN
+(vide)
+Non
+Monitoring d'erreurs — inerte si
+absent
+ANNEXE C — RÉSUMÉ DES COMMANDES ESSENTIELLES
+Backend
+1er lancement
+docker compose -f docker-compose.prod.yml up -d --build
+Mise à jour (manuelle)
+bash deploy/deploy.sh --mode docker
+Mise à jour (auto)
+git push sur main → CI/CD (étape 12)
+Statut migrations
+docker compose -f docker-compose.prod.yml exec backend npx
+sequelize-cli db:migrate:status
+Voir logs
+docker compose -f docker-compose.prod.yml logs -f backend
+Santé API
+curl https://votre-domaine.com/health
+Sauvegarde
+bash deploy/backup-postgres.sh
+Restauration
+bash deploy/restore-postgres.sh <fichier> [base] [--force]
+Admin
+Build local
+npm ci && npm run lint && npm run build
+Déploiement (manuel)
+cd /var/www/suivie-chantier-admin && git pull && npm ci &&
+npm run build
+Déploiement (auto)
+git push sur main → CI/CD (étape 20)
+Vérifier en ligne
+curl -I https://votre-domaine.com/
+Suivie Chantier — Guide de déploiement
+Page 18 / 18
+
+
