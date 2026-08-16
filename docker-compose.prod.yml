@@ -27,9 +27,21 @@ services:
     # PAS d'exposition du port en production — accessible uniquement via le réseau Docker
     expose:
       - "5432"
-    # Durcissement (audit M8) : pas de capabilities étendues, pas d'escalade de privilèges
+    # Durcissement (audit M8) : cap_drop ALL puis cap_add minimal, PAS cap_drop
+    # seul. L'entrypoint officiel de l'image postgres démarre en root pour
+    # ajuster les permissions du volume de données (chown/chmod) PUIS bascule
+    # vers l'utilisateur non-privilégié `postgres` (setuid/setgid) — sans ces
+    # capacités précises, même root ne peut plus rien faire ("Operation not
+    # permitted" au démarrage, conteneur unhealthy en boucle). CAP_SYS_CHROOT
+    # n'est pas nécessaire ici, seulement le strict minimum de cette bascule.
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
     security_opt:
       - no-new-privileges:true
     networks:
@@ -65,8 +77,15 @@ services:
     # Pas d'exposition du port en production — accessible uniquement via le réseau Docker
     expose:
       - "6379"
+    # Même raison que postgres ci-dessus : l'entrypoint officiel redis démarre
+    # en root et bascule vers l'utilisateur `redis` via setuid/setgid
+    # (message d'erreur observé en déploiement réel : "setpriv: setresuid
+    # failed: Operation not permitted" avec cap_drop ALL seul).
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
     security_opt:
       - no-new-privileges:true
     networks:
