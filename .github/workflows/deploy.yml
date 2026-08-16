@@ -20,6 +20,17 @@ jobs:
     # contient déjà package.json. `working-directory: backend` (copié depuis
     # security.yml, qui avait la même erreur) supposait un sous-dossier
     # `backend/` inexistant ici : ce job aurait échoué au premier `npm ci`.
+    #
+    # CORRECTIF (job Tests toujours en échec) : src/config/security.js exige
+    # JWT_SECRET/JWT_REFRESH_SECRET/JWT_RESET_SECRET (3 valeurs distinctes)
+    # dès son chargement — présents localement via .env (jamais commité),
+    # absents sur le runner GitHub. Valeurs FACTICES, valables uniquement ici :
+    # la suite mocke Sequelize (voir jest.config.js), aucune vraie donnée ni
+    # vrai token n'est jamais signé avec ces secrets.
+    env:
+      JWT_SECRET: ci_test_only_jwt_secret_1_never_used_in_prod
+      JWT_REFRESH_SECRET: ci_test_only_jwt_secret_2_never_used_in_prod
+      JWT_RESET_SECRET: ci_test_only_jwt_secret_3_never_used_in_prod
     steps:
       - uses: actions/checkout@v4
 
