@@ -57,6 +57,11 @@ exports.login = asyncHandler(async (req, res) => {
     message: 'Connexion réussie',
     data: {
       token: result.token,
+      // Client mobile (Dio) : pas de gestion automatique des cookies comme un
+      // navigateur — le refreshToken est donc AUSSI renvoyé ici, en plus du
+      // cookie httpOnly (déjà consommé par le web). Additif, ne change rien
+      // pour le web qui continue d'utiliser le cookie exclusivement.
+      refreshToken: result.refreshToken,
       utilisateur: formatUser(result.utilisateur),
     },
   });
@@ -78,6 +83,7 @@ exports.verifierMfa = asyncHandler(async (req, res) => {
     message: 'Connexion réussie',
     data: {
       token: result.token,
+      refreshToken: result.refreshToken, // voir commentaire dans exports.login
       utilisateur: formatUser(result.utilisateur),
     },
   });
@@ -97,7 +103,11 @@ exports.refresh = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Token renouvelé',
-    data: { token: result.token },
+    // refreshToken renvoyé ici aussi : le backend fait tourner (rotation) un
+    // nouveau refreshToken à chaque appel — un client mobile qui le stocke
+    // lui-même (pas de cookie automatique) DOIT recevoir le nouveau pour
+    // remplacer l'ancien, sinon le refresh suivant échouera (token consommé).
+    data: { token: result.token, refreshToken: result.refreshToken },
   });
 });
 
