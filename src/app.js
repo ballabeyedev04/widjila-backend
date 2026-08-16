@@ -14,6 +14,7 @@ const auth = require('./middlewares/auth.middleware.js');
 const checkActiveUser = require('./middlewares/checkActiveUser.middleware.js');
 const checkFileAccess = require('./middlewares/checkFileAccess.middleware.js');
 const checkSubscription = require('./middlewares/checkSubscription.middleware.js');
+const auditTrail = require('./middlewares/auditTrail.middleware.js');
 // `captureRawBody` doit être passé à express.json() ci-dessous — voir le
 // commentaire à cet endroit. Ce require n'est PAS mort : ne pas le supprimer.
 const { captureRawBody } = require('./middlewares/rawBody.middleware.js');
@@ -188,6 +189,13 @@ const adminStatistiquesRoutes = require('./modules/admin/route/statistiques.rout
 const adminAuditLogRoutes     = require('./modules/admin/route/auditLog.route.js');
 const subscriptionRoutes = require('./modules/subscription/route/subscription.route.js');
 const paytechRoutes = require('./modules/paytech/route/paytech.route.js');
+
+// Journal d'audit générique (audit — élargissement du périmètre) : montée
+// une seule fois, avant toutes les routes mutantes de l'API — voir le
+// commentaire d'en-tête de auditTrail.middleware.js pour la portée exacte
+// (routes /admin/* et /auth/* exclues, déjà couvertes par leurs propres
+// mécanismes de journalisation).
+app.use('/api/v1', auditTrail);
 
 app.use('/api/v1/auth',          authRoutes);
 app.use('/api/v1/account',       accountRoutes);
