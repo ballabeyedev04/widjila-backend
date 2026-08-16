@@ -48,9 +48,14 @@ Routes de démo : `POST /api/v1/auth/register`, `POST /api/v1/auth/login`.
 
 ## Production (VPS Ubuntu)
 
-1. `sudo bash deploy/setup-server.sh --domain api.votre-domaine.com` (1 fois)
+Architecture à **deux domaines séparés** : l'API (`api.votre-domaine.com`,
+ce dépôt) et l'admin (`app.votre-domaine.com`, dépôt séparé) — voir
+`deploy/nginx.conf` (API) et `deploy/nginx-admin.conf` (admin), tous deux
+installés par le même script.
+
+1. `sudo bash deploy/setup-server.sh --api-domain api.votre-domaine.com --app-domain app.votre-domaine.com` (1 fois — `--app-domain` est optionnel si l'admin n'est pas encore déployé)
 2. `git clone <repo> /var/www/suivie-chantier`
-3. `cp .env.example .env` puis remplir toutes les valeurs
+3. `cp .env.example .env` puis remplir toutes les valeurs, notamment `CORS_ORIGIN`/`FRONTEND_URL=https://app.votre-domaine.com`
 4. **Option A — Docker** : `npm run docker:prod`
 5. **Option B — PM2** : `npm install --omit=dev && npm run pm2:start`
 
