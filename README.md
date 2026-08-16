@@ -60,8 +60,17 @@ installés par le même script.
 5. **Option B — PM2** : `npm install --omit=dev && npm run pm2:start`
 
 **CI/CD** : pousser sur `main` déclenche `.github/workflows/deploy.yml`
-(SSH → `git pull --rebase` → rebuild backend → migrations → healthcheck).
-Ajouter les secrets GitHub : `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`.
+(tests → SSH → `git pull --rebase` → rebuild backend → migrations → healthcheck).
+Le job `deploy` ne démarre que si le job `test` passe (`needs: test`).
+
+Secrets GitHub à configurer une seule fois (`Settings → Secrets and
+variables → Actions → New repository secret`) :
+- `VPS_HOST` — IP ou domaine du serveur
+- `VPS_USER` — utilisateur SSH utilisé pour le déploiement
+- `VPS_SSH_KEY` — clé privée SSH dédiée (`ssh-keygen -t ed25519 -N ""`),
+  dont la clé publique correspondante doit être dans `~/.ssh/authorized_keys`
+  de cet utilisateur sur le VPS. Utiliser une clé dédiée à ce seul usage,
+  jamais une clé SSH personnelle.
 
 **Sauvegardes** : `npm run backup` (pg_dump → `.gz` → Google Drive via rclone).
 
