@@ -89,7 +89,13 @@ async function sendWelcomeEmail({ to, nom, prenom }) {
 async function sendVerificationEmail({ to, nom, prenom, token }) {
   const template = require('../templates/mail/verifyEmail.template.js');
   const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
-  const lien = `${frontendUrl}/verification?token=${encodeURIComponent(token)}`;
+  // `/verification` (ancien chemin) ne correspond à AUCUNE route de l'admin
+  // web — la seule route montée est `/verify-email` (voir
+  // `admin/src/routes/AppRoutes.jsx`). Le lien envoyé par email tombait donc
+  // systématiquement sur la page 404, sans aucun moyen pour l'utilisateur de
+  // terminer la vérification (et donc de se connecter, REQUIRE_EMAIL_VERIFICATION
+  // étant actif par défaut en production).
+  const lien = `${frontendUrl}/verify-email?token=${encodeURIComponent(token)}`;
   return sendEmail({
     to,
     subject: 'Vérifiez votre adresse email — SuivieChantier',
