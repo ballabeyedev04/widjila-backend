@@ -132,26 +132,47 @@ class DashboardService {
     });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
-    const stats = {
-      chantier,
-      reserves: {
-        total: await Reserve.count({ where: { chantierId } }),
-        ouvertes: await Reserve.count({ where: { chantierId, statut: { [Op.notIn]: ['validee', 'cloturee'] } } }),
-        validees: await Reserve.count({ where: { chantierId, statut: 'validee' } }),
-        enRetard: await Reserve.count({
-          where: { chantierId, date_limite: { [Op.lt]: new Date() }, statut: { [Op.notIn]: ['validee', 'cloturee'] } },
-        }),
-      },
-      parSeverite: (await Reserve.findAll({
+    // Requêtes indépendantes lancées en parallèle (même logique que
+    // statsGlobales) plutôt qu'une cascade de `await` séquentiels.
+    const [
+      total, ouvertes, validees, enRetard, parSeverite, parStatutRows, batiments, plans, inspections, documents,
+    ] = await Promise.all([
+      Reserve.count({ where: { chantierId } }),
+      Reserve.count({ where: { chantierId, statut: { [Op.notIn]: ['validee', 'cloturee'] } } }),
+      Reserve.count({ where: { chantierId, statut: 'validee' } }),
+      Reserve.count({
+        where: { chantierId, date_limite: { [Op.lt]: new Date() }, statut: { [Op.notIn]: ['validee', 'cloturee'] } },
+      }),
+      Reserve.findAll({
         where: { chantierId },
         attributes: ['severite', [fn('COUNT', col('id')), 'n']],
         group: ['severite'],
         raw: true,
-      })).reduce((acc, r) => ({ ...acc, [r.severite]: Number(r.n) }), {}),
-      batiments: await Batiment.count({ where: { chantierId } }),
-      plans: await Plan.count({ where: { chantierId } }),
-      inspections: await Inspection.count({ where: { chantierId } }),
-      documents: await Document.count({ where: { chantierId } }),
+      }),
+      // Répartition par statut — alimente les compteurs de filtre et le
+      // donut de l'écran mobile « Réserves » : les chiffres viennent du
+      // back, seul le rendu graphique est fait côté client (mobile/web).
+      Reserve.findAll({
+        where: { chantierId },
+        attributes: ['statut', [fn('COUNT', col('id')), 'n']],
+        group: ['statut'],
+        raw: true,
+      }),
+      Batiment.count({ where: { chantierId } }),
+      Plan.count({ where: { chantierId } }),
+      Inspection.count({ where: { chantierId } }),
+      Document.count({ where: { chantierId } }),
+    ]);
+
+    const stats = {
+      chantier,
+      reserves: { total, ouvertes, validees, enRetard },
+      parSeverite: parSeverite.reduce((acc, r) => ({ ...acc, [r.severite]: Number(r.n) }), {}),
+      parStatut: parStatutRows.reduce((acc, r) => ({ ...acc, [r.statut]: Number(r.n) }), {}),
+      batiments,
+      plans,
+      inspections,
+      documents,
     };
 
     return { success: true, stats };

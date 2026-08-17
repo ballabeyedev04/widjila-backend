@@ -97,10 +97,15 @@ class AccountService {
   }
 
   static async forgotPassword(email) {
+    // Message UNIQUE, quel que soit le résultat de la recherche — un texte
+    // différent selon que le compte existe ou non (même à statut HTTP 200
+    // identique) reste un canal d'énumération de comptes par email : un
+    // attaquant scripte des essais et distingue les deux cas au texte reçu.
+    const MESSAGE_GENERIQUE = 'Si un compte existe avec cet email, un code de réinitialisation vient de lui être envoyé.';
+
     const utilisateur = await Utilisateur.findOne({ where: { email: email.toLowerCase() } });
     if (!utilisateur || utilisateur.role === 'Admin') {
-      // Réponse générique pour ne pas révéler l'existence du compte
-      return { message: "Si un compte existe avec cet email, un code de réinitialisation a été envoyé." };
+      return { message: MESSAGE_GENERIQUE };
     }
 
     const otp = AccountService._generateOtp(6);
@@ -112,7 +117,7 @@ class AccountService {
 
     await sendOtpEmail({ to: utilisateur.email, nom: utilisateur.prenom, otp });
 
-    return { message: 'Un code de réinitialisation a été envoyé à votre adresse email.' };
+    return { message: MESSAGE_GENERIQUE };
   }
 
   // -------------------- RÉINITIALISATION MOT DE PASSE (OTP) --------------------

@@ -512,6 +512,12 @@ class ReserveService {
         { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
         { model: Utilisateur, as: 'assigne', attributes: ['id', 'nom', 'prenom', 'photoProfil'] },
         { model: Utilisateur, as: 'createur', attributes: ['id', 'nom', 'prenom'] },
+        // Vignette de la liste (mobile/web) : seulement le premier média,
+        // pas la galerie complète (réservée au détail). `separate: true`
+        // est nécessaire dès qu'un `include` hasMany porte son propre
+        // `limit` — sinon Sequelize applique le LIMIT global de la requête
+        // et casse la pagination des réserves elles-mêmes.
+        { model: Media, as: 'medias', attributes: ['id', 'type', 'url', 'thumbnail_url'], separate: true, limit: 1, order: [['createdAt', 'ASC']] },
       ],
       order: [['createdAt', 'DESC']],
       limit,
