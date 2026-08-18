@@ -29,6 +29,7 @@ const errorHandler = (err, req, res, next) => { // eslint-disable-line no-unused
   if (err instanceof AppError && err.isOperational) {
     const body = { success: false, message: err.message };
     if (err.details && err.details.length) body.details = err.details;
+    if (err.code) body.code = err.code;
     return res.status(err.statusCode).json(body);
   }
 

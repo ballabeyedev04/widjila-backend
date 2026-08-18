@@ -36,7 +36,7 @@ exports.inscriptionUser = asyncHandler(async (req, res) => {
 
 exports.login = asyncHandler(async (req, res) => {
   const result = await AuthService.login(req.body, _meta(req));
-  if (!result.success) throw new BadRequestError(result.message);
+  if (!result.success) throw new BadRequestError(result.message, result.code);
 
   // Challenge MFA : jeton MFA en cookie httpOnly (jamais exposé au JS)
   if (result.mfaRequise) {

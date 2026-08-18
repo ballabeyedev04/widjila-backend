@@ -331,6 +331,10 @@ class AuthService {
       return {
         success: false,
         message: 'Veuillez vérifier votre adresse email avant de vous connecter. Vérifiez votre boîte de réception.',
+        // Code stable pour que les clients (web/mobile) proposent un parcours
+        // dédié (ex : attente + nouvel essai automatique) sans analyser le
+        // texte de `message`, qui peut changer de formulation.
+        code: 'EMAIL_NON_VERIFIE',
       };
     }
 
