@@ -38,6 +38,9 @@ router.post(
 // (voir pagination.middleware.js — `?limit=500000` chargeait tout le chantier).
 router.get('/chantiers/:chantierId/plans', auth, checkActiveUser, checkSubscription, paginate(), planController.listerPlans);
 
+// Liste TRANSVERSALE (tous chantiers) — onglet « Plans » de premier niveau.
+router.get('/plans', auth, checkActiveUser, checkSubscription, planController.listerTousPlans);
+
 router.get('/plans/:id', auth, checkActiveUser, checkSubscription, planController.detailPlan);
 
 // ── Comparaison des versions d'un plan (module 4) ────────────────────────────

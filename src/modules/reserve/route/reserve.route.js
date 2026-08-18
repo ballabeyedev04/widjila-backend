@@ -43,6 +43,12 @@ router.post(
   reserveController.creerReserve
 );
 
+// Liste TRANSVERSALE (tous chantiers de l'organisation) — écran « Réserves »
+// de premier niveau côté mobile. Déclarée avant `/reserves/:id` par lisibilité :
+// les deux motifs ne se recouvrent pas (`:id` exige un segment), l'ordre n'est
+// donc pas fonctionnellement nécessaire ici.
+router.get('/reserves', auth, checkActiveUser, checkSubscription, paginate(), reserveController.listerToutesReserves);
+
 router.get('/reserves/:id', auth, checkActiveUser, checkSubscription, reserveController.detailReserve);
 
 router.put(

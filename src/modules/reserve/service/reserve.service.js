@@ -528,6 +528,60 @@ class ReserveService {
     return { success: true, reserves: rows, total: count };
   }
 
+  // -------------------- LISTER TOUTES LES RÉSERVES DE L'ORGANISATION --------------------
+  /**
+   * Liste transversale (tous chantiers confondus) — alimente l'onglet
+   * « Réserves » du mobile, qui est un écran de premier niveau et non un
+   * sous-écran de chantier. `listReserves` ci-dessus reste la liste
+   * PAR chantier : les deux coexistent, elles ne répondent pas à la même
+   * question.
+   *
+   * L'isolation multi-tenant passe par un `include` OBLIGATOIRE sur Chantier
+   * filtré par `organisationId` (`required: true`) — jamais par un
+   * `chantierId` fourni par le client, qui ne prouve rien.
+   */
+  static async listToutesReserves(organisationId, {
+    page = 1, limit = 20, statut, severite, priorite, chantierId, entrepriseId, assigneA, search,
+  } = {}) {
+    const where = {};
+    if (statut) where.statut = statut;
+    if (severite) where.severite = severite;
+    if (priorite) where.priorite = priorite;
+    if (chantierId) where.chantierId = chantierId;
+    if (entrepriseId) where.entrepriseId = entrepriseId;
+    if (assigneA) where.assigneA = assigneA;
+    if (search) {
+      const motif = `%${escapeLike(search)}%`;
+      where[Op.or] = [
+        { titre: { [Op.iLike]: motif } },
+        { description: { [Op.iLike]: motif } },
+        { numero: { [Op.iLike]: motif } },
+      ];
+    }
+
+    const { rows, count } = await Reserve.findAndCountAll({
+      where,
+      include: [
+        { model: Chantier, as: 'chantier', where: { organisationId }, required: true, attributes: ['id', 'nom', 'code'] },
+        { model: Batiment, as: 'batiment', attributes: ['id', 'nom'] },
+        { model: Etage, as: 'etage', attributes: ['id', 'nom'] },
+        { model: Zone, as: 'zone', attributes: ['id', 'nom'] },
+        { model: Lot, as: 'lot', attributes: ['id', 'nom'] },
+        { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
+        { model: Utilisateur, as: 'assigne', attributes: ['id', 'nom', 'prenom', 'photoProfil'] },
+        // Même parti pris que `listReserves` : une seule vignette, pas la
+        // galerie (voir le commentaire `separate: true` plus haut).
+        { model: Media, as: 'medias', attributes: ['id', 'type', 'url', 'thumbnail_url'], separate: true, limit: 1, order: [['createdAt', 'ASC']] },
+      ],
+      order: [['createdAt', 'DESC']],
+      limit,
+      offset: (page - 1) * limit,
+      distinct: true,
+    });
+
+    return { success: true, reserves: rows, total: count };
+  }
+
   // -------------------- DÉTAIL D'UNE RÉSERVE --------------------
   static async getReserve(reserveId, organisationId) {
     const reserve = await Reserve.findByPk(reserveId, {

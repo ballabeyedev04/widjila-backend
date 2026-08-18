@@ -17,6 +17,12 @@ exports.listerPlans = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: 'Plans récupérés', data: { plans: result.plans } });
 });
 
+exports.listerTousPlans = asyncHandler(async (req, res) => {
+  const result = await PlanService.listTousPlans(req.user.organisationId, req.query);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: 'Plans récupérés', data: { plans: result.plans } });
+});
+
 exports.detailPlan = asyncHandler(async (req, res) => {
   const result = await PlanService.getPlan(req.params.id, req.user.organisationId);
   if (!result.success) throw new NotFoundError(result.message);

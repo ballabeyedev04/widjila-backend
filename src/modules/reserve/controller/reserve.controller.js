@@ -20,6 +20,16 @@ exports.listerReserves = asyncHandler(async (req, res) => {
   });
 });
 
+exports.listerToutesReserves = asyncHandler(async (req, res) => {
+  const result = await ReserveService.listToutesReserves(req.user.organisationId, req.query);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({
+    success: true,
+    message: 'Réserves récupérées',
+    data: { reserves: result.reserves, total: result.total },
+  });
+});
+
 exports.detailReserve = asyncHandler(async (req, res) => {
   const result = await ReserveService.getReserve(req.params.id, req.user.organisationId);
   if (!result.success) throw new NotFoundError(result.message);

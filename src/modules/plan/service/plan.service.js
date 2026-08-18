@@ -1,7 +1,7 @@
 'use strict';
 
 const { QueryTypes, UniqueConstraintError } = require('sequelize');
-const { Plan, Chantier, Annotation } = require('../../../models/index.js');
+const { Plan, Chantier, Annotation, Reserve, ReservePosition, Media } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
@@ -138,6 +138,39 @@ class PlanService {
     return { success: true, plans };
   }
 
+  // -------------------- LISTER TOUS LES PLANS DE L'ORGANISATION --------------------
+  /**
+   * Liste transversale (tous chantiers confondus) — alimente l'onglet « Plans »
+   * du mobile, écran de premier niveau. Ne renvoie que la DERNIÈRE version de
+   * chaque plan : un utilisateur qui ouvre « Plans » cherche le document
+   * courant, pas l'historique des révisions (celui-ci reste accessible par
+   * `listVersions`). Le tri par (nom, version DESC) puis le dédoublonnage sur
+   * (chantierId, nom) suffit — pas de sous-requête à écrire.
+   */
+  static async listTousPlans(organisationId, { chantierId } = {}) {
+    const where = {};
+    if (chantierId) where.chantierId = chantierId;
+
+    const plans = await Plan.findAll({
+      where,
+      include: [
+        // `required: true` : c'est CE filtre qui porte l'isolation multi-tenant.
+        { model: Chantier, as: 'chantier', where: { organisationId }, required: true, attributes: ['id', 'nom', 'code'] },
+      ],
+      order: [['nom', 'ASC'], ['version', 'DESC']],
+    });
+
+    const vus = new Set();
+    const derniereVersion = plans.filter((p) => {
+      const cle = `${p.chantierId}:${p.nom}`;
+      if (vus.has(cle)) return false;
+      vus.add(cle);
+      return true;
+    });
+
+    return { success: true, plans: derniereVersion };
+  }
+
   // -------------------- LISTER LES VERSIONS D'UN PLAN --------------------
   /**
    * Retourne toutes les versions d'un même plan (comparaison des versions).
@@ -157,6 +190,18 @@ class PlanService {
   }
 
   // -------------------- DÉTAIL D'UN PLAN --------------------
+  /**
+   * Le détail sert à AFFICHER le plan avec ses repères : les réserves posées
+   * dessus sont donc jointes ici, avec leur position (x, y). Sans elles, le
+   * client devrait lister toutes les réserves du chantier puis filtrer sur
+   * `planId` côté mobile — un aller-retour inutile et une liste bien plus
+   * lourde que nécessaire.
+   *
+   * `ReservePosition` est en `required: false` : une réserve peut être
+   * rattachée à un plan sans coordonnées (créée depuis la liste et non depuis
+   * le plan). Elle est renvoyée quand même — c'est au client de décider s'il
+   * l'affiche comme repère ou seulement dans la liste latérale.
+   */
   static async getPlan(planId, organisationId) {
     const plan = await Plan.findByPk(planId, {
       include: [
@@ -167,6 +212,18 @@ class PlanService {
     if (!plan || !plan.chantier) {
       return { success: false, message: 'Plan introuvable dans cette organisation' };
     }
+
+    const reserves = await Reserve.findAll({
+      where: { planId },
+      attributes: ['id', 'numero', 'titre', 'statut', 'severite'],
+      include: [
+        { model: ReservePosition, as: 'position', required: false },
+        { model: Media, as: 'medias', attributes: ['id', 'url', 'thumbnail_url'], separate: true, limit: 1, order: [['createdAt', 'ASC']] },
+      ],
+      order: [['numero', 'ASC']],
+    });
+    plan.dataValues.reserves = reserves;
+
     return { success: true, plan };
   }
 
