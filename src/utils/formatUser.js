@@ -26,6 +26,7 @@ const SAFE_USER_ATTRIBUTES = [
   'dernierConnexion',
   'email_verifie',
   'mdp_temporaire',
+  'mfa_active',
   'createdAt',
   'updatedAt',
 ];
@@ -46,6 +47,7 @@ const formatUser = (utilisateur) => ({
   dernierConnexion: utilisateur.dernierConnexion,
   email_verifie: utilisateur.email_verifie,
   mdp_temporaire: utilisateur.mdp_temporaire,
+  mfaActive: utilisateur.mfa_active,
 });
 
 module.exports = formatUser;

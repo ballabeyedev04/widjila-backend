@@ -12,6 +12,12 @@ const NotificationService = require('../../notification/service/notification.ser
 const escapeLike = require('../../../utils/escapeLike.js');
 const { PILOTAGE } = require('../../../config/roles.js');
 
+// ─── Statuts que le sous-traitant peut lui-même déclarer ───────────────────────
+// Il ne peut ni affecter (déjà fait par un rôle de pilotage), ni prononcer de
+// verdict (bloqué plus bas par STATUTS_CONTROLE), ni rouvrir. Seule sa propre
+// progression sur SA réserve assignée : accusé de réception, démarrage, fin.
+const STATUTS_SOUS_TRAITANT = ['prise_en_charge', 'en_cours', 'corrigee'];
+
 // ─── Transitions relevant du contrôle qualité ─────────────────────────────────
 // Le cahier des charges (tableau RBAC) réserve « Valider une réserve » à
 // l'administrateur et au chef de projet — et l'exclut explicitement à
@@ -33,17 +39,21 @@ const STATUTS_CONTROLE = ['validee', 'refusee', 'cloturee', 'rouverte'];
 // creee → affectee → en_cours → corrigee → a_verifier → validee / refusee
 //       → (rouverte) → cloturee
 const TRANSITIONS = {
-  creee:      ['affectee', 'en_cours', 'rouverte'],
-  affectee:   ['en_cours', 'corrigee', 'rouverte'],
-  en_cours:   ['corrigee', 'a_verifier', 'rouverte'],
-  corrigee:   ['a_verifier', 'validee', 'refusee', 'rouverte'],
-  a_verifier: ['validee', 'refusee', 'en_cours', 'rouverte'],
-  validee:    ['cloturee', 'rouverte'],
-  refusee:    ['en_cours', 'corrigee', 'rouverte'],
-  rouverte:   ['affectee', 'en_cours', 'corrigee', 'a_verifier'],
+  creee:           ['affectee', 'en_cours', 'rouverte'],
+  // `prise_en_charge` : étape optionnelle (accusé de réception du sous-traitant).
+  // `affectee → en_cours`/`corrigee` restent légaux pour les rôles qui ne
+  // l'utilisent pas — voir le commentaire de classe dans reserve.model.js.
+  affectee:        ['prise_en_charge', 'en_cours', 'corrigee', 'rouverte'],
+  prise_en_charge: ['en_cours', 'corrigee', 'rouverte'],
+  en_cours:        ['corrigee', 'a_verifier', 'rouverte'],
+  corrigee:        ['a_verifier', 'validee', 'refusee', 'rouverte'],
+  a_verifier:      ['validee', 'refusee', 'en_cours', 'rouverte'],
+  validee:         ['cloturee', 'rouverte'],
+  refusee:         ['en_cours', 'corrigee', 'rouverte'],
+  rouverte:        ['affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier'],
   // Positionné automatiquement par le job (module 5) ; reprise du cycle normal
-  en_retard:  ['affectee', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte'],
-  cloturee:   [],
+  en_retard:       ['affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte'],
+  cloturee:        [],
 };
 
 // Statuts figés : la réserve a reçu son verdict, elle n'est plus modifiable
@@ -226,6 +236,26 @@ class ReserveService {
     const chantier = await Chantier.findOne({ where: { id: data.chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
+    // IDEMPOTENCE (mode hors ligne du mobile) : le client fournit l'id, et
+    // peut renvoyer la meme creation si la reponse s'est perdue en route
+    // (reseau coupe juste apres l'ecriture serveur). Rejouer doit alors etre
+    // SANS EFFET et repondre succes, sinon la file d'attente du mobile
+    // resterait bloquee sur une erreur de doublon indepassable.
+    if (data.id) {
+      const existante = await Reserve.findOne({
+        where: { id: data.id },
+        include: [{ model: Chantier, as: 'chantier', attributes: ['organisationId'] }],
+      });
+      if (existante) {
+        // Ne jamais confirmer une reserve d'une AUTRE organisation : un id
+        // devine ne doit pas devenir une fuite d'information.
+        if (existante.chantier?.organisationId !== organisationId) {
+          return { success: false, message: 'Identifiant de reserve deja utilise' };
+        }
+        return { success: true, message: 'Reserve deja enregistree', reserve: existante, rejeu: true };
+      }
+    }
+
     const erreurRef = await ReserveService._verifierReferences(organisationId, data);
     if (erreurRef) return { success: false, message: erreurRef };
 
@@ -242,6 +272,9 @@ class ReserveService {
         const numero = await ReserveService._prochainNumero(data.chantierId, t);
 
         const creee = await Reserve.create({
+          // `undefined` (et non `null`) quand le client n'en fournit pas :
+          // Sequelize applique alors son `defaultValue: UUIDV4`.
+          id: data.id || undefined,
           numero,
           chantierId: data.chantierId,
           batimentId: data.batimentId || null,
@@ -736,6 +769,23 @@ class ReserveService {
         success: false,
         message: 'Votre rôle ne permet pas de valider, refuser, rouvrir ou clôturer une réserve. Déclarez la correction, un contrôleur la vérifiera.',
       };
+    }
+
+    // Le sous-traitant ne peut agir QUE sur la réserve qui lui est assignée
+    // (affectation principale ou secondaire), et seulement pour déclarer sa
+    // propre progression — jamais pour ré-affecter ni rouvrir.
+    if (role === 'SousTraitant') {
+      if (!STATUTS_SOUS_TRAITANT.includes(statut)) {
+        return {
+          success: false,
+          message: 'En tant que sous-traitant, vous pouvez uniquement prendre en charge, démarrer ou déclarer terminée une réserve qui vous est assignée.',
+        };
+      }
+      const estAssigne = reserve.assigneA === utilisateurId ||
+        (await ReserveAffectation.count({ where: { reserveId: reserve.id, utilisateurId } })) > 0;
+      if (!estAssigne) {
+        return { success: false, message: 'Cette réserve ne vous est pas assignée.' };
+      }
     }
 
     const statutsAutorises = TRANSITIONS[reserve.statut] || [];

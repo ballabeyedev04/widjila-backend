@@ -13,7 +13,7 @@ const checkSubscription = require('../../../middlewares/checkSubscription.middle
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const { mutationRateLimit } = require('../../../middlewares/rateLimit.middleware.js');
-const { OPERATIONNEL, OPERATIONNEL_CONTROLE, RESERVE_INTERVENANTS } = require('../../../config/roles.js');
+const { OPERATIONNEL, OPERATIONNEL_CONTROLE, RESERVE_INTERVENANTS, SOUS_TRAITANT } = require('../../../config/roles.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const {
   creerReserveSchema, modifierReserveSchema, changerStatutReserveSchema, ajouterCommentaireSchema,
@@ -66,7 +66,10 @@ router.patch(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole(...RESERVE_INTERVENANTS),
+  // SousTraitant ajouté ici (route-level, grossier) : la restriction fine —
+  // statuts autorisés + réserve réellement assignée — vit dans
+  // ReserveService.changerStatut, qui reçoit déjà `role`.
+  requireRole(...RESERVE_INTERVENANTS, ...SOUS_TRAITANT),
   validate(changerStatutReserveSchema),
   reserveController.changerStatut
 );
@@ -214,7 +217,9 @@ router.post(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole(...RESERVE_INTERVENANTS),
+  // SousTraitant ajouté ici aussi : il doit pouvoir photographier ses
+  // corrections (preuves avant/après), même sans droit de création/affectation.
+  requireRole(...RESERVE_INTERVENANTS, ...SOUS_TRAITANT),
   upload.media.single('fichier'),
   upload.validateMagicBytes,
   mediaController.ajouterMedia

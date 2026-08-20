@@ -8,7 +8,7 @@ const { Utilisateur, Organisation, RefreshToken, MfaChallenge } = require('../..
 const { jwtConfig, bcryptConfig } = require('../../../config/security.js');
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
-const { sendWelcomeEmail, sendVerificationEmail } = require('../../../infrastructure/emailService.js');
+const { sendVerificationEmail } = require('../../../infrastructure/emailService.js');
 const { journaliserConnexion } = require('./connexionLog.service.js');
 const MfaService = require('./mfa.service.js');
 
@@ -149,14 +149,15 @@ class AuthService {
 
     // L'inscription crée TOUJOURS une organisation (organisationNom est requis
     // ci-dessous) : son premier utilisateur en est donc l'administrateur.
-    // Il reçoit 'ChefProjet', seul rôle du groupe GESTION accessible hors
-    // super-admin — sans quoi il obtiendrait un 403 sur la gestion des membres,
-    // des équipes et de sa propre organisation.
+    //
+    // Il reçoit 'Entreprise' — le rôle de celui qui s'inscrit spontanément sur
+    // la plateforme. Ce rôle n'appartient PAS au groupe GESTION : tel quel, le
+    // compte ne peut pas administrer sa propre organisation. C'est voulu : le
+    // rôle définitif est arbitré par le super-admin au moment de valider la
+    // demande (voir demandeInscription.service.js), qui peut le laisser à
+    // 'Entreprise' ou le promouvoir en 'ChefProjet'.
     // Le rôle 'Admin' reste réservé au super-admin plateforme.
-    // Les autres rôles (ConducteurTravaux, BureauControle, MaitreOuvrage,
-    // MaitreOeuvre, Entreprise, Client) sont attribués ensuite par cet
-    // administrateur depuis l'écran Membres.
-    const role = 'ChefProjet';
+    const role = 'Entreprise';
 
     if (!organisationNom) {
       return { success: false, message: "Le nom de l'organisation est obligatoire à l'inscription" };
@@ -210,22 +211,33 @@ class AuthService {
         fonction: fonction || null,
         role,
         permissions: ['all'],
-        statut: 'actif',
+        // L'inscription publique ne donne pas un compte utilisable : elle
+        // dépose une DEMANDE. Statut bloquant jusqu'à la décision du
+        // super-admin (voir login() et checkActiveUser.middleware.js).
+        statut: 'en_attente_validation',
       }, { transaction: t });
 
       await t.commit();
 
-      // Emails best-effort (ne bloquent pas l'inscription) : bienvenue + lien
-      // de vérification d'email (anti création de comptes usurpés — audit M5).
-      sendWelcomeEmail({ to: emailClean, nom, prenom }).catch((err) =>
-        logger.warn('[email] Bienvenue non envoyé :', err.message)
-      );
+      // Email best-effort (ne bloque pas l'inscription) : lien de vérification
+      // d'adresse (anti création de comptes usurpés — audit M5).
+      //
+      // L'email « Bienvenue » n'est PLUS envoyé ici : il annonçait un compte
+      // prêt à l'emploi alors que la connexion est désormais bloquée jusqu'à
+      // la validation du super-admin. C'est l'email d'activation
+      // (sendInscriptionValideeEmail) qui joue ce rôle, au bon moment.
       const verifToken = AuthService._genererTokenVerificationEmail(utilisateur);
       sendVerificationEmail({ to: emailClean, nom, prenom, token: verifToken }).catch((err) =>
         logger.warn('[email] Vérification email non envoyée :', err.message)
       );
 
-      return { success: true, message: 'Inscription réussie', utilisateur, organisation };
+      return {
+        success: true,
+        message: "Demande d'inscription enregistrée. Votre compte sera actif dès qu'un administrateur l'aura validé — vous recevrez un email.",
+        enAttenteValidation: true,
+        utilisateur,
+        organisation,
+      };
 
     } catch (err) {
       await t.rollback();
@@ -325,6 +337,31 @@ class AuthService {
 
     // Mot de passe valide → réinitialiser le compteur d'échecs
     await utilisateur.update({ tentatives_connexion: 0, compte_bloque_jusqua: null });
+
+    // Demande d'inscription non encore tranchée par le super-admin.
+    // Ce contrôle est volontairement placé APRÈS la vérification du mot de
+    // passe : le placer avant révélerait l'état d'un compte à quiconque
+    // connaît l'adresse email, sans avoir à prouver quoi que ce soit
+    // (énumération). Même parti pris que le contrôle d'email vérifié ci-dessous.
+    if (utilisateur.statut === 'en_attente_validation') {
+      return {
+        success: false,
+        message: "Votre demande d'inscription est en cours d'examen. Vous recevrez un email dès qu'un administrateur l'aura validée.",
+        code: 'COMPTE_EN_ATTENTE',
+      };
+    }
+
+    if (utilisateur.statut === 'rejete') {
+      return {
+        success: false,
+        // Le motif a déjà été envoyé par email ; le rappeler ici évite à
+        // l'utilisateur d'aller le rechercher pour comprendre le blocage.
+        message: utilisateur.motif_rejet
+          ? `Votre demande d'inscription a été refusée. Motif : ${utilisateur.motif_rejet}`
+          : "Votre demande d'inscription a été refusée.",
+        code: 'COMPTE_REJETE',
+      };
+    }
 
     // Vérification d'email requise avant la première connexion ? (audit M5)
     if (_exigerVerificationEmail() && !utilisateur.email_verifie) {
@@ -462,7 +499,12 @@ class AuthService {
     // 3. Charger l'utilisateur
     const utilisateur = await Utilisateur.findByPk(decoded.id);
     if (!utilisateur) return { success: false, message: 'Utilisateur introuvable' };
-    if (utilisateur.statut === 'inactif') return { success: false, message: 'Compte inactif' };
+    // Tout statut autre qu'« actif » coupe la session : sans ce contrôle, un
+    // compte rejeté ou remis en attente garderait un accès valide jusqu'à
+    // l'expiration naturelle de son refresh token.
+    if (utilisateur.statut !== 'actif') {
+      return { success: false, message: 'Compte non actif' };
+    }
 
     // 4. Rotation : révoquer l'ancien token, émettre un nouveau couple
     const t = await sequelize.transaction();

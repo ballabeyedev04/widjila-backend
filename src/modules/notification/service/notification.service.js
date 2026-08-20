@@ -2,13 +2,23 @@
 
 const { Notification, Utilisateur, DeviceToken, Chantier, ChantierMembre } = require('../../../models/index.js');
 const logger = require('../../../utils/logger.js');
+const { getMessaging } = require('../../../config/firebase.js');
 
 /**
  * Notification in-app — utilisée par les services métier pour informer
  * les intervenants (nouvelle réserve, changement de statut, échéance…).
  *
- * Push FCM : non activé dans cette version (firebase-admin non installé).
- * Pour l'activer : installer firebase-admin et définir FIREBASE_SERVICE_ACCOUNT_JSON.
+ * Deux canaux, toujours dans cet ordre :
+ *   1. la notification IN-APP, écrite en base — c'est la source de vérité,
+ *      consultable à tout moment depuis l'écran Notifications ;
+ *   2. le PUSH FCM, best-effort — il prévient l'utilisateur téléphone
+ *      verrouillé. S'il échoue (Firebase non configuré, jeton périmé, panne
+ *      réseau), la notification reste en base et l'appelant n'en sait rien.
+ *
+ * Le push n'est JAMAIS bloquant : une réserve doit pouvoir être affectée
+ * même si Google est injoignable.
+ *
+ * Configuration : voir `config/firebase.js` (FIREBASE_SERVICE_ACCOUNT_JSON).
  */
 class NotificationService {
 
@@ -22,7 +32,13 @@ class NotificationService {
       await Notification.create({ utilisateurId, type, titre, message, donnees });
     } catch (err) {
       logger.warn(`[notification] Échec création notif ${type} pour ${utilisateurId} :`, err.message);
+      return; // Rien en base : inutile de pousser une alerte introuvable dans l'app.
     }
+
+    // Volontairement NON attendu : le push ne doit pas retarder l'action
+    // métier qui l'a déclenchée (affectation d'une réserve, changement de
+    // statut…). Les erreurs sont absorbées par sendPush lui-même.
+    NotificationService.sendPush([utilisateurId], { type, titre, message, donnees });
   }
 
   /**
@@ -49,6 +65,8 @@ class NotificationService {
       })),
       { validate: true } // parité avec Notification.create() : bulkCreate ne valide pas par défaut
     );
+
+    NotificationService.sendPush(membres.map((m) => m.id), payload);
     return { success: true, total: membres.length };
   }
 
@@ -75,6 +93,8 @@ class NotificationService {
       })),
       { validate: true }
     );
+
+    NotificationService.sendPush(idsUniques, payload);
     return { success: true, total: idsUniques.length };
   }
 
@@ -127,10 +147,116 @@ class NotificationService {
     return { success: true };
   }
 
-  // -------------------- ENVOYER UN PUSH (préparé, désactivé sans firebase-admin) --------------------
+  /**
+   * Oublie un jeton à la déconnexion. Le filtre porte sur l'utilisateur ET le
+   * jeton : sans le premier, n'importe quel compte authentifié pourrait
+   * désabonner l'appareil d'un autre en devinant son jeton.
+   */
+  static async supprimerDeviceToken(utilisateurId, token) {
+    if (!token) return { success: true };
+    await DeviceToken.destroy({ where: { utilisateurId, token } });
+    return { success: true };
+  }
+
+  // -------------------- ENVOYER UN PUSH --------------------
+  /**
+   * Pousse une alerte FCM vers tous les appareils des utilisateurs visés.
+   *
+   * Best-effort intégral : aucune exception ne remonte à l'appelant. Un push
+   * perdu est un désagrément, une action métier annulée parce que Google a
+   * eu un hoquet serait une faute.
+   *
+   * Le message porte un bloc `notification` ET un bloc `data` :
+   *   - `notification` est ce qui permet au SYSTÈME d'afficher l'alerte quand
+   *     l'application est en arrière-plan ou fermée — sans lui, rien ne
+   *     s'affiche téléphone verrouillé ;
+   *   - `data` transporte le type et les identifiants métier, pour que
+   *     l'ouverture de l'alerte mène au bon écran.
+   *
+   * @param {string[]} utilisateurIds
+   * @param {{ type: string, titre: string, message?: string|null, donnees?: object|null }} payload
+   */
   static async sendPush(utilisateurIds, payload) {
-    // Voir commentaire en tête de fichier — FCM non activé dans cette version.
-    logger.info(`[push] (désactivé) notification différée vers ${utilisateurIds} : ${payload.title}`);
+    try {
+      const messaging = getMessaging();
+      if (!messaging) return; // Firebase non configuré — déjà journalisé au démarrage.
+
+      const ids = [...new Set((utilisateurIds || []).filter(Boolean))];
+      if (ids.length === 0) return;
+
+      const appareils = await DeviceToken.findAll({
+        where: { utilisateurId: ids },
+        attributes: ['token'],
+      });
+      const jetons = [...new Set(appareils.map((a) => a.token).filter(Boolean))];
+      if (jetons.length === 0) return;
+
+      // FCM plafonne un envoi multicast à 500 destinataires.
+      const lots = [];
+      for (let i = 0; i < jetons.length; i += 500) lots.push(jetons.slice(i, i + 500));
+
+      for (const lot of lots) {
+        const reponse = await messaging.sendEachForMulticast({
+          tokens: lot,
+          notification: {
+            title: payload.titre,
+            body: payload.message || '',
+          },
+          data: {
+            // FCM n'accepte que des chaînes dans `data`.
+            type: String(payload.type ?? ''),
+            donnees: payload.donnees ? JSON.stringify(payload.donnees) : '',
+          },
+          android: {
+            priority: 'high',
+            notification: {
+              // Doit correspondre au canal créé côté mobile
+              // (`push_service.dart`) : un identifiant inconnu et Android
+              // retombe sur un canal par défaut sans son ni vibration.
+              channelId: 'suivi_chantier_alertes',
+              icon: 'ic_notification',
+              color: '#F2600C',
+              defaultSound: true,
+            },
+          },
+          apns: {
+            payload: {
+              aps: { sound: 'default', badge: 1, 'mutable-content': 1 },
+            },
+          },
+        });
+
+        await NotificationService._purgerJetonsInvalides(lot, reponse);
+      }
+    } catch (err) {
+      logger.warn('[push] Envoi impossible :', err.message);
+    }
+  }
+
+  /**
+   * Supprime les jetons que FCM déclare morts.
+   *
+   * Sans ce ménage, la table enfle à chaque réinstallation d'application et
+   * chaque envoi traîne des destinataires fantômes — jusqu'à dépasser les
+   * quotas pour rien. Seules ces deux erreurs signifient « ce jeton n'existe
+   * plus » ; les autres (panne, quota) sont temporaires et ne doivent surtout
+   * pas provoquer de suppression.
+   */
+  static async _purgerJetonsInvalides(jetons, reponse) {
+    const morts = [];
+    reponse.responses.forEach((resultat, i) => {
+      const code = resultat.error?.code;
+      if (
+        code === 'messaging/registration-token-not-registered' ||
+        code === 'messaging/invalid-registration-token'
+      ) {
+        morts.push(jetons[i]);
+      }
+    });
+
+    if (morts.length === 0) return;
+    await DeviceToken.destroy({ where: { token: morts } });
+    logger.info(`[push] ${morts.length} jeton(s) périmé(s) supprimé(s)`);
   }
 }
 

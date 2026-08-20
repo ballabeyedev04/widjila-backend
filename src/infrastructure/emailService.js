@@ -103,4 +103,40 @@ async function sendVerificationEmail({ to, nom, prenom, token }) {
   });
 }
 
-module.exports = { sendEmail, sendOtpEmail, sendWelcomeEmail, sendVerificationEmail };
+/**
+ * Email — demande d'inscription validée par le super-admin.
+ * Le lien pointe vers l'écran de connexion de l'admin web : le compte est
+ * actif, l'utilisateur n'a plus qu'à s'y rendre.
+ */
+async function sendInscriptionValideeEmail({ to, nom, prenom, organisationNom }) {
+  const template = require('../templates/mail/inscriptionValidee.template.js');
+  const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+  return sendEmail({
+    to,
+    subject: 'Votre compte SuivieChantier est activé',
+    html: template({ nom, prenom, organisationNom, lien: `${frontendUrl}/login` }),
+  });
+}
+
+/**
+ * Email — demande d'inscription rejetée. `motif` est saisi par l'admin et
+ * constitue la seule explication reçue par le demandeur : il est obligatoire
+ * en amont (voir demandeInscription.validation.js).
+ */
+async function sendInscriptionRejeteeEmail({ to, nom, prenom, motif, organisationNom }) {
+  const template = require('../templates/mail/inscriptionRejetee.template.js');
+  return sendEmail({
+    to,
+    subject: "Suite à votre demande d'inscription — SuivieChantier",
+    html: template({ nom, prenom, motif, organisationNom }),
+  });
+}
+
+module.exports = {
+  sendEmail,
+  sendOtpEmail,
+  sendWelcomeEmail,
+  sendVerificationEmail,
+  sendInscriptionValideeEmail,
+  sendInscriptionRejeteeEmail,
+};

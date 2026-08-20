@@ -19,11 +19,11 @@ const adresse = Joi.string().trim().max(200);
 const uuid = Joi.string().guid({ version: 'uuidv4' });
 
 // Rôles métier (cahier des charges, section Acteurs)
-const ROLE_UTILISATEUR = ['Admin', 'ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre'];
+const ROLE_UTILISATEUR = ['Admin', 'ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre', 'Pilote', 'SousTraitant'];
 const role = Joi.string().valid(...ROLE_UTILISATEUR);
 
 // Statuts
-const STATUT_RESERVE = ['creee', 'affectee', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte', 'en_retard', 'cloturee'];
+const STATUT_RESERVE = ['creee', 'affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte', 'en_retard', 'cloturee'];
 const STATUT_CHANTIER = ['en_preparation', 'en_cours', 'en_pause', 'archive', 'cloture'];
 const SEVERITE_PRIORITE = ['faible', 'moyenne', 'haute', 'critique'];
 

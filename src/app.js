@@ -187,6 +187,7 @@ const adminUtilisateurRoutes = require('./modules/admin/route/gestionUtilisateur
 const adminOrganisationRoutes = require('./modules/admin/route/gestionOrganisation.route.js');
 const adminStatistiquesRoutes = require('./modules/admin/route/statistiques.route.js');
 const adminAuditLogRoutes     = require('./modules/admin/route/auditLog.route.js');
+const adminDemandeRoutes      = require('./modules/admin/route/demandeInscription.route.js');
 const subscriptionRoutes = require('./modules/subscription/route/subscription.route.js');
 const paytechRoutes = require('./modules/paytech/route/paytech.route.js');
 
@@ -234,6 +235,7 @@ app.use('/api/v1/admin/utilisateurs',  adminUtilisateurRoutes);
 app.use('/api/v1/admin/organisations', adminOrganisationRoutes);
 app.use('/api/v1/admin/statistiques',  adminStatistiquesRoutes);
 app.use('/api/v1/admin/audit-logs',    adminAuditLogRoutes);
+app.use('/api/v1/admin/demandes-inscription', adminDemandeRoutes);
 
 // ── 404 — route inconnue ───────────────────────────────────────────────────
 app.use((req, res) => {

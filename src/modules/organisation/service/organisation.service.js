@@ -13,11 +13,11 @@ const escapeLike = require('../../../utils/escapeLike.js');
 const { GESTION } = require('../../../config/roles.js');
 
 // Rôles autorisés pour les contacts importés (jamais 'Admin')
-const ROLES_IMPORT = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre'];
+const ROLES_IMPORT = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre', 'Pilote', 'SousTraitant'];
 
 // Rôles qu'un membre peut attribuer/modifier au sein de son organisation
 // (le rôle 'Admin' = super-admin plateforme, jamais assignable ici).
-const ROLES_ORGANISATION = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre'];
+const ROLES_ORGANISATION = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre', 'Pilote', 'SousTraitant'];
 
 class OrganisationService {
 

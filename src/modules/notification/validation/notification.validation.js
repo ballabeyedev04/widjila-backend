@@ -22,4 +22,21 @@ const broadcastSchema = Joi.object({
   donnees: Joi.any().optional(),
 });
 
-module.exports = { notifierUtilisateurSchema, marquerLuesSchema, broadcastSchema };
+// Un jeton FCM fait ~160 caractères mais Google n'en garantit pas la longueur.
+// Les bornes protègent la colonne et évitent qu'un client n'envoie un pavé.
+const deviceTokenSchema = Joi.object({
+  token: Joi.string().trim().min(20).max(512).required(),
+  platform: Joi.string().valid('android', 'ios', 'web').optional(),
+});
+
+const supprimerDeviceTokenSchema = Joi.object({
+  token: Joi.string().trim().min(20).max(512).required(),
+});
+
+module.exports = {
+  notifierUtilisateurSchema,
+  marquerLuesSchema,
+  broadcastSchema,
+  deviceTokenSchema,
+  supprimerDeviceTokenSchema,
+};

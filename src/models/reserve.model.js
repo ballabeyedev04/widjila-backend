@@ -3,8 +3,11 @@ const sequelize = require('../config/db.js');
 
 /**
  * Réserve — la table centrale du produit (voir cahier des charges, module 5).
- * Cycle de vie : creee → affectee → en_cours → corrigee → a_verifier →
- *               validee / refusee → (rouverte) → cloturee.
+ * Cycle de vie : creee → affectee → (prise_en_charge) → en_cours → corrigee →
+ *               a_verifier → validee / refusee → (rouverte) → cloturee.
+ * `prise_en_charge` : le sous-traitant accuse réception de la réserve avant
+ * de démarrer — étape optionnelle, `affectee → en_cours` reste légal pour les
+ * autres rôles qui ne l'utilisent pas.
  *
  * Règles métier importantes :
  *   - une réserve ne peut être validée qu'avec des preuves de correction ;
@@ -76,7 +79,7 @@ const Reserve = sequelize.define('Reserve', {
     defaultValue: 'autre'
   },
   statut: {
-    type: DataTypes.ENUM('creee', 'affectee', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte', 'en_retard', 'cloturee'),
+    type: DataTypes.ENUM('creee', 'affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte', 'en_retard', 'cloturee'),
     allowNull: false,
     defaultValue: 'creee'
   },

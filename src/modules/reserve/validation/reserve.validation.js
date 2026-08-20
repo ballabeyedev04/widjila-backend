@@ -4,6 +4,16 @@ const Joi = require('joi');
 const { uuid, SEVERITE_PRIORITE, STATUT_RESERVE } = require('../../../validations/common.js');
 
 const creerReserveSchema = Joi.object({
+  // Identifiant fourni par le CLIENT (mode hors ligne du mobile).
+  //
+  // Une reserve creee au sous-sol, sans reseau, doit pouvoir etre referencee
+  // immediatement (photo attachee, changement de statut) avant meme d'avoir
+  // ete envoyee. Laisser le serveur generer l'id imposerait de remapper apres
+  // coup toutes les actions en attente qui la referencent.
+  //
+  // Absent = comportement historique (le serveur genere l'UUID) : l'admin web
+  // n'a pas besoin de ce mecanisme.
+  id: uuid.optional(),
   chantierId: uuid.required(),
   batimentId: uuid.optional().allow(null),
   etageId: uuid.optional().allow(null),

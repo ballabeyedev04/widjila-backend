@@ -51,15 +51,33 @@ const User = sequelize.define('User', {
   },
   // Rôles métier — voir cahier des charges, section "Acteurs"
   role: {
-    type: DataTypes.ENUM('Admin', 'ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre'),
+    type: DataTypes.ENUM('Admin', 'ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre', 'Pilote', 'SousTraitant'),
     defaultValue: 'ConducteurTravaux',
     allowNull: false
   },
-  // 'en_attente_validation' : compte créé par un admin, en attente d'activation.
-  // Ce statut n'impose AUCUNE restriction d'accès — seul 'inactif' bloque.
+  // 'en_attente_validation' : demande d'inscription déposée, en attente de la
+  // décision du super-admin. BLOQUANT — le compte ne peut ni se connecter ni
+  // rafraîchir ses jetons tant qu'il n'est pas validé.
+  // 'rejete' : demande refusée, motif dans `motif_rejet`. Bloquant aussi.
+  // 'inactif' : compte désactivé après coup. Bloquant.
   statut: {
-    type: DataTypes.ENUM('actif', 'inactif', 'en_attente_validation'),
+    type: DataTypes.ENUM('actif', 'inactif', 'en_attente_validation', 'rejete'),
     defaultValue: 'actif'
+  },
+  // Motif du rejet d'une demande d'inscription — repris tel quel dans l'email
+  // envoyé au demandeur, c'est sa seule explication.
+  motif_rejet: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+  },
+  // Qui a tranché la demande, et quand.
+  valide_par: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
+  valide_le: {
+    type: DataTypes.DATE,
+    allowNull: true,
   },
   // Permissions fines accordées à un administrateur (ex: ['chantiers','reserves']).
   // ['all'] = accès total (super-admin). null / [] = compte restreint.

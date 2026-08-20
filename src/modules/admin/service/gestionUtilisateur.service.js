@@ -82,7 +82,12 @@ class GestionUtilisateurService {
       telephone: data.telephone || null,
       fonction: data.fonction || null,
       role: data.role || 'ConducteurTravaux',
-      statut: data.statut || 'en_attente_validation',
+      // 'actif' par défaut, et non 'en_attente_validation' : ce statut est
+      // devenu BLOQUANT (il désigne une demande d'inscription publique non
+      // tranchée). Un compte créé par le super-admin est déjà validé par
+      // définition — le laisser en attente l'enfermerait dehors en attendant
+      // qu'on valide une demande qui n'existe pas.
+      statut: data.statut || 'actif',
       permissions: data.permissions || null,
       mdp_temporaire: true,   // mot de passe par défaut → rotation obligatoire au 1er login
       email_verifie: true,    // créé par un acteur de confiance (super-admin)
