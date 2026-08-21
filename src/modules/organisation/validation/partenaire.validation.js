@@ -13,6 +13,10 @@ const creerPartenaireSchema = Joi.object({
   contact: Joi.string().trim().max(150).optional().allow('', null),
   adresse: Joi.string().trim().max(500).optional().allow('', null),
   notes: Joi.string().trim().max(2000).optional().allow('', null),
+  // Un partenaire est actif à la création : le champ n'est accepté que pour
+  // permettre à un import ou à une reprise de données de créer directement
+  // une fiche archivée.
+  actif: Joi.boolean().optional(),
 });
 
 const modifierPartenaireSchema = Joi.object({
@@ -26,6 +30,8 @@ const modifierPartenaireSchema = Joi.object({
   contact: Joi.string().trim().max(150).optional().allow('', null),
   adresse: Joi.string().trim().max(500).optional().allow('', null),
   notes: Joi.string().trim().max(2000).optional().allow('', null),
+  // Bascule activer / désactiver — voir `actif` dans partenaire.model.js.
+  actif: Joi.boolean().optional(),
 }).min(1);
 
 module.exports = { creerPartenaireSchema, modifierPartenaireSchema };

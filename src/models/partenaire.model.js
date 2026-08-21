@@ -49,6 +49,15 @@ const Partenaire = sequelize.define('Partenaire', {
   notes: {
     type: DataTypes.TEXT,
     allowNull: true
+  },
+  // Désactivation RÉVERSIBLE, distincte du soft delete `deleted_at` :
+  // un partenaire inactif reste consultable et réactivable (l'entreprise
+  // revient sur un autre lot), là où `destroy()` le retire de l'annuaire.
+  // Les affectations passées restent intactes dans les deux cas.
+  actif: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true
   }
 }, {
   tableName: 'partenaires',

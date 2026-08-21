@@ -58,12 +58,21 @@ class AccountService {
     }
 
     const updates = {};
+    // `nom`, `prenom` et `langue` : un test de vérité suffit, Joi rejette déjà
+    // la chaîne vide (min 2 / liste fermée) — il n'existe donc pas de cas où
+    // l'on voudrait les effacer.
     if (nom) updates.nom = nom;
     if (prenom) updates.prenom = prenom;
     if (email) updates.email = email.trim().toLowerCase();
-    if (telephone) updates.telephone = telephone;
-    if (fonction) updates.fonction = fonction;
     if (langue) updates.langue = langue;
+
+    // `telephone` et `fonction` sont FACULTATIFS et le schéma accepte '' /
+    // null pour eux : le test doit donc porter sur la PRÉSENCE du champ, pas
+    // sur sa vérité. Avec `if (telephone)`, vider son numéro depuis le profil
+    // n'avait aucun effet — la requête partait, répondait 200, et l'ancienne
+    // valeur restait en base sans que rien ne le signale.
+    if (telephone !== undefined) updates.telephone = telephone || null;
+    if (fonction !== undefined) updates.fonction = fonction || null;
 
     // L'ancienne photo doit être effacée du disque : sans cela, chaque
     // changement d'avatar laissait un fichier orphelin — une donnée personnelle
