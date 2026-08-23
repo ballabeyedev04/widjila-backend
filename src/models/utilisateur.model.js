@@ -135,6 +135,22 @@ const User = sequelize.define('User', {
   compte_bloque_jusqua: {
     type: DataTypes.DATE,
     allowNull: true,
+  },
+  // ── Invalidation immédiate des tokens d'accès ──
+  //
+  // Le token d'accès est un JWT SANS ÉTAT : une fois signé, rien ne pouvait
+  // l'annuler avant son expiration. Révoquer les refresh tokens ne fermait
+  // que le renouvellement — un token d'accès volé restait donc valable
+  // jusqu'à une heure APRÈS que la victime a changé son mot de passe.
+  //
+  // Ce compteur est embarqué dans chaque token (`tv`) et comparé à sa valeur
+  // en base par `auth.middleware`. L'incrémenter périme d'un coup tous les
+  // tokens déjà émis. La comparaison ne coûte AUCUNE lecture
+  // supplémentaire : le middleware chargeait déjà l'utilisateur.
+  token_version: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0,
   }
 }, {
   tableName: 'utilisateur',

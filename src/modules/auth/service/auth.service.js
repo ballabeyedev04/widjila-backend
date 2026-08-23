@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const hashToken = require('../../../utils/hashToken.js');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
@@ -35,13 +36,22 @@ function _exigerVerificationEmail() {
 
 // ─── Helpers tokens ────────────────────────────────────────────────────────────
 
-function _hashToken(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
+// Empreinte des refresh tokens — définition UNIQUE partagée avec
+// account.service (voir utils/hashToken.js).
+const _hashToken = hashToken;
 
 function _generateAccessToken(utilisateur) {
   return jwt.sign(
-    { id: utilisateur.id, role: utilisateur.role, organisationId: utilisateur.organisationId || null },
+    {
+      id: utilisateur.id,
+      role: utilisateur.role,
+      organisationId: utilisateur.organisationId || null,
+      // Version des tokens au moment de la signature — `auth.middleware` la
+      // compare à la valeur en base et rejette le token si elle a bougé
+      // (changement ou réinitialisation de mot de passe). C'est ce qui rend
+      // un token d'accès révocable malgré son absence d'état.
+      tv: utilisateur.token_version || 0,
+    },
     jwtConfig.secret,
     { expiresIn: jwtConfig.expiresIn }
   );
@@ -540,3 +550,10 @@ class AuthService {
 }
 
 module.exports = AuthService;
+
+// Génération d'un token d'accès — exposée pour `account.service`, qui doit en
+// délivrer un neuf à l'appareil courant après avoir incrémenté
+// `token_version` (sans quoi il se déconnecterait lui-même en sécurisant son
+// compte). Définition UNIQUE : un second `jwt.sign` ailleurs finirait par
+// oublier `tv` et rouvrirait silencieusement la faille.
+module.exports.genererAccessToken = _generateAccessToken;

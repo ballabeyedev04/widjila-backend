@@ -16,6 +16,17 @@ const updateProfilSchema = Joi.object({
 const changePasswordSchema = Joi.object({
   ancien_mot_de_passe: Joi.string().required(),
   nouveau_mot_de_passe: motDePasse.required(),
+  // Refresh token de l'appareil qui fait la demande — FACULTATIF.
+  //
+  // Changer son mot de passe révoque les autres sessions ; sans ce champ, le
+  // serveur n'a aucun moyen de savoir laquelle est celle de l'appelant (le
+  // token d'accès ne porte pas d'identifiant de session) et devrait donc
+  // toutes les révoquer, y compris celle de l'utilisateur en train d'agir.
+  //
+  // Il transite dans le corps, jamais dans l'URL, et morgan ne journalise pas
+  // les corps de requête (voir app.js) : pas d'exposition nouvelle par
+  // rapport à l'en-tête Authorization du même appel.
+  refresh_token: Joi.string().trim().optional().allow('', null),
 });
 
 const saveDeviceTokenSchema = Joi.object({

@@ -11,8 +11,10 @@ const { bcryptConfig } = require('../../../config/security.js');
 const { sendOtpEmail } = require('../../../infrastructure/emailService.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
 const MfaService = require('../../auth/service/mfa.service.js');
+const { genererAccessToken } = require('../../auth/service/auth.service.js');
 const logger = require('../../../utils/logger.js');
 const { SAFE_USER_ATTRIBUTES } = require('../../../utils/formatUser.js');
+const hashToken = require('../../../utils/hashToken.js');
 
 // Hash constant pour égaliser le temps de réponse (anti énumération par timing)
 const DUMMY_HASH = '$2b$12$LmKBP5z6RvWnAnsFOVK9Qeq7C2JKvPAzTq/xz7rJa2Y5m.JnHkTFO';
@@ -158,14 +160,42 @@ class AccountService {
     const hashedPassword = await bcrypt.hash(newPassword, bcryptConfig.saltRounds);
     utilisateur.mot_de_passe = hashedPassword;
     utilisateur.mdp_temporaire = false; // rotation effectuée
+    // Réinitialisation = compromission présumée : on ferme TOUT, sans
+    // exception. Contrairement au changement de mot de passe, il n'y a ici
+    // aucune session « courante » à épargner — l'utilisateur n'est pas
+    // authentifié, il se reconnectera avec son nouveau mot de passe.
+    //
+    // Les deux gestes sont nécessaires et complémentaires : incrémenter
+    // `token_version` périme les tokens d'ACCÈS déjà signés, révoquer les
+    // refresh tokens empêche d'en obtenir de nouveaux. L'un sans l'autre
+    // laisse une porte ouverte.
+    utilisateur.token_version = (utilisateur.token_version || 0) + 1;
     await utilisateur.save();
     await otpRecord.destroy();
+
+    await RefreshToken.update(
+      { revoked: true },
+      { where: { utilisateurId: utilisateur.id, revoked: false } }
+    );
 
     return { message: 'Mot de passe réinitialisé avec succès.' };
   }
 
   // -------------------- CHANGER MOT DE PASSE --------------------
-  static async changePassword(userId, oldPassword, newPassword) {
+  /**
+   * Change le mot de passe et RÉVOQUE les autres sessions.
+   *
+   * Sans cette révocation, un attaquant ayant dérobé un refresh token gardait
+   * l'accès au compte même après que la victime a changé son mot de passe —
+   * c'est-à-dire précisément après le geste censé lui reprendre la main.
+   *
+   * [refreshTokenActuel] désigne la session de l'appareil qui fait la demande,
+   * épargnée pour ne pas déconnecter l'utilisateur au moment même où il
+   * sécurise son compte. S'il est absent (client plus ancien, appel direct),
+   * on révoque TOUT : mieux vaut une reconnexion de trop qu'une session
+   * volée laissée ouverte.
+   */
+  static async changePassword(userId, oldPassword, newPassword, refreshTokenActuel = null) {
     const utilisateur = await Utilisateur.findByPk(userId);
     if (!utilisateur) return { error: 'Utilisateur non trouvé.' };
 
@@ -178,9 +208,32 @@ class AccountService {
 
     utilisateur.mot_de_passe = await bcrypt.hash(newPassword, bcryptConfig.saltRounds);
     utilisateur.mdp_temporaire = false; // mot de passe temporaire remplacé
+    // Périme TOUS les tokens d'accès en circulation, celui de l'appelant
+    // compris — un JWT signé ne peut pas être annulé sélectivement. C'est ce
+    // qui ferme la fenêtre pendant laquelle un token volé restait valable
+    // (jusqu'à `JWT_EXPIRES_IN`) après le changement de mot de passe.
+    utilisateur.token_version = (utilisateur.token_version || 0) + 1;
     await utilisateur.save();
 
-    return { message: 'Mot de passe modifié avec succès.' };
+    const where = { utilisateurId: userId, revoked: false };
+    if (refreshTokenActuel) {
+      where.tokenHash = { [Op.ne]: hashToken(refreshTokenActuel) };
+    }
+    const sessionsRevoquees = await RefreshToken.update({ revoked: true }, { where });
+
+    return {
+      message: 'Mot de passe modifié avec succès.',
+      // Nombre de sessions fermées — l'interface peut ainsi dire à
+      // l'utilisateur ce qui vient réellement de se passer sur ses autres
+      // appareils, au lieu de le laisser le découvrir à la prochaine
+      // ouverture.
+      sessionsRevoquees: Array.isArray(sessionsRevoquees) ? sessionsRevoquees[0] : 0,
+      // Token d'accès neuf, portant la nouvelle version : sans lui, l'appareil
+      // qui vient de sécuriser son compte serait déconnecté par sa propre
+      // action à la requête suivante. Son refresh token, lui, a été épargné
+      // plus haut — la session continue sans rien redemander.
+      accessToken: genererAccessToken(utilisateur),
+    };
   }
 
   // -------------------- EFFACEMENT (RGPD art. 17) — IMPLÉMENTATION UNIQUE --------------------

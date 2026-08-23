@@ -379,3 +379,176 @@ describe('AccountService', () => {
     });
   });
 });
+
+describe('changePassword — révocation des autres sessions', () => {
+  const bcrypt = require('bcryptjs');
+  const hashToken = require('../utils/hashToken.js');
+  const { Op } = require('sequelize');
+
+  function utilisateurAvecMotDePasse() {
+    return {
+      id: 'user-1',
+      mot_de_passe: 'hash-actuel',
+      mdp_temporaire: true,
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  beforeEach(() => {
+    jest.restoreAllMocks();
+    RefreshToken.update.mockReset();
+    RefreshToken.update.mockResolvedValue([2]);
+  });
+
+  test('épargne la session courante quand le refresh token est fourni', async () => {
+    const utilisateur = utilisateurAvecMotDePasse();
+    Utilisateur.findByPk.mockResolvedValue(utilisateur);
+    jest.spyOn(bcrypt, 'compare').mockResolvedValue(true);
+    jest.spyOn(bcrypt, 'hash').mockResolvedValue('hash-nouveau');
+
+    const resultat = await AccountService.changePassword(
+      'user-1', 'Ancien123', 'Nouveau123', 'refresh-de-cet-appareil'
+    );
+
+    expect(resultat.error).toBeUndefined();
+    expect(resultat.sessionsRevoquees).toBe(2);
+
+    // Le filtre doit EXCLURE l'empreinte de la session courante : sans ce
+    // `Op.ne`, l'utilisateur serait déconnecté au moment même où il sécurise
+    // son compte.
+    const [valeurs, options] = RefreshToken.update.mock.calls[0];
+    expect(valeurs).toEqual({ revoked: true });
+    expect(options.where.utilisateurId).toBe('user-1');
+    expect(options.where.revoked).toBe(false);
+    expect(options.where.tokenHash).toEqual({ [Op.ne]: hashToken('refresh-de-cet-appareil') });
+  });
+
+  test('révoque TOUT quand aucun refresh token n\'est fourni', async () => {
+    Utilisateur.findByPk.mockResolvedValue(utilisateurAvecMotDePasse());
+    jest.spyOn(bcrypt, 'compare').mockResolvedValue(true);
+    jest.spyOn(bcrypt, 'hash').mockResolvedValue('hash-nouveau');
+
+    await AccountService.changePassword('user-1', 'Ancien123', 'Nouveau123');
+
+    // Pas de `tokenHash` dans le filtre : on préfère une reconnexion de trop
+    // à une session volée laissée ouverte.
+    const [, options] = RefreshToken.update.mock.calls[0];
+    expect(options.where.tokenHash).toBeUndefined();
+  });
+
+  test('solde le mot de passe provisoire', async () => {
+    const utilisateur = utilisateurAvecMotDePasse();
+    Utilisateur.findByPk.mockResolvedValue(utilisateur);
+    jest.spyOn(bcrypt, 'compare').mockResolvedValue(true);
+    jest.spyOn(bcrypt, 'hash').mockResolvedValue('hash-nouveau');
+
+    await AccountService.changePassword('user-1', 'Ancien123', 'Nouveau123', 'refresh');
+
+    expect(utilisateur.mdp_temporaire).toBe(false);
+    expect(utilisateur.save).toHaveBeenCalled();
+  });
+
+  test('mot de passe actuel incorrect : aucune session touchée', async () => {
+    Utilisateur.findByPk.mockResolvedValue(utilisateurAvecMotDePasse());
+    jest.spyOn(bcrypt, 'compare').mockResolvedValue(false);
+
+    const resultat = await AccountService.changePassword('user-1', 'faux', 'Nouveau123', 'refresh');
+
+    expect(resultat.error).toBe('Mot de passe actuel incorrect.');
+    // Un échec d'authentification ne doit surtout pas déconnecter les
+    // appareils légitimes — ce serait un déni de service à portée de main de
+    // quiconque connaît l'email de la victime.
+    expect(RefreshToken.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('token_version — invalidation des tokens d\'accès', () => {
+  const bcrypt = require('bcryptjs');
+  // `UserOtp` est mocké en tête de fichier mais pas déstructuré dans le
+  // require partagé — on le récupère ici, où il sert.
+  const { UserOtp } = require('../models/index.js');
+
+  beforeEach(() => {
+    jest.restoreAllMocks();
+    RefreshToken.update.mockReset();
+    RefreshToken.update.mockResolvedValue([0]);
+  });
+
+  test('changePassword incrémente token_version et rend un token neuf', async () => {
+    const utilisateur = {
+      id: 'user-1',
+      mot_de_passe: 'hash',
+      mdp_temporaire: false,
+      token_version: 3,
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    Utilisateur.findByPk.mockResolvedValue(utilisateur);
+    jest.spyOn(bcrypt, 'compare').mockResolvedValue(true);
+    jest.spyOn(bcrypt, 'hash').mockResolvedValue('hash-nouveau');
+
+    const resultat = await AccountService.changePassword(
+      'user-1', 'Ancien123', 'Nouveau123', 'refresh-courant'
+    );
+
+    expect(utilisateur.token_version).toBe(4);
+    // Sans ce token neuf, l'appareil qui vient de sécuriser son compte se
+    // ferait déconnecter par sa propre action à la requête suivante.
+    expect(typeof resultat.accessToken).toBe('string');
+    expect(resultat.accessToken.length).toBeGreaterThan(0);
+  });
+
+  test('le token rendu porte la NOUVELLE version', async () => {
+    const jwt = require('jsonwebtoken');
+    const utilisateur = {
+      id: 'user-1',
+      role: 'ChefProjet',
+      organisationId: 'org-1',
+      mot_de_passe: 'hash',
+      mdp_temporaire: false,
+      token_version: 0,
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    Utilisateur.findByPk.mockResolvedValue(utilisateur);
+    jest.spyOn(bcrypt, 'compare').mockResolvedValue(true);
+    jest.spyOn(bcrypt, 'hash').mockResolvedValue('hash-nouveau');
+
+    const resultat = await AccountService.changePassword(
+      'user-1', 'Ancien123', 'Nouveau123', 'refresh-courant'
+    );
+
+    // Décodé sans vérifier la signature : le test porte sur le CONTENU, pas
+    // sur la configuration du secret.
+    const charge = jwt.decode(resultat.accessToken);
+    expect(charge.tv).toBe(1);
+    expect(charge.id).toBe('user-1');
+  });
+
+  test('resetPassword incrémente token_version ET révoque tout', async () => {
+    const utilisateur = {
+      id: 'user-1',
+      email: 'jean@example.com',
+      mot_de_passe: 'hash',
+      mdp_temporaire: true,
+      token_version: 7,
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    Utilisateur.findOne.mockResolvedValue(utilisateur);
+    UserOtp.findOne.mockResolvedValue({
+      otpHash: 'hash-otp',
+      expiresAt: new Date(Date.now() + 60000),
+      destroy: jest.fn().mockResolvedValue(undefined),
+    });
+    jest.spyOn(bcrypt, 'compare').mockResolvedValue(true);
+    jest.spyOn(bcrypt, 'hash').mockResolvedValue('hash-nouveau');
+
+    const resultat = await AccountService.resetPassword('jean@example.com', 'ABC123', 'Nouveau123');
+
+    expect(resultat.error).toBeUndefined();
+    expect(utilisateur.token_version).toBe(8);
+    // Réinitialisation = compromission présumée : AUCUNE session épargnée,
+    // donc pas de filtre `tokenHash` dans la clause.
+    const [, options] = RefreshToken.update.mock.calls[0];
+    expect(options.where.utilisateurId).toBe('user-1');
+    expect(options.where.tokenHash).toBeUndefined();
+  });
+});

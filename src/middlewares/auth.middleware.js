@@ -32,6 +32,22 @@ const authMiddleware = async (req, res, next) => {
       return next(new ForbiddenError('Compte désactivé. Contactez le support.'));
     }
 
+    // Version des tokens : un changement ou une réinitialisation de mot de
+    // passe incrémente `token_version`, ce qui périme À L'INSTANT tous les
+    // tokens d'accès déjà signés — y compris celui d'un attaquant, qui restait
+    // sinon valable jusqu'à une heure après la reprise en main du compte.
+    //
+    // Aucune lecture supplémentaire : `utilisateur` vient d'être chargé
+    // ci-dessus, la vérification est une comparaison d'entiers en mémoire.
+    //
+    // `?? 0` des DEUX côtés : les tokens signés AVANT le déploiement de ce
+    // champ n'ont pas de `tv`. Les traiter comme la version 0 les laisse
+    // vivre jusqu'à leur expiration naturelle, au lieu de déconnecter tout le
+    // monde à la mise en production.
+    if ((decoded.tv ?? 0) !== (utilisateur.token_version ?? 0)) {
+      return next(new UnauthorizedError('Session expirée, veuillez vous reconnecter'));
+    }
+
     req.user = utilisateur;
     next();
   } catch (err) {

@@ -47,10 +47,21 @@ exports.resetPassword = asyncHandler(async (req, res) => {
 });
 
 exports.changePassword = asyncHandler(async (req, res) => {
-  const { ancien_mot_de_passe, nouveau_mot_de_passe } = req.body;
-  const result = await AccountService.changePassword(req.user.id, ancien_mot_de_passe, nouveau_mot_de_passe);
+  const { ancien_mot_de_passe, nouveau_mot_de_passe, refresh_token } = req.body;
+  const result = await AccountService.changePassword(
+    req.user.id, ancien_mot_de_passe, nouveau_mot_de_passe, refresh_token || null
+  );
   if (result.error) throw new BadRequestError(result.error);
-  res.status(200).json({ success: true, message: result.message });
+  res.status(200).json({
+    success: true,
+    message: result.message,
+    data: {
+      sessionsRevoquees: result.sessionsRevoquees,
+      // Le client DOIT remplacer son token d'accès par celui-ci : l'ancien
+      // vient d'être périmé par l'incrémentation de `token_version`.
+      accessToken: result.accessToken,
+    },
+  });
 });
 
 exports.deleteAccount = asyncHandler(async (req, res) => {
