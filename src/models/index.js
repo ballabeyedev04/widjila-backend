@@ -33,6 +33,7 @@ const ChecklistModele    = require('./checklistModele.model.js');
 const Convocation        = require('./convocation.model.js');
 const Partenaire         = require('./partenaire.model.js');
 const MfaChallenge       = require('./mfaChallenge.model.js');
+const DemandeSuppression = require('./demandeSuppression.model.js');
 
 // ══════════════════════════════════════════════════════════════════════════
 //  ASSOCIATIONS
@@ -212,9 +213,14 @@ Utilisateur.hasMany(ConnexionLog, { foreignKey: 'utilisateurId', as: 'connexions
 MfaChallenge.belongsTo(Utilisateur, { foreignKey: 'utilisateurId', as: 'utilisateur' });
 Utilisateur.hasMany(MfaChallenge, { foreignKey: 'utilisateurId', as: 'mfaChallenges', onDelete: 'CASCADE' });
 
+// `DemandeSuppression` n'a VOLONTAIREMENT aucune association : le demandeur
+// n'est pas authentifié et peut n'avoir jamais eu de compte (voir l'en-tête du
+// modèle). Une clé étrangère rejetterait la demande au lieu de l'enregistrer.
+
 module.exports = {
   Utilisateur,
   Organisation,
+  DemandeSuppression,
   Equipe,
   RefreshToken,
   UserOtp,

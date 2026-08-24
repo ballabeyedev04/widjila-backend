@@ -132,6 +132,26 @@ async function sendInscriptionRejeteeEmail({ to, nom, prenom, motif, organisatio
   });
 }
 
+/**
+ * Email INTERNE — une demande de suppression de compte a été déposée sur la
+ * page publique.
+ *
+ * Le destinataire est l'équipe, pas le demandeur : `DELETION_REQUEST_EMAIL`
+ * permet de le changer sans redéploiement, avec un repli sur l'adresse de
+ * l'auteur du module pour que la notification parte même si la variable
+ * d'environnement a été oubliée — une demande RGPD silencieusement perdue
+ * coûte plus cher qu'un email envoyé à la mauvaise boîte.
+ */
+async function sendDemandeSuppressionEmail({ email, objet, date, ip }) {
+  const template = require('../templates/mail/demandeSuppression.template.js');
+  const destinataire = process.env.DELETION_REQUEST_EMAIL || 'ballabeye.dev04@gmail.com';
+  return sendEmail({
+    to: destinataire,
+    subject: `Demande de suppression de compte — ${email}`,
+    html: template({ email, objet, date, ip }),
+  });
+}
+
 module.exports = {
   sendEmail,
   sendOtpEmail,
@@ -139,4 +159,5 @@ module.exports = {
   sendVerificationEmail,
   sendInscriptionValideeEmail,
   sendInscriptionRejeteeEmail,
+  sendDemandeSuppressionEmail,
 };

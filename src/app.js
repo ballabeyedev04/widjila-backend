@@ -188,6 +188,8 @@ const adminOrganisationRoutes = require('./modules/admin/route/gestionOrganisati
 const adminStatistiquesRoutes = require('./modules/admin/route/statistiques.route.js');
 const adminAuditLogRoutes     = require('./modules/admin/route/auditLog.route.js');
 const adminDemandeRoutes      = require('./modules/admin/route/demandeInscription.route.js');
+const suppressionCompteRoutes = require('./modules/suppressionCompte/route/suppressionCompte.route.js');
+const adminSuppressionRoutes  = require('./modules/suppressionCompte/route/adminSuppressionCompte.route.js');
 const subscriptionRoutes = require('./modules/subscription/route/subscription.route.js');
 const paytechRoutes = require('./modules/paytech/route/paytech.route.js');
 
@@ -202,6 +204,11 @@ app.use('/api/v1/auth',          authRoutes);
 app.use('/api/v1/account',       accountRoutes);
 app.use('/api/v1/organisation',  organisationRoutes);
 app.use('/api/v1/paytech',       paytechRoutes);
+
+// Dépôt PUBLIC d'une demande de suppression de compte (exigence Google Play).
+// Monté ICI, avant `checkSubscription` : le demandeur n'est pas authentifié et
+// n'appartient à aucune organisation — un contrôle d'abonnement le rejetterait.
+app.use('/api/v1/suppression-compte', suppressionCompteRoutes);
 
 // Les routes chantiers sont montées en premier : les sous-ressources
 // (plans, réserves, inspections, documents, rapports) passent ensuite
@@ -236,6 +243,7 @@ app.use('/api/v1/admin/organisations', adminOrganisationRoutes);
 app.use('/api/v1/admin/statistiques',  adminStatistiquesRoutes);
 app.use('/api/v1/admin/audit-logs',    adminAuditLogRoutes);
 app.use('/api/v1/admin/demandes-inscription', adminDemandeRoutes);
+app.use('/api/v1/admin/demandes-suppression', adminSuppressionRoutes);
 
 // ── 404 — route inconnue ───────────────────────────────────────────────────
 app.use((req, res) => {
