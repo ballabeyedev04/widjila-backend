@@ -38,21 +38,26 @@ class AccountService {
   // -------------------- MODIFIER LE PROFIL --------------------
   /**
    * Met à jour les informations personnelles (champs fournis uniquement).
+   *
+   * L'EMAIL N'EST PAS MODIFIABLE ICI, volontairement. Le champ est absent de
+   * `updateProfilSchema` et le middleware valide avec `stripUnknown: true` :
+   * un client qui l'enverrait le verrait retiré avant d'arriver jusqu'ici.
+   *
+   * Ne pas l'ajouter sans construire le circuit de vérification qui va avec.
+   * L'email est l'identifiant de connexion ET la cible de « mot de passe
+   * oublié » : le changer sans repasser `email_verifie` à faux et sans
+   * envoyer un lien de confirmation transformerait une session détournée
+   * quelques minutes en prise de contrôle définitive du compte.
+   *
    * @param {string} userId
    * @param {object} data — champs à mettre à jour
    * @param {object} [files] — req.files (photoProfil)
    */
   static async modifierInfoPersonnelles(userId, data, files = {}) {
-    const { nom, prenom, email, telephone, fonction, langue } = data;
+    const { nom, prenom, telephone, fonction, langue } = data;
 
     const utilisateur = await Utilisateur.findByPk(userId);
     if (!utilisateur) return { success: false, message: 'Utilisateur introuvable' };
-
-    if (email && email.trim().toLowerCase() !== utilisateur.email) {
-      const emailClean = email.trim().toLowerCase();
-      const exist = await Utilisateur.findOne({ where: { email: emailClean } });
-      if (exist) return { success: false, message: 'Cet email est déjà utilisé' };
-    }
 
     if (telephone && telephone !== utilisateur.telephone) {
       const telExist = await Utilisateur.findOne({ where: { telephone } });
@@ -65,7 +70,6 @@ class AccountService {
     // l'on voudrait les effacer.
     if (nom) updates.nom = nom;
     if (prenom) updates.prenom = prenom;
-    if (email) updates.email = email.trim().toLowerCase();
     if (langue) updates.langue = langue;
 
     // `telephone` et `fonction` sont FACULTATIFS et le schéma accepte '' /

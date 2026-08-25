@@ -47,9 +47,21 @@ exports.resetPassword = asyncHandler(async (req, res) => {
 });
 
 exports.changePassword = asyncHandler(async (req, res) => {
-  const { ancien_mot_de_passe, nouveau_mot_de_passe, refresh_token } = req.body;
+  const { ancien_mot_de_passe, nouveau_mot_de_passe } = req.body;
+
+  // Cookie D'ABORD, corps en repli — même ordre que `refresh` et `logout`
+  // (voir auth.controller.js).
+  //
+  // Le web porte son refresh token dans un cookie httpOnly : son JavaScript ne
+  // peut pas le lire, donc pas le placer dans le corps. Sans cette lecture
+  // côté serveur, le web ne pouvait JAMAIS désigner sa propre session, et
+  // changer son mot de passe le déconnectait — l'utilisateur était puni de
+  // s'être sécurisé. Le mobile, lui, stocke le sien et continue de l'envoyer
+  // dans le corps.
+  const refreshToken = req.cookies?.refreshToken || req.body?.refresh_token || null;
+
   const result = await AccountService.changePassword(
-    req.user.id, ancien_mot_de_passe, nouveau_mot_de_passe, refresh_token || null
+    req.user.id, ancien_mot_de_passe, nouveau_mot_de_passe, refreshToken
   );
   if (result.error) throw new BadRequestError(result.error);
   res.status(200).json({
