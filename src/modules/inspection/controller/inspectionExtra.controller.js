@@ -3,6 +3,18 @@
 const InspectionExtraService = require('../service/inspectionExtra.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { BadRequestError, NotFoundError } = require('../../../errors/AppError.js');
+const { organisationCible } = require('../../../utils/organisationRequete.js');
+
+/**
+ * Convocations et application d'un modèle portent sur une INSPECTION (`:id`),
+ * qui tient son organisation de son chantier — voir utils/organisationRequete.js.
+ *
+ * Les MODÈLES de checklist, eux, appartiennent directement à une organisation
+ * (ChecklistModele.organisationId) : ils restent sur `req.user.organisationId`,
+ * comme le module organisation. Le super-admin plateforme n'en possède aucun —
+ * il gère les organisations, pas leurs bibliothèques de contrôle.
+ */
+const orgDeInspection = (req) => organisationCible(req, { inspectionId: req.params.id });
 
 // -------------------- MODÈLES DE CHECKLIST --------------------
 exports.creerModele = asyncHandler(async (req, res) => {
@@ -31,7 +43,7 @@ exports.supprimerModele = asyncHandler(async (req, res) => {
 // -------------------- CONVOCATIONS --------------------
 exports.convier = asyncHandler(async (req, res) => {
   const result = await InspectionExtraService.convier(
-    req.user.organisationId,
+    await orgDeInspection(req),
     req.params.id,
     req.body.utilisateurId
   );
@@ -40,14 +52,14 @@ exports.convier = asyncHandler(async (req, res) => {
 });
 
 exports.listerConvocations = asyncHandler(async (req, res) => {
-  const result = await InspectionExtraService.listConvocations(req.user.organisationId, req.params.id);
+  const result = await InspectionExtraService.listConvocations(await orgDeInspection(req), req.params.id);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: 'Convocations récupérées', data: { convocations: result.convocations } });
 });
 
 exports.repondreConvocation = asyncHandler(async (req, res) => {
   const result = await InspectionExtraService.repondreConvocation(
-    req.user.organisationId,
+    await orgDeInspection(req),
     req.params.id,
     req.params.convocationId,
     req.body,
@@ -60,7 +72,7 @@ exports.repondreConvocation = asyncHandler(async (req, res) => {
 
 exports.retirerConvocation = asyncHandler(async (req, res) => {
   const result = await InspectionExtraService.retirerConvocation(
-    req.user.organisationId,
+    await orgDeInspection(req),
     req.params.id,
     req.params.convocationId
   );
@@ -71,7 +83,7 @@ exports.retirerConvocation = asyncHandler(async (req, res) => {
 // -------------------- APPLICATION D'UN MODÈLE --------------------
 exports.appliquerModele = asyncHandler(async (req, res) => {
   const result = await InspectionExtraService.appliquerModele(
-    req.user.organisationId,
+    await orgDeInspection(req),
     req.params.id,
     req.body.modeleId
   );

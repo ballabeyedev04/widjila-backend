@@ -573,9 +573,17 @@ class ReserveService {
    * filtré par `organisationId` (`required: true`) — jamais par un
    * `chantierId` fourni par le client, qui ne prouve rien.
    */
+  /**
+   * @param {object} [portee]
+   * @param {boolean} [portee.toutesOrganisations]  Ignore le filtre par
+   *   organisation. RÉSERVÉ au super-admin plateforme, qui n'en a pas : sans
+   *   cela la liste transversale des réserves lui répondait toujours vide, la
+   *   jointure filtrant sur son propre `organisationId` — c'est-à-dire `null`.
+   *   Posé par le contrôleur d'après le rôle, JAMAIS d'après un paramètre client.
+   */
   static async listToutesReserves(organisationId, {
     page = 1, limit = 20, statut, severite, priorite, chantierId, entrepriseId, assigneA, search,
-  } = {}) {
+  } = {}, { toutesOrganisations = false } = {}) {
     const where = {};
     if (statut) where.statut = statut;
     if (severite) where.severite = severite;
@@ -595,7 +603,12 @@ class ReserveService {
     const { rows, count } = await Reserve.findAndCountAll({
       where,
       include: [
-        { model: Chantier, as: 'chantier', where: { organisationId }, required: true, attributes: ['id', 'nom', 'code'] },
+        {
+          model: Chantier, as: 'chantier', required: true, attributes: ['id', 'nom', 'code'],
+          // Filtre facultatif quand le super-admin cible une organisation précise.
+          where: (toutesOrganisations && !organisationId) ? {} : { organisationId },
+          include: [{ model: Organisation, as: 'organisation', attributes: ['id', 'nom'] }],
+        },
         { model: Batiment, as: 'batiment', attributes: ['id', 'nom'] },
         { model: Etage, as: 'etage', attributes: ['id', 'nom'] },
         { model: Zone, as: 'zone', attributes: ['id', 'nom'] },

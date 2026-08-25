@@ -3,11 +3,21 @@
 const ReserveExtraService = require('../service/reserveExtra.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { BadRequestError, NotFoundError } = require('../../../errors/AppError.js');
+const { organisationCible } = require('../../../utils/organisationRequete.js');
+
+/**
+ * Pièces jointes, signatures, affectations et QR portent sur une RÉSERVE
+ * (`:id`), qui tient son organisation de son chantier — voir
+ * utils/organisationRequete.js. Seule la suppression d'une pièce jointe est
+ * adressée par `:pieceId` sans la réserve dans l'URL : la remontée part alors
+ * de la pièce.
+ */
+const orgDeReserve = (req) => organisationCible(req, { reserveId: req.params.id });
 
 // -------------------- PIÈCES JOINTES --------------------
 exports.ajouterPieceJointe = asyncHandler(async (req, res) => {
   const result = await ReserveExtraService.ajouterPieceJointe(
-    req.user.organisationId,
+    await orgDeReserve(req),
     req.params.id,
     req.file,
     req.user.id
@@ -17,13 +27,13 @@ exports.ajouterPieceJointe = asyncHandler(async (req, res) => {
 });
 
 exports.listerPiecesJointes = asyncHandler(async (req, res) => {
-  const result = await ReserveExtraService.listPiecesJointes(req.user.organisationId, req.params.id);
+  const result = await ReserveExtraService.listPiecesJointes(await orgDeReserve(req), req.params.id);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: 'Pièces jointes récupérées', data: { pieces: result.pieces } });
 });
 
 exports.supprimerPieceJointe = asyncHandler(async (req, res) => {
-  const result = await ReserveExtraService.supprimerPieceJointe(req.user.organisationId, req.params.pieceId);
+  const result = await ReserveExtraService.supprimerPieceJointe(await organisationCible(req, { pieceJointeId: req.params.pieceId }), req.params.pieceId);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: result.message });
 });
@@ -31,7 +41,7 @@ exports.supprimerPieceJointe = asyncHandler(async (req, res) => {
 // -------------------- SIGNATURES --------------------
 exports.signerReserve = asyncHandler(async (req, res) => {
   const result = await ReserveExtraService.signer(
-    req.user.organisationId,
+    await orgDeReserve(req),
     req.params.id,
     req.body,
     req.user.id
@@ -41,7 +51,7 @@ exports.signerReserve = asyncHandler(async (req, res) => {
 });
 
 exports.listerSignatures = asyncHandler(async (req, res) => {
-  const result = await ReserveExtraService.listSignatures(req.user.organisationId, req.params.id);
+  const result = await ReserveExtraService.listSignatures(await orgDeReserve(req), req.params.id);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: 'Signatures récupérées', data: { signatures: result.signatures } });
 });
@@ -49,7 +59,7 @@ exports.listerSignatures = asyncHandler(async (req, res) => {
 // -------------------- AFFECTATIONS MULTIPLES --------------------
 exports.affecterIntervenant = asyncHandler(async (req, res) => {
   const result = await ReserveExtraService.affecter(
-    req.user.organisationId,
+    await orgDeReserve(req),
     req.params.id,
     req.body,
     req.body.date_affectation,
@@ -62,20 +72,20 @@ exports.affecterIntervenant = asyncHandler(async (req, res) => {
 });
 
 exports.listerAffectations = asyncHandler(async (req, res) => {
-  const result = await ReserveExtraService.listAffectations(req.user.organisationId, req.params.id);
+  const result = await ReserveExtraService.listAffectations(await orgDeReserve(req), req.params.id);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: 'Affectations récupérées', data: { affectations: result.affectations } });
 });
 
 exports.retirerAffectation = asyncHandler(async (req, res) => {
-  const result = await ReserveExtraService.retirerAffectation(req.user.organisationId, req.params.id, req.params.affectationId, req.user.id);
+  const result = await ReserveExtraService.retirerAffectation(await orgDeReserve(req), req.params.id, req.params.affectationId, req.user.id);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: result.message });
 });
 
 // -------------------- QR CODE --------------------
 exports.genererQr = asyncHandler(async (req, res) => {
-  const result = await ReserveExtraService.genererQr(req.user.organisationId, req.params.id);
+  const result = await ReserveExtraService.genererQr(await orgDeReserve(req), req.params.id);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: 'QR code généré', data: { qr: result.qr, url: result.url } });
 });

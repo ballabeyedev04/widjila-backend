@@ -9,6 +9,21 @@ const cache = require('../../../utils/cache.js');
 
 const STATUTS_FERMES = ['validee', 'cloturee'];
 
+/**
+ * Filtre « chantiers concernés » d'une requête de statistiques.
+ *
+ * `toutesOrganisations` est RÉSERVÉ au super-admin plateforme, qui
+ * n'appartient à aucune organisation : filtrer sur la sienne (`null`) ne
+ * remontait aucun chantier, donc un tableau de bord à zéro — affiché à
+ * l'écran comme « Aucune statistique », alors que la requête avait réussi.
+ * Le drapeau est posé par le contrôleur d'après le RÔLE seul, jamais d'après
+ * un paramètre client : il ouvre la lecture à toutes les organisations.
+ * Un `organisationId` fourni malgré tout reste un filtre (ciblage d'un client).
+ */
+const _whereOrganisation = (organisationId, toutesOrganisations) => (
+  toutesOrganisations && !organisationId ? {} : { organisationId }
+);
+
 class DashboardService {
 
   // -------------------- STATISTIQUES GLOBALES DE L'ORGANISATION --------------------
@@ -26,13 +41,17 @@ class DashboardService {
    * premier à saturer la base si beaucoup d'utilisateurs l'ouvrent en même
    * temps (audit — Charge à 10 000 utilisateurs §4).
    */
-  static async statsGlobales(organisationId) {
-    const cleCache = `dashboard:stats-globales:${organisationId}`;
+  static async statsGlobales(organisationId, { toutesOrganisations = false } = {}) {
+    const whereOrg = _whereOrganisation(organisationId, toutesOrganisations);
+    // La portée fait partie de la clé : sans cela la vue « toutes
+    // organisations » et une organisation absente partageraient la même entrée
+    // de cache (toutes deux `organisationId = null`).
+    const cleCache = `dashboard:stats-globales:${toutesOrganisations && !organisationId ? 'toutes' : organisationId}`;
     const enCache = await cache.lire(cleCache);
     if (enCache) return enCache;
 
     const chantiers = await Chantier.findAll({
-      where: { organisationId },
+      where: whereOrg,
       attributes: ['id', 'nom', 'code', 'statut'],
       raw: true,
     });
@@ -47,7 +66,7 @@ class DashboardService {
       plans: 0,
       inspections: 0,
       documents: 0,
-      utilisateurs: await Utilisateur.count({ where: { organisationId } }),
+      utilisateurs: await Utilisateur.count({ where: whereOrg }),
     };
 
     if (chantierIds.length === 0) {
@@ -180,9 +199,9 @@ class DashboardService {
 
   // -------------------- RÉSERVES PAR ENTREPRISE (module 9) --------------------
   /** Répartition des réserves par entreprise en charge (incl. filiales). */
-  static async statsParEntreprise(organisationId) {
+  static async statsParEntreprise(organisationId, { toutesOrganisations = false } = {}) {
     const chantierIds = (await Chantier.findAll({
-      where: { organisationId },
+      where: _whereOrganisation(organisationId, toutesOrganisations),
       attributes: ['id'],
       raw: true,
     })).map((c) => c.id);
@@ -247,7 +266,7 @@ class DashboardService {
    * Délai moyen (jours) entre la création d'une réserve et sa validation,
    * calculé depuis l'historique (action 'creation' → action 'validation').
    */
-  static async dureeTraitement(organisationId, chantierId = null) {
+  static async dureeTraitement(organisationId, chantierId = null, { toutesOrganisations = false } = {}) {
     const whereChantier = {};
     if (chantierId) {
       const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
@@ -255,7 +274,9 @@ class DashboardService {
       whereChantier.chantierId = chantierId;
     } else {
       whereChantier.chantierId = {
-        [Op.in]: (await Chantier.findAll({ where: { organisationId }, attributes: ['id'], raw: true })).map((c) => c.id),
+        [Op.in]: (await Chantier.findAll({
+          where: _whereOrganisation(organisationId, toutesOrganisations), attributes: ['id'], raw: true,
+        })).map((c) => c.id),
       };
     }
 
@@ -297,8 +318,8 @@ class DashboardService {
 
   // -------------------- PRODUCTIVITÉ (module 9) --------------------
   /** Réserves validées / mois + taux de traitement. */
-  static async productivite(organisationId, chantierId = null) {
-    const whereChantier = { organisationId };
+  static async productivite(organisationId, chantierId = null, { toutesOrganisations = false } = {}) {
+    const whereChantier = _whereOrganisation(organisationId, toutesOrganisations);
     if (chantierId) whereChantier.id = chantierId;
 
     const chantiers = await Chantier.findAll({ where: whereChantier, attributes: ['id'], raw: true });
@@ -340,8 +361,8 @@ class DashboardService {
    * Évolution mensuelle des réserves créées/validées, plus comparaison
    * avec la période précédente (glissement annuel).
    */
-  static async evolution(organisationId, chantierId = null) {
-    const whereChantier = { organisationId };
+  static async evolution(organisationId, chantierId = null, { toutesOrganisations = false } = {}) {
+    const whereChantier = _whereOrganisation(organisationId, toutesOrganisations);
     if (chantierId) whereChantier.id = chantierId;
 
     const chantiers = await Chantier.findAll({ where: whereChantier, attributes: ['id'], raw: true });
@@ -399,11 +420,12 @@ class DashboardService {
 
   // -------------------- EXPORT EXCEL DES KPI (module 9) --------------------
   /** Génère un classeur Excel avec les principaux indicateurs. */
-  static async exportExcel(organisationId) {
+  static async exportExcel(organisationId, { toutesOrganisations = false } = {}) {
+    const portee = { toutesOrganisations };
     const [globale, parEntreprise, delais] = await Promise.all([
-      DashboardService.statsGlobales(organisationId),
-      DashboardService.statsParEntreprise(organisationId),
-      DashboardService.dureeTraitement(organisationId),
+      DashboardService.statsGlobales(organisationId, portee),
+      DashboardService.statsParEntreprise(organisationId, portee),
+      DashboardService.dureeTraitement(organisationId, null, portee),
     ]);
 
     const wb = new ExcelJS.Workbook();
@@ -455,7 +477,7 @@ class DashboardService {
     ws3.addRow({ indicateur: 'Délai moyen (jours)', valeur: delais.stats.dureeMoyenneJours });
 
     const buffer = await wb.xlsx.writeBuffer();
-    return { success: true, buffer, filename: `kpi-${organisationId}.xlsx` };
+    return { success: true, buffer, filename: `kpi-${organisationId || 'toutes-organisations'}.xlsx` };
   }
 }
 

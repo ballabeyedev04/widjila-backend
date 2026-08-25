@@ -137,6 +137,9 @@ class ChantierService {
     const chantier = await Chantier.findByPk(chantierId, {
       include: [
         { model: Utilisateur, as: 'responsable', attributes: ['id', 'nom', 'prenom', 'email', 'photoProfil'] },
+        // L'organisation propriétaire : le super-admin plateforme ouvre les
+        // chantiers de TOUS les clients, il doit savoir lequel il consulte.
+        { model: Organisation, as: 'organisation', attributes: ['id', 'nom'] },
         {
           model: Batiment,
           as: 'batiments',

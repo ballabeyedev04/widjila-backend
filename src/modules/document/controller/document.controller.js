@@ -3,10 +3,20 @@
 const DocumentService = require('../service/document.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { BadRequestError, NotFoundError } = require('../../../errors/AppError.js');
+const { organisationCible } = require('../../../utils/organisationRequete.js');
+
+/**
+ * Un document n'a pas d'`organisationId` : il la tient de son chantier. Le
+ * super-admin plateforme n'en ayant pas, lui passer la sienne (`null`) faisait
+ * répondre « introuvable » sur tout l'onglet Documents d'un chantier client.
+ * Voir utils/organisationRequete.js.
+ */
+const orgDuChantier = (req) => organisationCible(req, { chantierId: req.params.chantierId });
+const orgDuDocument = (req) => organisationCible(req, { documentId: req.params.id });
 
 exports.uploaderDocument = asyncHandler(async (req, res) => {
   const result = await DocumentService.upload(
-    req.user.organisationId,
+    await orgDuChantier(req),
     req.params.chantierId,
     req.body,
     req.file,
@@ -17,7 +27,7 @@ exports.uploaderDocument = asyncHandler(async (req, res) => {
 });
 
 exports.listerDocuments = asyncHandler(async (req, res) => {
-  const result = await DocumentService.listDocuments(req.user.organisationId, req.params.chantierId, req.query);
+  const result = await DocumentService.listDocuments(await orgDuChantier(req), req.params.chantierId, req.query);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({
     success: true,
@@ -27,20 +37,20 @@ exports.listerDocuments = asyncHandler(async (req, res) => {
 });
 
 exports.supprimerDocument = asyncHandler(async (req, res) => {
-  const result = await DocumentService.supprimerDocument(req.user.organisationId, req.params.id);
+  const result = await DocumentService.supprimerDocument(await orgDuDocument(req), req.params.id);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message });
 });
 
 // -------------------- ARCHIVAGE (module 7) --------------------
 exports.archiverDocument = asyncHandler(async (req, res) => {
-  const result = await DocumentService.archiverDocument(req.user.organisationId, req.params.id, true);
+  const result = await DocumentService.archiverDocument(await orgDuDocument(req), req.params.id, true);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: result.message, data: { document: result.document } });
 });
 
 exports.restaurerDocument = asyncHandler(async (req, res) => {
-  const result = await DocumentService.archiverDocument(req.user.organisationId, req.params.id, false);
+  const result = await DocumentService.archiverDocument(await orgDuDocument(req), req.params.id, false);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: result.message, data: { document: result.document } });
 });
@@ -48,7 +58,7 @@ exports.restaurerDocument = asyncHandler(async (req, res) => {
 // -------------------- SIGNATURE (module 7) --------------------
 exports.signerDocument = asyncHandler(async (req, res) => {
   const result = await DocumentService.signerDocument(
-    req.user.organisationId,
+    await orgDuDocument(req),
     req.params.id,
     req.body,
     req.user.id
@@ -58,7 +68,7 @@ exports.signerDocument = asyncHandler(async (req, res) => {
 });
 
 exports.listerSignatures = asyncHandler(async (req, res) => {
-  const result = await DocumentService.listSignatures(req.user.organisationId, req.params.id);
+  const result = await DocumentService.listSignatures(await orgDuDocument(req), req.params.id);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: 'Signatures récupérées', data: { signatures: result.signatures } });
 });

@@ -4,10 +4,14 @@ const ReserveExcelService = require('../service/reserveExcel.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { BadRequestError, NotFoundError } = require('../../../errors/AppError.js');
 const safeFilename = require('../../../utils/safeFilename.js');
+const { organisationCible } = require('../../../utils/organisationRequete.js');
+
+// Import/export portent sur un chantier — voir utils/organisationRequete.js.
+const orgDuChantier = (req) => organisationCible(req, { chantierId: req.params.chantierId });
 
 // -------------------- EXPORT EXCEL --------------------
 exports.exporterExcel = asyncHandler(async (req, res) => {
-  const result = await ReserveExcelService.exporterExcel(req.user.organisationId, req.params.chantierId, req.query);
+  const result = await ReserveExcelService.exporterExcel(await orgDuChantier(req), req.params.chantierId, req.query);
   if (!result.success) throw new NotFoundError(result.message);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${safeFilename(result.filename)}"`);
@@ -18,7 +22,7 @@ exports.exporterExcel = asyncHandler(async (req, res) => {
 exports.importerExcel = asyncHandler(async (req, res) => {
   if (!req.file || !req.file.buffer) throw new BadRequestError('Fichier Excel manquant');
   const result = await ReserveExcelService.importerExcel(
-    req.user.organisationId,
+    await orgDuChantier(req),
     req.params.chantierId,
     req.file.buffer,
     req.user.id
