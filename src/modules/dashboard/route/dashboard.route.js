@@ -15,6 +15,15 @@ router.get('/chantiers/:chantierId', auth, checkActiveUser, checkSubscription, d
 // ── Module 9 — KPI avancés ───────────────────────────────────────────────────
 router.get('/par-entreprise', auth, checkActiveUser, checkSubscription, dashboardController.statsParEntreprise);
 
+// Évolution TOUTE ORGANISATION confondue. Le contrôleur passe
+// `req.params.chantierId` (ici `undefined`) au service, dont la signature
+// `evolution(organisationId, chantierId = null)` traite alors l'ensemble des
+// chantiers de l'organisation — comportement déjà implémenté, mais qu'aucune
+// route n'exposait : le tableau de bord global appelait
+// `/dashboard/chantiers/undefined/evolution`, d'où un cast UUID invalide en
+// base (500) et une courbe d'évolution vide en permanence.
+router.get('/evolution', auth, checkActiveUser, checkSubscription, dashboardController.evolution);
+
 router.get('/chantiers/:chantierId/par-batiment', auth, checkActiveUser, checkSubscription, dashboardController.statsParBatiment);
 
 router.get('/chantiers/:chantierId/duree-traitement', auth, checkActiveUser, checkSubscription, dashboardController.dureeTraitement);
