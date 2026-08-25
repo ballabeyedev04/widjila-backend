@@ -7,6 +7,7 @@ const auth = require('../../../middlewares/auth.middleware.js');
 const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware.js');
 const checkSubscription = require('../../../middlewares/checkSubscription.middleware.js');
 const checkOrganisation = require('../../../middlewares/checkOrganisation.middleware.js');
+const requireOrganisation = require('../../../middlewares/requireOrganisation.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const { OPERATIONNEL, PILOTAGE, SENSIBLE } = require('../../../config/roles.js');
@@ -23,11 +24,17 @@ const {
 // avec jointures ; `?limit=500000` chargeait tout le portefeuille de l'org.
 router.get('/', auth, checkActiveUser, checkSubscription, paginate(), chantierController.listerChantiers);
 
+// `requireOrganisation` : le chantier est rattaché à `req.user.organisationId`,
+// que le super-admin plateforme (et tout compte créé sans organisation) n'a
+// pas. Sans cette garde, l'appel descendait jusqu'à la contrainte NOT NULL de
+// la base et renvoyait un 422 « notNull Violation » incompréhensible côté
+// interface.
 router.post(
   '/',
   auth,
   checkActiveUser,
   checkSubscription,
+  requireOrganisation,
   requireRole(...OPERATIONNEL),
   validate(creerChantierSchema),
   chantierController.creerChantier

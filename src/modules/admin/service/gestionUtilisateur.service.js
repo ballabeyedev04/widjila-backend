@@ -68,6 +68,18 @@ class GestionUtilisateurService {
       if (telExist) return { success: false, message: 'Ce numéro de téléphone est déjà utilisé' };
     }
 
+    // Seul le super-admin plateforme vit sans organisation. Tout autre rôle
+    // travaille sur des ressources rattachées à `organisationId` : un compte
+    // créé sans organisation est inutilisable — il traverse l'authentification
+    // puis échoue à la première création (contrainte NOT NULL en base) et ne
+    // voit aucune donnée dans les listes, toutes filtrées par organisation.
+    // Le formulaire de la plateforme laisse le sélecteur vide par défaut :
+    // l'oubli est silencieux, et se paie côté utilisateur final.
+    const roleCible = data.role || 'ConducteurTravaux';
+    if (!data.organisationId && roleCible !== 'Admin') {
+      return { success: false, message: "Sélectionnez une organisation : seul le rôle Admin (super-admin plateforme) peut exister sans organisation." };
+    }
+
     if (data.organisationId) {
       const org = await Organisation.findByPk(data.organisationId);
       if (!org) return { success: false, message: 'Organisation introuvable' };
@@ -81,7 +93,7 @@ class GestionUtilisateurService {
       mot_de_passe: await bcrypt.hash(data.mot_de_passe || 'Temp1234!', bcryptConfig.saltRounds),
       telephone: data.telephone || null,
       fonction: data.fonction || null,
-      role: data.role || 'ConducteurTravaux',
+      role: roleCible,
       // 'actif' par défaut, et non 'en_attente_validation' : ce statut est
       // devenu BLOQUANT (il désigne une demande d'inscription publique non
       // tranchée). Un compte créé par le super-admin est déjà validé par

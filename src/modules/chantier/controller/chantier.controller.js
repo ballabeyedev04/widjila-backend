@@ -2,10 +2,26 @@
 
 const ChantierService = require('../service/chantier.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
-const { BadRequestError, NotFoundError } = require('../../../errors/AppError.js');
+const { BadRequestError, NotFoundError, ForbiddenError } = require('../../../errors/AppError.js');
+const { organisationCible, estSuperAdmin } = require('../../../utils/organisationRequete.js');
+
+/**
+ * Organisation dans laquelle la requête opère. Ici la ressource visée est
+ * toujours le chantier porté par `:id` — voir utils/organisationRequete.js
+ * pour le pourquoi (le super-admin plateforme n'a pas d'organisation propre).
+ */
+const orgDuChantier = (req) => organisationCible(req, { chantierId: req.params.id });
 
 exports.listerChantiers = asyncHandler(async (req, res) => {
-  const result = await ChantierService.listChantiers(req.user.organisationId, req.query);
+  // Le super-admin plateforme voit le portefeuille de toutes les organisations,
+  // avec `?organisationId=` comme filtre facultatif. Le drapeau dérive du RÔLE
+  // seul — jamais d'un paramètre client, qui ouvrirait la lecture inter-clients.
+  const superAdmin = estSuperAdmin(req.user);
+  const result = await ChantierService.listChantiers(
+    superAdmin ? (req.query.organisationId || null) : req.user.organisationId,
+    req.query,
+    { toutesOrganisations: superAdmin }
+  );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({
     success: true,
@@ -15,7 +31,23 @@ exports.listerChantiers = asyncHandler(async (req, res) => {
 });
 
 exports.creerChantier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.creerChantier(req.user.organisationId, req.body);
+  // Un chantier appartient TOUJOURS à une organisation — c'est elle qui en
+  // détermine la visibilité pour tous les autres écrans. Le super-admin
+  // plateforme n'en ayant pas, il désigne la destination dans le corps de la
+  // requête ; pour tout autre rôle le champ est ignoré (et refusé s'il
+  // désigne une autre organisation, ce qui reviendrait à écrire chez un
+  // client tiers).
+  let organisationId = req.user.organisationId;
+  if (estSuperAdmin(req.user)) {
+    if (!req.body.organisationId) {
+      throw new BadRequestError("Sélectionnez l'organisation à laquelle rattacher ce chantier.");
+    }
+    organisationId = req.body.organisationId;
+  } else if (req.body.organisationId && String(req.body.organisationId) !== String(organisationId)) {
+    throw new ForbiddenError('Vous ne pouvez créer un chantier que dans votre propre organisation.');
+  }
+
+  const result = await ChantierService.creerChantier(organisationId, req.body);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { chantier: result.chantier } });
 });
@@ -27,33 +59,33 @@ exports.detailChantier = asyncHandler(async (req, res) => {
 });
 
 exports.modifierChantier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.modifierChantier(req.user.organisationId, req.params.id, req.body);
+  const result = await ChantierService.modifierChantier(await orgDuChantier(req), req.params.id, req.body);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message, data: { chantier: result.chantier } });
 });
 
 exports.changerStatut = asyncHandler(async (req, res) => {
-  const result = await ChantierService.changerStatut(req.user.organisationId, req.params.id, req.body.statut);
+  const result = await ChantierService.changerStatut(await orgDuChantier(req), req.params.id, req.body.statut);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message, data: { chantier: result.chantier } });
 });
 
 exports.supprimerChantier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.supprimerChantier(req.user.organisationId, req.params.id);
+  const result = await ChantierService.supprimerChantier(await orgDuChantier(req), req.params.id);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message });
 });
 
 // -------------------- STRUCTURE --------------------
 exports.creerBatiment = asyncHandler(async (req, res) => {
-  const result = await ChantierService.creerBatiment(req.user.organisationId, req.params.id, req.body);
+  const result = await ChantierService.creerBatiment(await orgDuChantier(req), req.params.id, req.body);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { batiment: result.batiment } });
 });
 
 exports.creerEtage = asyncHandler(async (req, res) => {
   const result = await ChantierService.creerEtage(
-    req.user.organisationId,
+    await orgDuChantier(req),
     req.params.id,
     req.params.batimentId,
     req.body
@@ -64,7 +96,7 @@ exports.creerEtage = asyncHandler(async (req, res) => {
 
 exports.creerZone = asyncHandler(async (req, res) => {
   const result = await ChantierService.creerZone(
-    req.user.organisationId,
+    await orgDuChantier(req),
     req.params.id,
     req.params.batimentId,
     req.params.etageId,
@@ -75,13 +107,13 @@ exports.creerZone = asyncHandler(async (req, res) => {
 });
 
 exports.creerLot = asyncHandler(async (req, res) => {
-  const result = await ChantierService.creerLot(req.user.organisationId, req.params.id, req.body);
+  const result = await ChantierService.creerLot(await orgDuChantier(req), req.params.id, req.body);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { lot: result.lot } });
 });
 
 exports.listerLots = asyncHandler(async (req, res) => {
-  const result = await ChantierService.listLots(req.user.organisationId, req.params.id);
+  const result = await ChantierService.listLots(await orgDuChantier(req), req.params.id);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: 'Lots récupérés', data: { lots: result.lots } });
 });
@@ -89,7 +121,7 @@ exports.listerLots = asyncHandler(async (req, res) => {
 // -------------------- AFFECTATION MEMBRES (module 1) --------------------
 exports.assignerMembres = asyncHandler(async (req, res) => {
   const result = await ChantierService.assignerMembres(
-    req.user.organisationId,
+    await orgDuChantier(req),
     req.params.id,
     req.body.membreIds,
     req.body.roleChantier
@@ -99,14 +131,14 @@ exports.assignerMembres = asyncHandler(async (req, res) => {
 });
 
 exports.listerMembresChantier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.listMembresChantier(req.user.organisationId, req.params.id, req.user.role);
+  const result = await ChantierService.listMembresChantier(await orgDuChantier(req), req.params.id, req.user.role);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: 'Membres récupérés', data: { membres: result.membres } });
 });
 
 exports.retirerMembreChantier = asyncHandler(async (req, res) => {
   const result = await ChantierService.retirerMembreChantier(
-    req.user.organisationId,
+    await orgDuChantier(req),
     req.params.id,
     req.params.membreId
   );
@@ -122,37 +154,37 @@ exports.listerMesChantiers = asyncHandler(async (req, res) => {
 
 // -------------------- MODULE 3 : DUPLICATION / PHASES / CALENDRIER --------------------
 exports.dupliquerChantier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.dupliquerChantier(req.user.organisationId, req.params.id, req.body);
+  const result = await ChantierService.dupliquerChantier(await orgDuChantier(req), req.params.id, req.body);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { chantier: result.chantier } });
 });
 
 exports.creerPhase = asyncHandler(async (req, res) => {
-  const result = await ChantierService.creerPhase(req.user.organisationId, req.params.id, req.body);
+  const result = await ChantierService.creerPhase(await orgDuChantier(req), req.params.id, req.body);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { phase: result.phase } });
 });
 
 exports.listerPhases = asyncHandler(async (req, res) => {
-  const result = await ChantierService.listPhases(req.user.organisationId, req.params.id);
+  const result = await ChantierService.listPhases(await orgDuChantier(req), req.params.id);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: 'Phases récupérées', data: { phases: result.phases } });
 });
 
 exports.modifierPhase = asyncHandler(async (req, res) => {
-  const result = await ChantierService.modifierPhase(req.user.organisationId, req.params.id, req.params.phaseId, req.body);
+  const result = await ChantierService.modifierPhase(await orgDuChantier(req), req.params.id, req.params.phaseId, req.body);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message, data: { phase: result.phase } });
 });
 
 exports.supprimerPhase = asyncHandler(async (req, res) => {
-  const result = await ChantierService.supprimerPhase(req.user.organisationId, req.params.id, req.params.phaseId);
+  const result = await ChantierService.supprimerPhase(await orgDuChantier(req), req.params.id, req.params.phaseId);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message });
 });
 
 exports.calendrier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.calendrier(req.user.organisationId, req.params.id);
+  const result = await ChantierService.calendrier(await orgDuChantier(req), req.params.id);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: 'Calendrier récupéré', data: result.calendrier });
 });

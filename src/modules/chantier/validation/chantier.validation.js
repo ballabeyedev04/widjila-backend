@@ -4,6 +4,11 @@ const Joi = require('joi');
 const { uuid, STATUT_CHANTIER } = require('../../../validations/common.js');
 
 const creerChantierSchema = Joi.object({
+  // Organisation destinataire. Renseignée UNIQUEMENT par le super-admin
+  // plateforme, qui n'appartient à aucune organisation et doit donc désigner
+  // le client pour lequel il crée le chantier. Pour les autres rôles, le
+  // contrôleur refuse toute valeur différente de leur propre organisation.
+  organisationId: uuid.optional().allow(null),
   code: Joi.string().trim().max(50).optional().allow('', null),
   nom: Joi.string().trim().min(2).max(200).required(),
   description: Joi.string().trim().max(2000).optional().allow('', null),

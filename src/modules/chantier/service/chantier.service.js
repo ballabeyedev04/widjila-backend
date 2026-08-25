@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const {
   Chantier, Batiment, Etage, Zone, Lot, Reserve, Utilisateur, ChantierMembre,
   Phase, Inspection, Plan, Annotation, Document, Rapport, Checklist,
-  Commentaire, PieceJointe,
+  Commentaire, PieceJointe, Organisation,
 } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 const NotificationService = require('../../notification/service/notification.service.js');
@@ -22,6 +22,16 @@ class ChantierService {
 
   // -------------------- CRÉER UN CHANTIER --------------------
   static async creerChantier(organisationId, data) {
+    // L'organisation vient soit du compte appelant, soit — pour le super-admin
+    // plateforme, qui n'appartient à aucune organisation — du corps de la
+    // requête (voir chantier.controller.js#creerChantier). On la valide ici :
+    // sans ce contrôle, un identifiant inexistant remontait sous forme
+    // d'erreur de clé étrangère PostgreSQL, illisible côté interface.
+    const organisation = await Organisation.findByPk(organisationId, { attributes: ['id'] });
+    if (!organisation) {
+      return { success: false, message: 'Organisation introuvable' };
+    }
+
     // Vérifier que le responsable appartient bien à l'organisation
     if (data.responsableId) {
       const responsable = await Utilisateur.findOne({
@@ -55,8 +65,22 @@ class ChantierService {
   }
 
   // -------------------- LISTER LES CHANTIERS --------------------
-  static async listChantiers(organisationId, { page = 1, limit = 20, search = '', statut } = {}) {
-    const where = { organisationId };
+  /**
+   * @param {string|null} organisationId  Organisation à lister.
+   * @param {object} query                Pagination / recherche / statut.
+   * @param {object} [options]
+   * @param {boolean} [options.toutesOrganisations]  Ignore le filtre par
+   *   organisation. RÉSERVÉ au super-admin plateforme (`role: 'Admin'`), qui
+   *   n'appartient à aucune organisation : sans cela, il crée des chantiers
+   *   pour ses clients puis ne les voit jamais dans la liste, celle-ci
+   *   filtrant sur son propre `organisationId` — c'est-à-dire `null`.
+   *   Le drapeau est posé par le contrôleur d'après le rôle, JAMAIS d'après
+   *   un paramètre de requête : il ouvre la lecture à toutes les organisations.
+   */
+  static async listChantiers(organisationId, { page = 1, limit = 20, search = '', statut } = {}, { toutesOrganisations = false } = {}) {
+    const where = {};
+    if (!toutesOrganisations) where.organisationId = organisationId;
+    else if (organisationId) where.organisationId = organisationId; // filtre facultatif du super-admin
     if (search) {
       const motif = `%${escapeLike(search)}%`;
       where[Op.or] = [
@@ -68,7 +92,13 @@ class ChantierService {
 
     const { rows, count } = await Chantier.findAndCountAll({
       where,
-      include: [{ model: Utilisateur, as: 'responsable', attributes: ['id', 'nom', 'prenom', 'email', 'photoProfil'] }],
+      include: [
+        { model: Utilisateur, as: 'responsable', attributes: ['id', 'nom', 'prenom', 'email', 'photoProfil'] },
+        // L'organisation propriétaire : sans elle, la liste « toutes
+        // organisations » du super-admin affiche des chantiers homonymes sans
+        // moyen de savoir à quel client ils appartiennent.
+        { model: Organisation, as: 'organisation', attributes: ['id', 'nom'] },
+      ],
       order: [['createdAt', 'DESC']],
       limit,
       offset: (page - 1) * limit,

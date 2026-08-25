@@ -1,7 +1,7 @@
 'use strict';
 
 const { QueryTypes, UniqueConstraintError } = require('sequelize');
-const { Plan, Chantier, Annotation, Reserve, ReservePosition, Media } = require('../../../models/index.js');
+const { Plan, Chantier, Annotation, Reserve, ReservePosition, Media, Organisation } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
@@ -147,15 +147,33 @@ class PlanService {
    * `listVersions`). Le tri par (nom, version DESC) puis le dédoublonnage sur
    * (chantierId, nom) suffit — pas de sous-requête à écrire.
    */
-  static async listTousPlans(organisationId, { chantierId } = {}) {
+  /**
+   * @param {object} [options]
+   * @param {boolean} [options.toutesOrganisations]  Ignore le filtre par
+   *   organisation. RÉSERVÉ au super-admin plateforme, qui n'en a pas : sans
+   *   cela l'onglet « Plans » lui répondait toujours vide, la jointure filtrant
+   *   sur son propre `organisationId` — c'est-à-dire `null`. Posé par le
+   *   contrôleur d'après le rôle, JAMAIS d'après un paramètre de requête.
+   */
+  static async listTousPlans(organisationId, { chantierId } = {}, { toutesOrganisations = false } = {}) {
     const where = {};
     if (chantierId) where.chantierId = chantierId;
+
+    // Filtre facultatif quand le super-admin cible une organisation précise.
+    const whereChantier = {};
+    if (!toutesOrganisations || organisationId) whereChantier.organisationId = organisationId;
 
     const plans = await Plan.findAll({
       where,
       include: [
         // `required: true` : c'est CE filtre qui porte l'isolation multi-tenant.
-        { model: Chantier, as: 'chantier', where: { organisationId }, required: true, attributes: ['id', 'nom', 'code'] },
+        {
+          model: Chantier, as: 'chantier', where: whereChantier, required: true, attributes: ['id', 'nom', 'code'],
+          // L'organisation propriétaire : dans la vue « toutes organisations »
+          // du super-admin, rien ne distingue sinon deux chantiers homonymes
+          // appartenant à deux clients différents.
+          include: [{ model: Organisation, as: 'organisation', attributes: ['id', 'nom'] }],
+        },
       ],
       order: [['nom', 'ASC'], ['version', 'DESC']],
     });
