@@ -216,8 +216,26 @@ const cryptoConfig = {
   encoding: 'hex'
 };
 
+/**
+ * MFA obligatoire pour le super-admin plateforme (role `Admin`).
+ *
+ * Par defaut : NON. La double authentification reste proposee a tous depuis
+ * le profil, mais elle ne conditionne plus l'acces aux routes `/admin/*`.
+ *
+ * Poser `MFA_ADMIN_OBLIGATOIRE=true` dans l'environnement la rend de nouveau
+ * exigee — sans toucher aux routes, qui portent toujours le garde.
+ *
+ * Le drapeau est lu UNE fois au demarrage : le changer suppose un
+ * redemarrage, ce qui evite qu'une variable modifiee a chaud ouvre ou ferme
+ * silencieusement l'acces d'un compte qui voit toutes les organisations.
+ */
+const mfaConfig = {
+  obligatoirePourAdmin: process.env.MFA_ADMIN_OBLIGATOIRE === 'true',
+};
+
 module.exports = {
   jwtConfig,
+  mfaConfig,
   bcryptConfig,
   rateLimitConfig,
   authenticatedRateLimitConfig,

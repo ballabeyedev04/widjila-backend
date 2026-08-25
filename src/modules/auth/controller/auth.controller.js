@@ -120,8 +120,3 @@ exports.logout = asyncHandler(async (req, res) => {
 });
 
 // -------------------- VÉRIFICATION EMAIL (audit M5) --------------------
-exports.verifierEmail = asyncHandler(async (req, res) => {
-  const result = await AuthService.verifierEmail(req.body.token);
-  if (!result.success) throw new BadRequestError(result.message);
-  res.status(200).json({ success: true, message: result.message });
-});

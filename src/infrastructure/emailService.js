@@ -84,26 +84,6 @@ async function sendWelcomeEmail({ to, nom, prenom }) {
 }
 
 /**
- * Email de vérification d'adresse (lien signé, anti comptes usurpés — audit M5)
- */
-async function sendVerificationEmail({ to, nom, prenom, token }) {
-  const template = require('../templates/mail/verifyEmail.template.js');
-  const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
-  // `/verification` (ancien chemin) ne correspond à AUCUNE route de l'admin
-  // web — la seule route montée est `/verify-email` (voir
-  // `admin/src/routes/AppRoutes.jsx`). Le lien envoyé par email tombait donc
-  // systématiquement sur la page 404, sans aucun moyen pour l'utilisateur de
-  // terminer la vérification (et donc de se connecter, REQUIRE_EMAIL_VERIFICATION
-  // étant actif par défaut en production).
-  const lien = `${frontendUrl}/verify-email?token=${encodeURIComponent(token)}`;
-  return sendEmail({
-    to,
-    subject: 'Vérifiez votre adresse email — SuivieChantier',
-    html: template({ nom, prenom, lien }),
-  });
-}
-
-/**
  * Email — demande d'inscription validée par le super-admin.
  * Le lien pointe vers l'écran de connexion de l'admin web : le compte est
  * actif, l'utilisateur n'a plus qu'à s'y rendre.
@@ -156,7 +136,6 @@ module.exports = {
   sendEmail,
   sendOtpEmail,
   sendWelcomeEmail,
-  sendVerificationEmail,
   sendInscriptionValideeEmail,
   sendInscriptionRejeteeEmail,
   sendDemandeSuppressionEmail,

@@ -53,10 +53,6 @@ const mfaVerifySchema = Joi.object({
 });
 
 // Vérification de l'email d'inscription (lien signé)
-const verifyEmailSchema = Joi.object({
-  token: Joi.string().required(),
-});
-
 const forgotPasswordSchema = Joi.object({
   email: email.required(),
 });
@@ -70,7 +66,5 @@ const resetPasswordSchema = Joi.object({
 module.exports = {
   registerSchema, loginSchema, refreshSchema, logoutSchema,
   forgotPasswordSchema, resetPasswordSchema,
-  // Son absence ici faisait échouer /auth/verify-email en 500 : validate(undefined).
-  verifyEmailSchema,
   mfaVerifySchema,
 };

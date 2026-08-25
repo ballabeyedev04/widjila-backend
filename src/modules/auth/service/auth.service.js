@@ -9,7 +9,6 @@ const { Utilisateur, Organisation, RefreshToken, MfaChallenge } = require('../..
 const { jwtConfig, bcryptConfig } = require('../../../config/security.js');
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
-const { sendVerificationEmail } = require('../../../infrastructure/emailService.js');
 const { journaliserConnexion } = require('./connexionLog.service.js');
 const MfaService = require('./mfa.service.js');
 
@@ -28,12 +27,6 @@ const MAX_TENTATIVES_MFA = 5;
 const MFA_CHALLENGE_MINUTES = 10;
 
 // Exiger la vérification de l'email avant connexion ? (défaut : ON en production)
-function _exigerVerificationEmail() {
-  const flag = process.env.REQUIRE_EMAIL_VERIFICATION;
-  if (flag === undefined || flag === '') return process.env.NODE_ENV === 'production';
-  return flag === 'true' || flag === '1';
-}
-
 // ─── Helpers tokens ────────────────────────────────────────────────────────────
 
 // Empreinte des refresh tokens — définition UNIQUE partagée avec
@@ -225,21 +218,26 @@ class AuthService {
         // dépose une DEMANDE. Statut bloquant jusqu'à la décision du
         // super-admin (voir login() et checkActiveUser.middleware.js).
         statut: 'en_attente_validation',
+        // Plus de lien de vérification à cliquer : c'est le super-admin qui
+        // valide chaque demande, et il joue le rôle d'acteur de confiance —
+        // exactement comme pour un membre invité (organisation.service.js) ou
+        // un compte créé depuis la plateforme (gestionUtilisateur.service.js),
+        // qui posent déjà `true` pour ce motif.
+        email_verifie: true,
       }, { transaction: t });
 
       await t.commit();
 
-      // Email best-effort (ne bloque pas l'inscription) : lien de vérification
-      // d'adresse (anti création de comptes usurpés — audit M5).
+      // Aucun email n'est envoyé ici, volontairement.
       //
-      // L'email « Bienvenue » n'est PLUS envoyé ici : il annonçait un compte
-      // prêt à l'emploi alors que la connexion est désormais bloquée jusqu'à
-      // la validation du super-admin. C'est l'email d'activation
-      // (sendInscriptionValideeEmail) qui joue ce rôle, au bon moment.
-      const verifToken = AuthService._genererTokenVerificationEmail(utilisateur);
-      sendVerificationEmail({ to: emailClean, nom, prenom, token: verifToken }).catch((err) =>
-        logger.warn('[email] Vérification email non envoyée :', err.message)
-      );
+      // Le lien de vérification a été retiré : il ajoutait une étape avant
+      // une seconde étape (la validation du super-admin) qui, elle, décide
+      // réellement de l'ouverture du compte. Le demandeur restait bloqué sans
+      // savoir laquelle des deux il attendait.
+      //
+      // L'email « Bienvenue » n'est pas envoyé non plus : il annoncerait un
+      // compte prêt alors que la connexion est bloquée. C'est
+      // `sendInscriptionValideeEmail` qui prévient, au bon moment.
 
       return {
         success: true,
@@ -256,37 +254,6 @@ class AuthService {
   }
 
   // -------------------- VÉRIFICATION EMAIL (module sécurité / audit M5) --------------------
-  /** Jeton signé (24 h) portant l'identité de l'utilisateur à vérifier. */
-  static _genererTokenVerificationEmail(utilisateur) {
-    return jwt.sign(
-      { id: utilisateur.id, type: 'email_verif' },
-      jwtConfig.resetSecret,
-      { expiresIn: '24h' }
-    );
-  }
-
-  /** Vérifie le lien d'email : marque le compte comme vérifié (usage unique). */
-  static async verifierEmail(token) {
-    let decoded;
-    try {
-      decoded = jwt.verify(token, jwtConfig.resetSecret);
-    } catch (err) {
-      return { success: false, message: 'Lien de vérification invalide ou expiré.' };
-    }
-    if (decoded.type !== 'email_verif') {
-      return { success: false, message: 'Lien de vérification invalide.' };
-    }
-
-    const utilisateur = await Utilisateur.findByPk(decoded.id);
-    if (!utilisateur) return { success: false, message: 'Utilisateur introuvable.' };
-
-    if (!utilisateur.email_verifie) {
-      await utilisateur.update({ email_verifie: true });
-      logger.info(`[email] Compte vérifié : ${utilisateur.id}`);
-    }
-    return { success: true, message: 'Adresse email vérifiée avec succès.', utilisateur };
-  }
-
   // -------------------- CONNEXION --------------------
   /**
    * Connexion par mot de passe avec :
@@ -370,18 +337,6 @@ class AuthService {
           ? `Votre demande d'inscription a été refusée. Motif : ${utilisateur.motif_rejet}`
           : "Votre demande d'inscription a été refusée.",
         code: 'COMPTE_REJETE',
-      };
-    }
-
-    // Vérification d'email requise avant la première connexion ? (audit M5)
-    if (_exigerVerificationEmail() && !utilisateur.email_verifie) {
-      return {
-        success: false,
-        message: 'Veuillez vérifier votre adresse email avant de vous connecter. Vérifiez votre boîte de réception.',
-        // Code stable pour que les clients (web/mobile) proposent un parcours
-        // dédié (ex : attente + nouvel essai automatique) sans analyser le
-        // texte de `message`, qui peut changer de formulation.
-        code: 'EMAIL_NON_VERIFIE',
       };
     }
 

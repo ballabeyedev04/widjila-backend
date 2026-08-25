@@ -1,9 +1,13 @@
 'use strict';
 
 const { ForbiddenError } = require('../errors/AppError.js');
+const { mfaConfig } = require('../config/security.js');
 
 /**
- * MFA obligatoire pour le rôle super-admin plateforme (audit — Sécurité §3).
+ * MFA du super-admin plateforme — OPTIONNEL par defaut, exigible par
+ * configuration (`MFA_ADMIN_OBLIGATOIRE=true`, voir config/security.js).
+ *
+ * Origine : audit Securite §3, qui l'imposait sans condition.
  *
  * Contexte : `req.user.role === 'Admin'` traverse `checkOrganisation` sans
  * aucun filtre — ce compte voit et modifie TOUTES les organisations
@@ -21,6 +25,11 @@ const { ForbiddenError } = require('../errors/AppError.js');
  * pas encore activé son MFA hors de tout moyen de l'activer.
  */
 const requireMfaActive = (req, res, next) => {
+  // Desactive par defaut : le MFA est une OPTION, proposee a tous depuis le
+  // profil, et non une condition d'acces. Le garde reste pose sur les routes
+  // `/admin/*` pour que `MFA_ADMIN_OBLIGATOIRE=true` suffise a le rallumer.
+  if (!mfaConfig.obligatoirePourAdmin) return next();
+
   if (req.user?.role !== 'Admin') return next(); // n'a rien à faire hors de ce rôle
 
   if (!req.user.mfa_active) {
