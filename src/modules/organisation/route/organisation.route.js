@@ -10,7 +10,8 @@ const checkSubscription = require('../../../middlewares/checkSubscription.middle
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const { mutationRateLimit } = require('../../../middlewares/rateLimit.middleware.js');
-const { GESTION } = require('../../../config/roles.js');
+const { GESTION, GESTION_MEMBRES } = require('../../../config/roles.js');
+const { requireFonctionnalite, verifierLimite } = require('../../../middlewares/requireFonctionnalite.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const {
   modifierOrganisationSchema, ajouterMembreSchema, modifierMembreSchema, creerEquipeSchema,
@@ -71,6 +72,11 @@ router.post(
   checkActiveUser,
   checkSubscription,
   requireRole(...GESTION),
+  // L'import crée PLUSIEURS comptes : sans borne ici, une seule requête
+  // suffirait à dépasser le plafond. Le nombre exact de lignes n'est connu
+  // qu'après lecture du fichier — le service applique donc la coupure fine,
+  // ce garde ne refuse que si le plafond est DÉJÀ atteint.
+  verifierLimite('utilisateurs'),
   mutationRateLimit,
   upload.tableurUploadContacts.single('fichier'),
   upload.validateTableurMagicBytes,
@@ -91,14 +97,18 @@ router.put(
 // ── Membres ──────────────────────────────────────────────────────────────────
 // Liste des membres : réservée aux rôles gestionnaires (voir aussi
 // GET / qui renvoie les membres de l'org avec des attributs sûrs).
-router.get('/membres', auth, checkActiveUser, checkSubscription, requireRole(...GESTION), paginate(), organisationController.listerMembres);
+router.get('/membres', auth, checkActiveUser, checkSubscription, requireRole(...GESTION_MEMBRES), paginate(), organisationController.listerMembres);
 
 router.post(
   '/membres',
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole(...GESTION),
+  requireRole(...GESTION_MEMBRES),
+  // Plafond de la formule (2 utilisateurs en Essentiel, 5 en Pro, illimité en
+  // Entreprise). Vérifié AVANT le contrôleur : refuser après la création
+  // laisserait le compte en base et le plafond dépassé.
+  verifierLimite('utilisateurs'),
   validate(ajouterMembreSchema),
   organisationController.ajouterMembre
 );
@@ -108,7 +118,7 @@ router.put(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole(...GESTION),
+  requireRole(...GESTION_MEMBRES),
   validate(modifierMembreSchema),
   organisationController.modifierMembre
 );
@@ -118,7 +128,7 @@ router.delete(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole(...GESTION),
+  requireRole(...GESTION_MEMBRES),
   organisationController.supprimerMembre
 );
 
@@ -131,6 +141,8 @@ router.post(
   checkActiveUser,
   checkSubscription,
   requireRole(...GESTION),
+  // « Suivi d'équipe » — option avancée, Pro et Entreprise (visuel client).
+  requireFonctionnalite('suivi_equipe'),
   validate(creerEquipeSchema),
   organisationController.creerEquipe
 );

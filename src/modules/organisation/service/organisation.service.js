@@ -95,13 +95,48 @@ class OrganisationService {
   }
 
   /**
+   * Interdit d'attribuer un rôle plus puissant que le sien.
+   *
+   * Depuis que `GESTION_MEMBRES` ouvre la gestion des membres au rôle
+   * `Entreprise` (parité avec le mobile), bloquer le seul rôle `Admin` ne
+   * suffit plus : une entreprise pouvait se créer un compte `ChefProjet` ou
+   * `MaitreOuvrage`, en choisir le mot de passe, s'y connecter — et se
+   * retrouver avec les réglages de l'organisation, les filiales et les
+   * équipes, dont `roles.js` dit précisément qu'elle n'a rien à y faire.
+   *
+   * Les appelants DÉJÀ dans GESTION ne sont pas concernés : attribuer un rôle
+   * de gestion quand on en a un n'est pas une élévation.
+   *
+   * @param {string} roleAuteur — rôle du demandeur (`req.user.role`)
+   * @param {string} roleVise   — rôle qu'il cherche à attribuer
+   */
+  static _refusElevation(roleAuteur, roleVise) {
+    if (roleVise === undefined || roleVise === null) return null;
+    if (GESTION.includes(roleAuteur)) return null;
+    if (!GESTION.includes(roleVise)) return null;
+    return {
+      success: false,
+      message: 'Vous ne pouvez pas attribuer un rôle de gestion de l’organisation.',
+    };
+  }
+
+  /**
    * Ajoute un membre à l'organisation.
    * Sans mot_de_passe fourni → mot de passe temporaire généré et renvoyé
    * une seule fois (l'utilisateur devra le changer à la première connexion).
+   *
+   * @param {string} [roleAuteur] — rôle du demandeur, pour la garde
+   *   d'élévation. Absent (appel interne, script) : aucune restriction
+   *   supplémentaire, le contrôle de route reste seul maître.
    */
-  static async ajouterMembre(organisationId, data) {
+  static async ajouterMembre(organisationId, data, roleAuteur = null) {
     if (data.role === 'Admin') {
       return { success: false, message: "Le rôle 'Admin' est réservé au super-admin de la plateforme" };
+    }
+
+    if (roleAuteur) {
+      const refus = OrganisationService._refusElevation(roleAuteur, data.role);
+      if (refus) return refus;
     }
 
     const emailClean = data.email.trim().toLowerCase();
@@ -155,11 +190,18 @@ class OrganisationService {
    * super-admin), impossible de modifier son propre rôle/statut/permissions
    * (anti auto-promotion), et les rôles sont limités à la liste organisation.
    */
-  static async modifierMembre(organisationId, membreId, data, acteurId = null) {
+  static async modifierMembre(organisationId, membreId, data, acteurId = null, roleAuteur = null) {
     const utilisateur = await Utilisateur.findOne({
       where: { id: membreId, organisationId },
     });
     if (!utilisateur) return { success: false, message: 'Membre introuvable dans cette organisation' };
+
+    // Même élévation par un autre chemin : promouvoir un membre existant vers
+    // un rôle de gestion vaut création d'un tel compte.
+    if (roleAuteur) {
+      const refus = OrganisationService._refusElevation(roleAuteur, data.role);
+      if (refus) return refus;
+    }
 
     // Anti auto-promotion : on ne modifie pas son propre rôle, statut ou permissions
     if (acteurId && String(acteurId) === String(membreId)) {

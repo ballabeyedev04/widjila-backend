@@ -3,9 +3,10 @@
 const SubscriptionService = require('../service/subscription.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { BadRequestError, ForbiddenError } = require('../../../errors/AppError.js');
+const DroitsService = require('../service/droits.service.js');
 
 exports.getPlans = asyncHandler(async (req, res) => {
-  const plans = SubscriptionService.getPlans();
+  const plans = await SubscriptionService.getPlans();
   res.status(200).json({ success: true, message: 'Plans récupérés', data: { plans } });
 });
 
@@ -55,6 +56,33 @@ exports.changerPlan = asyncHandler(async (req, res) => {
       paymentIntentId: result.paymentIntentId,
       montant: result.montant,
       devise: result.devise,
+    },
+  });
+});
+
+/** Historique des souscriptions de l'organisation connectée. */
+exports.getHistorique = asyncHandler(async (req, res) => {
+  const result = await SubscriptionService.getHistorique(req.user.organisationId);
+  res.status(200).json({
+    success: true,
+    message: 'Historique récupéré',
+    data: { souscriptions: result.souscriptions },
+  });
+});
+
+/**
+ * Droits et usage courants — c'est cette route que le web et le mobile
+ * interrogent pour savoir quoi afficher et quoi griser. Elle ne DONNE aucun
+ * droit : les gardes vivent dans les middlewares.
+ */
+exports.getDroits = asyncHandler(async (req, res) => {
+  const usage = await DroitsService.getUsage(req.user.organisationId);
+  res.status(200).json({
+    success: true,
+    message: 'Droits récupérés',
+    data: {
+      droits: usage.droits,
+      usage: { utilisateurs: usage.utilisateurs, chantiers: usage.chantiers },
     },
   });
 });

@@ -39,6 +39,23 @@ const PILOTAGE = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'MaitreOu
 // Gestion de l'organisation, des membres et des équipes (MOA dirige l'org).
 const GESTION = ['Admin', 'ChefProjet', 'MaitreOuvrage'];
 
+// Gestion des MEMBRES uniquement — volontairement plus large que GESTION.
+//
+// Une entreprise connectée au web doit pouvoir constituer son propre effectif
+// (chefs de chantier, conducteurs de travaux…) comme elle le fait déjà depuis
+// le mobile. Elle n'a pour autant RIEN à faire dans les réglages de
+// l'organisation, les filiales, les agences ou l'import de contacts en masse :
+// ces routes restent sur GESTION.
+//
+// Ce groupe n'est qu'un premier filtre de ROUTE. Les gardes fines vivent dans
+// organisation.service.js :
+//   - 'Admin' n'est jamais assignable ;
+//   - nul ne modifie son propre rôle, statut ou permissions ;
+//   - `_refusElevation` interdit à un appelant hors GESTION d'attribuer un
+//     rôle DE gestion — sans quoi une entreprise se créerait un compte
+//     ChefProjet et récupérerait tout ce qui lui est fermé ici.
+const GESTION_MEMBRES = [...GESTION, 'Entreprise'];
+
 // Actions très sensibles réservées au chef de projet (le rôle Admin passe
 // toujours par le middleware). Ex : supprimer un chantier.
 const SENSIBLE = ['ChefProjet'];
@@ -59,4 +76,4 @@ const RESERVE_INTERVENANTS = ['ChefProjet', 'ConducteurTravaux', 'BureauControle
 // qu'un premier filtre grossier, à l'image du reste du module.
 const SOUS_TRAITANT = ['SousTraitant'];
 
-module.exports = { OPERATIONNEL, OPERATIONNEL_CONTROLE, PILOTAGE, GESTION, SENSIBLE, RESERVE_INTERVENANTS, SOUS_TRAITANT };
+module.exports = { OPERATIONNEL, OPERATIONNEL_CONTROLE, PILOTAGE, GESTION, GESTION_MEMBRES, SENSIBLE, RESERVE_INTERVENANTS, SOUS_TRAITANT };

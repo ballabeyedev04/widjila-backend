@@ -1,7 +1,7 @@
 'use strict';
 
 const { QueryTypes, UniqueConstraintError } = require('sequelize');
-const { Plan, Chantier, Annotation, Reserve, ReservePosition, Media, Organisation } = require('../../../models/index.js');
+const { Plan, Chantier, Annotation, Reserve, ReservePosition, Media, Organisation, Zone, Etage, Batiment, PlanHotspot } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
@@ -58,6 +58,104 @@ async function _avecReessaiVersion(operation, tentatives = 3) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  LOCALISATION D'UN PLAN
+//
+//  Un plan porte `zoneId` (l'appartement / la pièce). Le parcours décrit par le
+//  guide client — « plan global → bâtiment → étage → appartement » — a besoin
+//  de la chaîne COMPLÈTE pour ranger chaque plan à son niveau : sans elle, le
+//  client ne peut pas savoir qu'un plan appartient au 2e étage du bâtiment A,
+//  et devait recharger toute la structure du chantier puis la recouper à la
+//  main.
+//
+//  `required: false` partout : un plan sans zone est le PLAN GLOBAL du
+//  chantier (ou d'un bâtiment). Il doit continuer d'apparaître dans la liste —
+//  c'est même le point d'entrée du parcours.
+// ══════════════════════════════════════════════════════════════════════════════
+const INCLUDE_LOCALISATION = [
+  {
+    model: Zone,
+    as: 'zone',
+    required: false,
+    attributes: ['id', 'nom', 'type'],
+    include: [{
+      model: Etage,
+      as: 'etage',
+      required: false,
+      attributes: ['id', 'nom', 'niveau'],
+      include: [{ model: Batiment, as: 'batiment', required: false, attributes: ['id', 'nom', 'code'] }],
+    }],
+  },
+  // Rattachements DIRECTS — un plan d'étage n'a pas de zone, un plan de
+  // bâtiment n'a ni zone ni étage : sans ces deux jointures, ces plans
+  // arrivaient au client sans aucune localisation et se retrouvaient tous
+  // rangés au niveau du chantier.
+  {
+    model: Etage,
+    as: 'etage',
+    required: false,
+    attributes: ['id', 'nom', 'niveau'],
+    include: [{ model: Batiment, as: 'batiment', required: false, attributes: ['id', 'nom', 'code'] }],
+  },
+  { model: Batiment, as: 'batiment', required: false, attributes: ['id', 'nom', 'code'] },
+];
+
+/** Zones cliquables du plan — voir planHotspot.model.js. */
+const INCLUDE_HOTSPOTS = {
+  model: PlanHotspot,
+  as: 'hotspots',
+  required: false,
+  attributes: ['id', 'cible_type', 'cible_id', 'libelle', 'x', 'y', 'largeur', 'hauteur', 'page'],
+};
+
+/**
+ * Vérifie que le niveau auquel on rattache le plan appartient bien AU chantier
+ * visé, et renvoie le triplet à enregistrer.
+ *
+ * Sans ce contrôle, `batimentId` / `etageId` / `zoneId` étant de simples UUID
+ * dans le corps de la requête, un utilisateur pouvait ranger son plan sous le
+ * bâtiment d'un autre chantier — voire d'une autre organisation. Le plan
+ * apparaissait alors dans une arborescence qui ne lui appartenait pas.
+ *
+ * Les trois niveaux sont EXCLUSIFS : on retient le plus fin renseigné et on
+ * ignore les autres, plutôt que de rejeter l'upload. Un client qui envoie à la
+ * fois l'étage et l'appartement décrit l'appartement ; refuser le fichier pour
+ * cette redondance ferait perdre le dépôt sans rien protéger.
+ */
+async function _resoudreRattachement(chantierId, data) {
+  const vide = { batimentId: null, etageId: null, zoneId: null };
+
+  if (data.zoneId) {
+    const zone = await Zone.findByPk(data.zoneId, {
+      attributes: ['id', 'etageId'],
+      include: [{
+        model: Etage, as: 'etage', attributes: ['id', 'batimentId'], required: true,
+        include: [{ model: Batiment, as: 'batiment', where: { chantierId }, attributes: ['id'], required: true }],
+      }],
+    });
+    if (!zone) return { erreur: 'La zone indiquée n’appartient pas à ce chantier' };
+    return { ...vide, zoneId: zone.id, etageId: zone.etageId, batimentId: zone.etage.batimentId };
+  }
+
+  if (data.etageId) {
+    const etage = await Etage.findByPk(data.etageId, {
+      attributes: ['id', 'batimentId'],
+      include: [{ model: Batiment, as: 'batiment', where: { chantierId }, attributes: ['id'], required: true }],
+    });
+    if (!etage) return { erreur: 'L’étage indiqué n’appartient pas à ce chantier' };
+    return { ...vide, etageId: etage.id, batimentId: etage.batimentId };
+  }
+
+  if (data.batimentId) {
+    const batiment = await Batiment.findOne({ where: { id: data.batimentId, chantierId }, attributes: ['id'] });
+    if (!batiment) return { erreur: 'Le bâtiment indiqué n’appartient pas à ce chantier' };
+    return { ...vide, batimentId: batiment.id };
+  }
+
+  // Aucun rattachement : plan global du chantier — le point d'entrée du parcours.
+  return vide;
+}
+
 class PlanService {
 
   // -------------------- UPLOAD D'UN PLAN --------------------
@@ -76,6 +174,11 @@ class PlanService {
     // changeant simplement :chantierId dans l'URL.
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
+
+    // Rattachement résolu AVANT l'écriture disque : un rattachement invalide
+    // doit échouer sans avoir rien déposé sur le disque.
+    const rattachement = await _resoudreRattachement(chantierId, data);
+    if (rattachement.erreur) return { success: false, message: rattachement.erreur };
 
     // Écriture disque AVANT la transaction (I/O non transactionnelle). Si
     // l'enregistrement en base échoue malgré tout, le fichier orphelin est
@@ -100,7 +203,9 @@ class PlanService {
 
           const cree = await Plan.create({
             chantierId,
-            zoneId: data.zoneId || null,
+            batimentId: rattachement.batimentId,
+            etageId: rattachement.etageId,
+            zoneId: rattachement.zoneId,
             nom: data.nom,
             version,
             fichier_url,
@@ -133,6 +238,7 @@ class PlanService {
 
     const plans = await Plan.findAll({
       where: { chantierId },
+      include: [...INCLUDE_LOCALISATION, INCLUDE_HOTSPOTS],
       order: [['nom', 'ASC'], ['version', 'DESC']],
     });
     return { success: true, plans };
@@ -166,6 +272,8 @@ class PlanService {
     const plans = await Plan.findAll({
       where,
       include: [
+        ...INCLUDE_LOCALISATION,
+        INCLUDE_HOTSPOTS,
         // `required: true` : c'est CE filtre qui porte l'isolation multi-tenant.
         {
           model: Chantier, as: 'chantier', where: whereChantier, required: true, attributes: ['id', 'nom', 'code'],
@@ -225,6 +333,8 @@ class PlanService {
       include: [
         // Scoping multi-tenant : le chantier doit appartenir à l'organisation
         { model: Chantier, as: 'chantier', where: { organisationId }, attributes: ['id', 'nom'] },
+        ...INCLUDE_LOCALISATION,
+        INCLUDE_HOTSPOTS,
       ],
     });
     if (!plan || !plan.chantier) {

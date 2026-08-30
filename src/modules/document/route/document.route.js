@@ -12,6 +12,7 @@ const paginate = require('../../../middlewares/pagination.middleware.js');
 const { OPERATIONNEL, OPERATIONNEL_CONTROLE } = require('../../../config/roles.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const { uploadDocumentSchema, signerDocumentSchema } = require('../validation/document.validation.js');
+const verifierTypeReferentiel = require('../../../middlewares/verifierTypeReferentiel.middleware.js');
 
 // Le chantierId est porté par l'URL → injecté dans le body avant validation Joi
 const injectChantierId = (req, res, next) => {
@@ -30,6 +31,9 @@ router.post(
   upload.validateMagicBytes,
   injectChantierId,
   validate(uploadDocumentSchema),
+  // Le type n'est plus une liste figée : il est vérifié contre le
+  // référentiel administrable. Voir le middleware pour le raisonnement.
+  verifierTypeReferentiel('document'),
   documentController.uploaderDocument
 );
 

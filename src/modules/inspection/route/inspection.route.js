@@ -13,6 +13,7 @@ const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const { OPERATIONNEL, OPERATIONNEL_CONTROLE } = require('../../../config/roles.js');
 const validate = require('../../../middlewares/validate.middleware.js');
+const verifierTypeReferentiel = require('../../../middlewares/verifierTypeReferentiel.middleware.js');
 const {
   creerInspectionSchema, modifierInspectionSchema, cocherChecklistSchema,
   creerModeleSchema, modifierModeleSchema, convierSchema, repondreConvocationSchema, appliquerModeleSchema,
@@ -71,6 +72,7 @@ router.post(
   requireRole(...OPERATIONNEL_CONTROLE),
   injectChantierId,
   validate(creerInspectionSchema),
+  verifierTypeReferentiel('inspection'),
   inspectionController.creerInspection
 );
 
@@ -83,6 +85,7 @@ router.put(
   checkSubscription,
   requireRole(...OPERATIONNEL_CONTROLE),
   validate(modifierInspectionSchema),
+  verifierTypeReferentiel('inspection'),
   inspectionController.modifierInspection
 );
 

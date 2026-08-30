@@ -182,12 +182,18 @@ const notificationRoutes = require('./modules/notification/route/notification.ro
 const partenaireRoutes   = require('./modules/organisation/route/partenaire.route.js');
 const rapportRoutes      = require('./modules/rapport/route/rapport.route.js');
 const dashboardRoutes    = require('./modules/dashboard/route/dashboard.route.js');
+const corpsEtatRoutes    = require('./modules/corpsEtat/route/corpsEtat.route.js');
+const referentielRoutes  = require('./modules/referentiel/route/referentiel.route.js');
+const { referentiels }   = require('./modules/referentiel/typesReferentiels.js');
+const phaseRoutes        = require('./modules/phase/route/phaseReferentiel.route.js');
 
 const adminUtilisateurRoutes = require('./modules/admin/route/gestionUtilisateur.route.js');
 const adminOrganisationRoutes = require('./modules/admin/route/gestionOrganisation.route.js');
 const adminStatistiquesRoutes = require('./modules/admin/route/statistiques.route.js');
 const adminAuditLogRoutes     = require('./modules/admin/route/auditLog.route.js');
 const adminDemandeRoutes      = require('./modules/admin/route/demandeInscription.route.js');
+const adminPlansAbonnementRoutes = require('./modules/subscription/route/planAbonnement.route.js');
+const adminAbonnementsRoutes     = require('./modules/subscription/route/abonnementAdmin.route.js');
 const suppressionCompteRoutes = require('./modules/suppressionCompte/route/suppressionCompte.route.js');
 const adminSuppressionRoutes  = require('./modules/suppressionCompte/route/adminSuppressionCompte.route.js');
 const subscriptionRoutes = require('./modules/subscription/route/subscription.route.js');
@@ -222,15 +228,38 @@ app.use('/api/v1', rapportRoutes);
 
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1', partenaireRoutes);
+// Énumérations métier (statuts, sévérités, types) — source unique lue par le
+// web et le mobile, qui les recopiaient. Lecture seule : ce sont des colonnes
+// ENUM, pas des données administrables.
+app.use('/api/v1/referentiels',  referentielRoutes);
+// Référentiels de TYPE administrables : /types-document, /types-intervenant,
+// /types-inspection. Ils remplacent trois colonnes ENUM que le client ne
+// pouvait pas étendre sans migration.
+for (const { chemin, routeur } of referentiels) {
+  app.use(`/api/v1${chemin}`, routeur);
+}
+// Catalogue des corps d'état (métiers BTP) — référentiel administrable.
+app.use('/api/v1/corps-etat',    corpsEtatRoutes);
+// Référentiel des phases — distinct de /chantiers/:id/phases (planning).
+app.use('/api/v1/phases',        phaseRoutes);
 app.use('/api/v1/dashboard',     dashboardRoutes);
 
 // ── Abonnement (accessible même sans abonnement pour /plans et /webhook) ──────
 app.use('/api/v1/abonnement',    subscriptionRoutes);
 
-// ── Middleware checkSubscription sur toutes les routes protégées (sauf /auth et /abonnement) ──
-// À placer APRÈS les routes publiques et AVANT les routes qui doivent être protégées
+// ── Filet de sécurité — PAS la garde principale ──────────────────────────────
+//
+// ⚠️ Ne pas s'y fier en ajoutant une route. Express exécute les `app.use` dans
+// l'ordre d'enregistrement : toutes les routes montées CI-DESSUS répondent
+// avant d'arriver ici, ce middleware ne les voit jamais. Il ne s'applique
+// qu'à ce qui serait monté plus bas.
+//
+// La vraie garde d'abonnement est posée ROUTE PAR ROUTE (`checkSubscription`
+// dans chaque fichier de routes métier), et les restrictions par formule le
+// sont par `requireFonctionnalite` / `verifierLimite`. Une nouvelle route
+// métier doit donc déclarer `checkSubscription` explicitement : rien ici ne
+// le fera à sa place.
 app.use('/api/v1', (req, res, next) => {
-  // Routes exemptées : auth (login/register/refresh/mfa), abonnement (plans/webhook/status sans abonnement)
   const exemptPaths = ['/auth/', '/abonnement/plans', '/abonnement/webhook'];
   const isExempt = exemptPaths.some(p => req.path.startsWith(p));
   if (isExempt) return next();
@@ -242,6 +271,11 @@ app.use('/api/v1/admin/utilisateurs',  adminUtilisateurRoutes);
 app.use('/api/v1/admin/organisations', adminOrganisationRoutes);
 app.use('/api/v1/admin/statistiques',  adminStatistiquesRoutes);
 app.use('/api/v1/admin/audit-logs',    adminAuditLogRoutes);
+// Catalogue des formules (« Prix abonnements ») et suivi des abonnements
+// clients. Sous /admin/ : le super-admin plateforme n'a pas d'organisation,
+// donc pas d'abonnement à vérifier.
+app.use('/api/v1/admin/plans-abonnement', adminPlansAbonnementRoutes);
+app.use('/api/v1/admin/abonnements',      adminAbonnementsRoutes);
 app.use('/api/v1/admin/demandes-inscription', adminDemandeRoutes);
 app.use('/api/v1/admin/demandes-suppression', adminSuppressionRoutes);
 

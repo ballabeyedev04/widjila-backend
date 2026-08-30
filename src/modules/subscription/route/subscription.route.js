@@ -21,6 +21,13 @@ router.get('/status', auth, checkActiveUser, subscriptionController.getStatus);
 // Détails du plan actuel + tous les plans (pour UI changement)
 router.get('/plan-details', auth, checkActiveUser, subscriptionController.getPlanDetails);
 
+// Droits et usage courants — consommés par le web et le mobile pour savoir
+// quoi afficher. N'accorde rien : les gardes sont dans les middlewares.
+router.get('/droits', auth, checkActiveUser, subscriptionController.getDroits);
+
+// Historique des souscriptions, avec le prix RÉELLEMENT payé à chaque fois.
+router.get('/historique', auth, checkActiveUser, requireRole(...GESTION), subscriptionController.getHistorique);
+
 // ── Création PaymentIntent (choix du plan) ──────────────────────────────────────
 // Engager une dépense pour l'organisation relève de la gestion.
 router.post(

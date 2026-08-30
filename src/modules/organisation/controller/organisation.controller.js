@@ -71,7 +71,11 @@ exports.listerMembres = asyncHandler(async (req, res) => {
 });
 
 exports.ajouterMembre = asyncHandler(async (req, res) => {
-  const result = await OrganisationService.ajouterMembre(req.user.organisationId, req.body);
+  const result = await OrganisationService.ajouterMembre(
+    req.user.organisationId,
+    req.body,
+    req.user.role // garde d'élévation : voir OrganisationService._refusElevation
+  );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({
     success: true,
@@ -89,7 +93,8 @@ exports.modifierMembre = asyncHandler(async (req, res) => {
     req.user.organisationId,
     req.params.id,
     req.body,
-    req.user.id // acteur — empêche l'auto-promotion / auto-modification sensible
+    req.user.id, // acteur — empêche l'auto-promotion / auto-modification sensible
+    req.user.role // garde d'élévation : voir OrganisationService._refusElevation
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({

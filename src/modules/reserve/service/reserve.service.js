@@ -2,9 +2,9 @@
 
 const { Op, QueryTypes, UniqueConstraintError } = require('sequelize');
 const {
-  Reserve, ReservePosition, ReserveHistorique, Commentaire, Media,
+  Reserve, ReservePosition, ReserveHistorique, Commentaire, Media, CorpsEtat, Phase,
   Chantier, Batiment, Etage, Zone, Lot, Plan, Organisation, Utilisateur,
-  PieceJointe, ReserveAffectation, Signature,
+  PieceJointe, ReserveAffectation, Signature, Partenaire,
 } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
@@ -219,13 +219,77 @@ class ReserveService {
   }
 
   /** Contrôles communs à creerReserve / creerReserveSerie (lectures seules). */
+  /**
+   * Le partenaire choisi comme « entreprise concernée » doit appartenir à
+   * l'annuaire de CETTE organisation : `partenaireId` est un simple UUID dans
+   * le corps de la requête, rien n'empêcherait sinon de désigner l'entreprise
+   * d'un autre client — et la jointure la ferait apparaître dans une réserve
+   * qui ne la concerne pas.
+   */
+  static async _verifierPartenaire(organisationId, partenaireId) {
+    const partenaire = await Partenaire.findOne({
+      where: { id: partenaireId, organisationId },
+      attributes: ['id'],
+    });
+    return partenaire ? null : 'Entreprise introuvable dans cette organisation';
+  }
+
+  /**
+   * La phase choisie doit être VISIBLE par cette organisation.
+   *
+   * `phaseId` arrive en simple UUID dans le corps de la requête, et rien ne
+   * le contrôlait : on pouvait rattacher une réserve à la phase d'un autre
+   * client, dont le nom réapparaissait ensuite dans chaque lecture de la
+   * réserve — une fuite inter-tenant par simple jointure.
+   *
+   * Visible = référentiel standard de la plateforme (`organisationId` NULL) ou
+   * phase propre à l'organisation. Même règle que `_visibilite` du service de
+   * référentiel, et même restriction au référentiel (`chantierId` NULL) : les
+   * phases de PLANNING d'un chantier ne sont pas des valeurs de ce champ.
+   */
+  static async _verifierPhase(organisationId, phaseId) {
+    const phase = await Phase.findOne({
+      where: {
+        id: phaseId,
+        chantierId: null,
+        [Op.or]: [{ organisationId: null }, { organisationId }],
+      },
+      attributes: ['id'],
+    });
+    return phase ? null : 'Phase introuvable dans le référentiel de votre organisation';
+  }
+
+  /** Même contrôle pour le corps d'état — voir [_verifierPhase]. */
+  static async _verifierCorpsEtat(organisationId, corpsEtatId) {
+    const corpsEtat = await CorpsEtat.findOne({
+      where: {
+        id: corpsEtatId,
+        [Op.or]: [{ organisationId: null }, { organisationId }],
+      },
+      attributes: ['id'],
+    });
+    return corpsEtat ? null : 'Corps d’état introuvable dans le référentiel de votre organisation';
+  }
+
   static async _verifierReferences(organisationId, data) {
     if (data.entrepriseId) {
       const erreur = await ReserveService._verifierEntreprise(organisationId, data.entrepriseId);
       if (erreur) return erreur;
     }
+    if (data.partenaireId) {
+      const erreur = await ReserveService._verifierPartenaire(organisationId, data.partenaireId);
+      if (erreur) return erreur;
+    }
     if (data.assigneA) {
       const erreur = await ReserveService._verifierAssigne(organisationId, data.assigneA);
+      if (erreur) return erreur;
+    }
+    if (data.phaseId) {
+      const erreur = await ReserveService._verifierPhase(organisationId, data.phaseId);
+      if (erreur) return erreur;
+    }
+    if (data.corpsEtatId) {
+      const erreur = await ReserveService._verifierCorpsEtat(organisationId, data.corpsEtatId);
       if (erreur) return erreur;
     }
     return null;
@@ -287,7 +351,10 @@ class ReserveService {
           severite: data.severite || 'moyenne',
           priorite: data.priorite || 'moyenne',
           categorie: data.categorie || 'autre',
+          corpsEtatId: data.corpsEtatId || null,
+          phaseId: data.phaseId || null,
           entrepriseId: data.entrepriseId || null,
+          partenaireId: data.partenaireId || null,
           assigneA: data.assigneA || null,
           date_limite: data.date_limite || null,
           creePar: utilisateurId,
@@ -388,7 +455,10 @@ class ReserveService {
             severite: data.severite || 'moyenne',
             priorite: data.priorite || 'moyenne',
             categorie: data.categorie || 'autre',
+            corpsEtatId: data.corpsEtatId || null,
+            phaseId: data.phaseId || null,
             entrepriseId: data.entrepriseId || null,
+            partenaireId: data.partenaireId || null,
             assigneA: data.assigneA || null,
             date_limite: data.date_limite || null,
             creePar: utilisateurId,
@@ -475,6 +545,8 @@ class ReserveService {
           severite: reserve.severite,
           priorite: reserve.priorite,
           categorie: reserve.categorie,
+          corpsEtatId: reserve.corpsEtatId,
+          phaseId: reserve.phaseId,
           entrepriseId: reserve.entrepriseId,
           assigneA: reserve.assigneA,
           date_limite: reserve.date_limite,
@@ -514,6 +586,7 @@ class ReserveService {
   // -------------------- LISTER LES RÉSERVES --------------------
   static async listReserves(organisationId, chantierId, {
     page = 1, limit = 20, statut, severite, priorite, lotId, entrepriseId, assigneA, search,
+    phaseId, corpsEtatId, partenaireId,
   } = {}) {
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
@@ -525,6 +598,12 @@ class ReserveService {
     if (lotId) where.lotId = lotId;
     if (entrepriseId) where.entrepriseId = entrepriseId;
     if (assigneA) where.assigneA = assigneA;
+    // Filtres d'HISTORIQUE : « réserves de cette phase », « réserves de cette
+    // entreprise », et leur combinaison — c'est ce croisement qui alimente
+    // l'écran d'historique par entreprise, filtrable par phase.
+    if (phaseId) where.phaseId = phaseId;
+    if (corpsEtatId) where.corpsEtatId = corpsEtatId;
+    if (partenaireId) where.partenaireId = partenaireId;
     if (search) {
       const motif = `%${escapeLike(search)}%`;
       where[Op.or] = [
@@ -542,7 +621,10 @@ class ReserveService {
         { model: Etage, as: 'etage', attributes: ['id', 'nom'] },
         { model: Zone, as: 'zone', attributes: ['id', 'nom'] },
         { model: Lot, as: 'lot', attributes: ['id', 'nom'] },
+        { model: CorpsEtat, as: 'corpsEtat', attributes: ['id', 'nom', 'code'], required: false },
+        { model: Phase, as: 'phase', attributes: ['id', 'nom', 'ordre'], required: false },
         { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
+        { model: Partenaire, as: 'partenaire', attributes: ['id', 'nom', 'type'], required: false },
         { model: Utilisateur, as: 'assigne', attributes: ['id', 'nom', 'prenom', 'photoProfil'] },
         { model: Utilisateur, as: 'createur', attributes: ['id', 'nom', 'prenom'] },
         // Vignette de la liste (mobile/web) : seulement le premier média,
@@ -583,6 +665,7 @@ class ReserveService {
    */
   static async listToutesReserves(organisationId, {
     page = 1, limit = 20, statut, severite, priorite, chantierId, entrepriseId, assigneA, search,
+    phaseId, corpsEtatId, partenaireId,
   } = {}, { toutesOrganisations = false } = {}) {
     const where = {};
     if (statut) where.statut = statut;
@@ -591,6 +674,12 @@ class ReserveService {
     if (chantierId) where.chantierId = chantierId;
     if (entrepriseId) where.entrepriseId = entrepriseId;
     if (assigneA) where.assigneA = assigneA;
+    // Filtres d'HISTORIQUE : « réserves de cette phase », « réserves de cette
+    // entreprise », et leur combinaison — c'est ce croisement qui alimente
+    // l'écran d'historique par entreprise, filtrable par phase.
+    if (phaseId) where.phaseId = phaseId;
+    if (corpsEtatId) where.corpsEtatId = corpsEtatId;
+    if (partenaireId) where.partenaireId = partenaireId;
     if (search) {
       const motif = `%${escapeLike(search)}%`;
       where[Op.or] = [
@@ -613,7 +702,10 @@ class ReserveService {
         { model: Etage, as: 'etage', attributes: ['id', 'nom'] },
         { model: Zone, as: 'zone', attributes: ['id', 'nom'] },
         { model: Lot, as: 'lot', attributes: ['id', 'nom'] },
+        { model: CorpsEtat, as: 'corpsEtat', attributes: ['id', 'nom', 'code'], required: false },
+        { model: Phase, as: 'phase', attributes: ['id', 'nom', 'ordre'], required: false },
         { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
+        { model: Partenaire, as: 'partenaire', attributes: ['id', 'nom', 'type'], required: false },
         { model: Utilisateur, as: 'assigne', attributes: ['id', 'nom', 'prenom', 'photoProfil'] },
         // Même parti pris que `listReserves` : une seule vignette, pas la
         // galerie (voir le commentaire `separate: true` plus haut).
@@ -642,7 +734,10 @@ class ReserveService {
         { model: Etage, as: 'etage', attributes: ['id', 'nom'] },
         { model: Zone, as: 'zone', attributes: ['id', 'nom'] },
         { model: Lot, as: 'lot', attributes: ['id', 'nom'] },
+        { model: CorpsEtat, as: 'corpsEtat', attributes: ['id', 'nom', 'code'], required: false },
+        { model: Phase, as: 'phase', attributes: ['id', 'nom', 'ordre'], required: false },
         { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
+        { model: Partenaire, as: 'partenaire', attributes: ['id', 'nom', 'type'], required: false },
         { model: Utilisateur, as: 'assigne', attributes: ['id', 'nom', 'prenom', 'photoProfil'] },
         { model: Utilisateur, as: 'createur', attributes: ['id', 'nom', 'prenom'] },
         { model: Utilisateur, as: 'validateur', attributes: ['id', 'nom', 'prenom'] },
@@ -696,12 +791,16 @@ class ReserveService {
       severite: reserve.severite,
       priorite: reserve.priorite,
       categorie: reserve.categorie,
+      corpsEtatId: reserve.corpsEtatId,
+      phaseId: reserve.phaseId,
       date_limite: reserve.date_limite,
       assigneA: reserve.assigneA,
       entrepriseId: reserve.entrepriseId,
+      partenaireId: reserve.partenaireId,
     };
 
-    // Références inter-tenant (entreprise ET assigné — cf. audit § 8)
+    // Références inter-tenant : entreprise, assigné, phase et corps d'état.
+    // Tous sont des UUID fournis par le client — aucun n'est digne de confiance.
     const erreurRef = await ReserveService._verifierReferences(organisationId, data);
     if (erreurRef) return { success: false, message: erreurRef };
 
@@ -716,7 +815,7 @@ class ReserveService {
     if (erreurLoc) return { success: false, message: erreurLoc };
 
     const updates = {};
-    for (const champ of ['titre', 'description', 'severite', 'priorite', 'categorie', 'batimentId', 'etageId', 'zoneId', 'planId', 'lotId', 'entrepriseId', 'assigneA', 'date_limite']) {
+    for (const champ of ['titre', 'description', 'severite', 'priorite', 'categorie', 'corpsEtatId', 'phaseId', 'batimentId', 'etageId', 'zoneId', 'planId', 'lotId', 'entrepriseId', 'partenaireId', 'assigneA', 'date_limite']) {
       if (data[champ] !== undefined) updates[champ] = data[champ];
     }
 

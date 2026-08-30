@@ -4,6 +4,8 @@ const express = require('express');
 const router = express.Router();
 const planController = require('../controller/plan.controller.js');
 const annotationController = require('../controller/annotation.controller.js');
+const hotspotController = require('../controller/hotspot.controller.js');
+const { requireFonctionnalite } = require('../../../middlewares/requireFonctionnalite.middleware.js');
 const upload = require('../../../middlewares/upload.middleware.js');
 const auth = require('../../../middlewares/auth.middleware.js');
 const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware.js');
@@ -12,7 +14,10 @@ const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const { OPERATIONNEL, OPERATIONNEL_CONTROLE } = require('../../../config/roles.js');
 const validate = require('../../../middlewares/validate.middleware.js');
-const { uploadPlanSchema, creerAnnotationSchema, modifierAnnotationSchema } = require('../validation/plan.validation.js');
+const {
+  uploadPlanSchema, creerAnnotationSchema, modifierAnnotationSchema,
+  creerHotspotSchema, modifierHotspotSchema,
+} = require('../validation/plan.validation.js');
 
 // Le chantierId est porté par l'URL → injecté dans le body avant validation Joi
 const injectChantierId = (req, res, next) => {
@@ -68,6 +73,13 @@ router.post(
   checkActiveUser,
   checkSubscription,
   requireRole(...OPERATIONNEL_CONTROLE),
+  // « Plans & annotations » — option avancée (Pro, Entreprise).
+  //
+  // Seule l'ANNOTATION est gardée, jamais la consultation ni le dépôt d'un
+  // plan : créer une réserve en cliquant sur un plan relève de « Gestion des
+  // réserves », incluse dans TOUTES les formules. Fermer les plans à
+  // Essentiel viderait sa fonctionnalité principale.
+  requireFonctionnalite('annotations'),
   validate(creerAnnotationSchema),
   annotationController.creerAnnotation
 );
@@ -78,6 +90,7 @@ router.put(
   checkActiveUser,
   checkSubscription,
   requireRole(...OPERATIONNEL_CONTROLE),
+  requireFonctionnalite('annotations'),
   validate(modifierAnnotationSchema),
   annotationController.modifierAnnotation
 );
@@ -89,6 +102,47 @@ router.delete(
   checkSubscription,
   requireRole(...OPERATIONNEL),
   annotationController.supprimerAnnotation
+);
+
+// ── Zones cliquables d'un plan (navigation du guide client) ─────────────────
+// La LECTURE est ouverte à tout membre authentifié : sans elle, aucun rôle ne
+// peut descendre du plan global vers un appartement — c'est le parcours de
+// consultation lui-même, pas une opération d'édition.
+router.get('/plans/:id/hotspots', auth, checkActiveUser, checkSubscription, hotspotController.listerHotspots);
+
+// L'ÉCRITURE suit exactement le groupe qui dépose les plans et les annote
+// (OPERATIONNEL_CONTROLE) : dessiner la zone cliquable d'un bâtiment fait
+// partie de la mise en place du plan, pas de son exploitation.
+router.post(
+  '/plans/:id/hotspots',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL_CONTROLE),
+  requireFonctionnalite('annotations'),
+  validate(creerHotspotSchema),
+  hotspotController.creerHotspot
+);
+
+router.put(
+  '/hotspots/:hotspotId',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL_CONTROLE),
+  validate(modifierHotspotSchema),
+  hotspotController.modifierHotspot
+);
+
+// Alignée sur DELETE /annotations/:annotationId : la suppression reste plus
+// restrictive que la création.
+router.delete(
+  '/hotspots/:hotspotId',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL),
+  hotspotController.supprimerHotspot
 );
 
 router.delete(

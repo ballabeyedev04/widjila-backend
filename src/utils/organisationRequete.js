@@ -33,6 +33,7 @@ const CHAINE = {
   chantierId:   { modele: 'Chantier',   colonne: 'organisationId', libelle: 'Chantier' },
   planId:       { modele: 'Plan',       colonne: 'chantierId', vers: 'chantierId', libelle: 'Plan' },
   annotationId: { modele: 'Annotation', colonne: 'planId',     vers: 'planId',     libelle: 'Annotation' },
+  hotspotId:    { modele: 'PlanHotspot', colonne: 'planId',   vers: 'planId',     libelle: 'Repère' },
   reserveId:    { modele: 'Reserve',    colonne: 'chantierId', vers: 'chantierId', libelle: 'Réserve' },
   documentId:   { modele: 'Document',   colonne: 'chantierId', vers: 'chantierId', libelle: 'Document' },
   inspectionId: { modele: 'Inspection', colonne: 'chantierId', vers: 'chantierId', libelle: 'Inspection' },

@@ -46,6 +46,26 @@ const creerZoneSchema = Joi.object({
   type: Joi.string().valid('logement', 'piece', 'zone', 'local').optional(),
 });
 
+/**
+ * Modification de la structure — `.min(1)` : un PUT sans aucun champ ne
+ * décrit aucune intention et produirait un `update({})` silencieux, qui
+ * répondrait « modifié » sans rien changer.
+ */
+const modifierBatimentSchema = Joi.object({
+  nom: Joi.string().trim().min(2).max(100).optional(),
+  code: Joi.string().trim().max(50).optional().allow('', null),
+}).min(1);
+
+const modifierEtageSchema = Joi.object({
+  nom: Joi.string().trim().min(1).max(100).optional(),
+  niveau: Joi.number().integer().optional(),
+}).min(1);
+
+const modifierZoneSchema = Joi.object({
+  nom: Joi.string().trim().min(1).max(100).optional(),
+  type: Joi.string().valid('logement', 'piece', 'zone', 'local').optional(),
+}).min(1);
+
 const creerLotSchema = Joi.object({
   nom: Joi.string().trim().min(2).max(100).required(),
   code: Joi.string().trim().max(50).optional().allow('', null),
@@ -76,6 +96,9 @@ module.exports = {
   creerBatimentSchema,
   creerEtageSchema,
   creerZoneSchema,
+  modifierBatimentSchema,
+  modifierEtageSchema,
+  modifierZoneSchema,
   creerLotSchema,
   dupliquerChantierSchema,
   creerPhaseSchema,

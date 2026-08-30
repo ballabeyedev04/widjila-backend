@@ -4,10 +4,12 @@ const Joi = require('joi');
 
 const creerPartenaireSchema = Joi.object({
   nom: Joi.string().trim().min(2).max(200).required(),
-  type: Joi.string().valid(
-    'client', 'maitre_ouvrage', 'maitre_oeuvre', 'sous_traitant',
-    'fournisseur', 'bureau_controle', 'autre'
-  ).optional().default('client'),
+  // Le type n'est plus énuméré ici : il vit dans un référentiel
+  // administrable, et une liste figée empêcherait d'en ajouter. Seule la
+  // FORME est contrôlée ; l'existence l'est par le middleware
+  // `verifierTypeReferentiel`, posé sur la route.
+  type: Joi.string().trim().lowercase().pattern(/^[a-z0-9_]+$/).max(50).optional().default('client'),
+
   email: Joi.string().email().optional().allow('', null),
   telephone: Joi.string().trim().max(50).optional().allow('', null),
   contact: Joi.string().trim().max(150).optional().allow('', null),
@@ -21,10 +23,8 @@ const creerPartenaireSchema = Joi.object({
 
 const modifierPartenaireSchema = Joi.object({
   nom: Joi.string().trim().min(2).max(200).optional(),
-  type: Joi.string().valid(
-    'client', 'maitre_ouvrage', 'maitre_oeuvre', 'sous_traitant',
-    'fournisseur', 'bureau_controle', 'autre'
-  ).optional(),
+  type: Joi.string().trim().lowercase().pattern(/^[a-z0-9_]+$/).max(50).optional(),
+
   email: Joi.string().email().optional().allow('', null),
   telephone: Joi.string().trim().max(50).optional().allow('', null),
   contact: Joi.string().trim().max(150).optional().allow('', null),

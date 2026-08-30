@@ -10,6 +10,7 @@ const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const { creerPartenaireSchema, modifierPartenaireSchema } = require('../validation/partenaire.validation.js');
+const verifierTypeReferentiel = require('../../../middlewares/verifierTypeReferentiel.middleware.js');
 
 // ── Partenaires (module 2) — clients, MOA, MOE, sous-traitants ───────────────
 // paginate() : plafonne page/limit avant le service (voir pagination.middleware.js).
@@ -22,6 +23,7 @@ router.post(
   checkSubscription,
   requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre'),
   validate(creerPartenaireSchema),
+  verifierTypeReferentiel('partenaire'),
   partenaireController.creerPartenaire
 );
 
@@ -35,6 +37,7 @@ router.post(
   checkSubscription,
   requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre'),
   validate(creerPartenaireSchema),
+  verifierTypeReferentiel('partenaire'),
   partenaireController.creerPartenaire
 );
 
@@ -45,6 +48,7 @@ router.put(
   checkSubscription,
   requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre'),
   validate(modifierPartenaireSchema),
+  verifierTypeReferentiel('partenaire'),
   partenaireController.modifierPartenaire
 );
 

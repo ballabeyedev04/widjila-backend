@@ -16,6 +16,26 @@ const Plan = sequelize.define('Plan', {
     type: DataTypes.UUID,
     allowNull: false
   },
+  // ── Rattachement à la structure ────────────────────────────────────────────
+  //
+  // Un plan se rattache au niveau qu'il DÉCRIT, et ces niveaux sont exclusifs
+  // en pratique :
+  //   - aucun des trois  → plan global du chantier (la vue d'ensemble) ;
+  //   - batimentId seul  → plan d'un bâtiment ;
+  //   - etageId          → plan d'un étage ou d'un sous-sol ;
+  //   - zoneId           → plan d'un appartement / d'une pièce.
+  //
+  // `zoneId` existait seul : impossible d'attacher un plan d'étage sans
+  // inventer une zone fictive, et le parcours « bâtiment → étages →
+  // appartements » du guide client ne pouvait donc pas être alimenté.
+  batimentId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  etageId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   zoneId: {
     type: DataTypes.UUID,
     allowNull: true
@@ -58,6 +78,8 @@ const Plan = sequelize.define('Plan', {
   indexes: [
     { fields: ['chantier_id'] },
     { fields: ['zone_id'] },
+    { fields: ['batiment_id'] },
+    { fields: ['etage_id'] },
     // Une version d'un plan est unique DANS son chantier (audit § 6).
     // Sans cette contrainte, deux uploads simultanés du même plan créaient
     // silencieusement deux « version 3 », et la suppression de la dernière

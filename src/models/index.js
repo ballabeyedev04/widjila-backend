@@ -26,6 +26,14 @@ const ConnexionLog       = require('./connexionLog.model.js');
 const ChantierMembre     = require('./chantierMembre.model.js');
 const Phase              = require('./phase.model.js');
 const Annotation         = require('./annotation.model.js');
+const PlanHotspot        = require('./planHotspot.model.js');
+const CorpsEtat          = require('./corpsEtat.model.js');
+const TypeDocument       = require('./typeDocument.model.js');
+const TypePartenaire     = require('./typePartenaire.model.js');
+const TypeInspection     = require('./typeInspection.model.js');
+const PlanAbonnement     = require('./planAbonnement.model.js');
+const AbonnementSouscrit = require('./abonnementSouscrit.model.js');
+const EvenementPaiement  = require('./evenementPaiement.model.js');
 const PieceJointe        = require('./pieceJointe.model.js');
 const Signature          = require('./signature.model.js');
 const ReserveAffectation = require('./reserveAffectation.model.js');
@@ -93,6 +101,19 @@ Plan.belongsTo(Chantier, { foreignKey: 'chantierId', as: 'chantier' });
 Zone.hasMany(Plan, { foreignKey: 'zoneId', as: 'plans' });
 Plan.belongsTo(Zone, { foreignKey: 'zoneId', as: 'zone' });
 
+// Un plan décrit le niveau auquel il est rattaché : le chantier entier (aucun
+// rattachement), un bâtiment, un étage, ou une zone. Voir plan.model.js.
+Batiment.hasMany(Plan, { foreignKey: 'batimentId', as: 'plans' });
+Plan.belongsTo(Batiment, { foreignKey: 'batimentId', as: 'batiment' });
+
+Etage.hasMany(Plan, { foreignKey: 'etageId', as: 'plans' });
+Plan.belongsTo(Etage, { foreignKey: 'etageId', as: 'etage' });
+
+// Zones cliquables d'un plan — navigation « plan global → bâtiment → étage →
+// appartement » du guide client. Voir planHotspot.model.js.
+Plan.hasMany(PlanHotspot, { foreignKey: 'planId', as: 'hotspots', onDelete: 'CASCADE' });
+PlanHotspot.belongsTo(Plan, { foreignKey: 'planId', as: 'plan' });
+
 // Annotations sur les plans — module 4
 Plan.hasMany(Annotation, { foreignKey: 'planId', as: 'annotations', onDelete: 'CASCADE' });
 Annotation.belongsTo(Plan, { foreignKey: 'planId', as: 'plan' });
@@ -113,6 +134,46 @@ Reserve.belongsTo(Zone, { foreignKey: 'zoneId', as: 'zone' });
 
 Plan.hasMany(Reserve, { foreignKey: 'planId', as: 'reserves' });
 Reserve.belongsTo(Plan, { foreignKey: 'planId', as: 'plan' });
+
+// ── Abonnements ────────────────────────────────────────────────────────────
+// `PlanAbonnement` est le CATALOGUE (Essentiel, Pro, Entreprise) ; à ne pas
+// confondre avec `Plan`, qui désigne les plans de chantier.
+//
+// `AbonnementSouscrit` garde l'historique : la formule y est recopiée (code,
+// nom, prix payé), d'où le `SET NULL` — supprimer une formule du catalogue ne
+// doit pas effacer la trace de ceux qui l'ont payée.
+PlanAbonnement.hasMany(AbonnementSouscrit, { foreignKey: 'planAbonnementId', as: 'souscriptions' });
+AbonnementSouscrit.belongsTo(PlanAbonnement, { foreignKey: 'planAbonnementId', as: 'plan' });
+
+Organisation.hasMany(AbonnementSouscrit, { foreignKey: 'organisationId', as: 'souscriptions', onDelete: 'CASCADE' });
+AbonnementSouscrit.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisation' });
+
+// Catalogue des corps d'état (métiers BTP) — voir corpsEtat.model.js.
+// `organisationId` nul = catalogue standard partagé par toute la plateforme.
+Organisation.hasMany(CorpsEtat, { foreignKey: 'organisationId', as: 'corpsEtat', onDelete: 'CASCADE' });
+CorpsEtat.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisation' });
+
+// Référentiels de TYPE administrables (documents, intervenants, inspections).
+//
+// Pas de clé étrangère vers les données : la colonne métier (`documents.type`)
+// stocke le CODE, pas l'identifiant — voir referentielType.model.js. Seule la
+// portée par organisation est déclarée ici.
+for (const Type of [TypeDocument, TypePartenaire, TypeInspection]) {
+  Organisation.hasMany(Type, { foreignKey: 'organisationId', onDelete: 'CASCADE' });
+  Type.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisation' });
+}
+
+CorpsEtat.hasMany(Reserve, { foreignKey: 'corpsEtatId', as: 'reserves' });
+Reserve.belongsTo(CorpsEtat, { foreignKey: 'corpsEtatId', as: 'corpsEtat' });
+
+// Phase à laquelle la réserve est rattachée — voir phase.model.js : la même
+// table porte les phases de planning (chantierId renseigné) et le référentiel
+// (chantierId nul), et c'est ce dernier que visent les réserves.
+Phase.hasMany(Reserve, { foreignKey: 'phaseId', as: 'reserves' });
+Reserve.belongsTo(Phase, { foreignKey: 'phaseId', as: 'phase' });
+
+Organisation.hasMany(Phase, { foreignKey: 'organisationId', as: 'phases', onDelete: 'CASCADE' });
+Phase.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisation' });
 
 Lot.hasMany(Reserve, { foreignKey: 'lotId', as: 'reserves' });
 Reserve.belongsTo(Lot, { foreignKey: 'lotId', as: 'lot' });
@@ -187,6 +248,10 @@ Partenaire.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisa
 Chantier.hasMany(Partenaire, { foreignKey: 'chantierId', as: 'partenaires' });
 Partenaire.belongsTo(Chantier, { foreignKey: 'chantierId', as: 'chantier' });
 
+// « Entreprise concernée » d'une réserve — voir reserve.model.js#partenaireId.
+Partenaire.hasMany(Reserve, { foreignKey: 'partenaireId', as: 'reserves' });
+Reserve.belongsTo(Partenaire, { foreignKey: 'partenaireId', as: 'partenaire' });
+
 // ── Signatures (module 5/7) — modèle polymorphe, lien au signataire ─────────
 Signature.belongsTo(Utilisateur, { foreignKey: 'utilisateurId', as: 'signataire' });
 Utilisateur.hasMany(Signature, { foreignKey: 'utilisateurId', as: 'signatures' });
@@ -246,6 +311,14 @@ module.exports = {
   ChantierMembre,
   Phase,
   Annotation,
+  PlanHotspot,
+  CorpsEtat,
+  TypeDocument,
+  TypePartenaire,
+  TypeInspection,
+  PlanAbonnement,
+  AbonnementSouscrit,
+  EvenementPaiement,
   PieceJointe,
   Signature,
   ReserveAffectation,

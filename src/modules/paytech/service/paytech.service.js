@@ -274,10 +274,31 @@ class PayTechService {
       return { success: false, message: 'organisationId manquant' };
     }
 
-    // Activer l'abonnement via le service existant
+    // Même chemin que Stripe : prix relu EN BASE, souscription historisée, et
+    // idempotence portée par `traiterEvenement`.
+    //
+    // PayTech réémet ses notifications comme Stripe : sans ce passage par le
+    // journal des événements, un IPN rejoué créait une seconde souscription et
+    // prolongeait l'abonnement gratuitement. Le `token` du paiement sert
+    // d'identifiant d'événement — c'est lui qui identifie l'encaissement.
     try {
-      await SubscriptionService._activerAbonnement(organisationId, planId, priceId, token);
-      logger.info(`[paytech] Abonnement activé pour org ${organisationId} via PayTech`);
+      const resultat = await SubscriptionService.traiterEvenement(
+        'paytech',
+        token || ref_command,
+        'sale_complete',
+        {
+          organisationId,
+          planId,
+          reference: token || ref_command,
+          fournisseur: 'paytech',
+          // Montant ANNONCÉ par PayTech : conservé pour signaler un écart,
+          // jamais utilisé comme prix facturé.
+          montantRecu: item_price,
+        }
+      );
+      if (resultat.duplicate) {
+        logger.info(`[paytech] IPN déjà traité pour ${ref_command}`);
+      }
       return { success: true, message: 'Abonnement activé' };
     } catch (err) {
       logger.error(`[paytech] Erreur activation abonnement: ${err.message}`);

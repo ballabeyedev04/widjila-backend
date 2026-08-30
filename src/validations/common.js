@@ -18,14 +18,18 @@ const adresse = Joi.string().trim().max(200);
 // UUID v4
 const uuid = Joi.string().guid({ version: 'uuidv4' });
 
-// Rôles métier (cahier des charges, section Acteurs)
-const ROLE_UTILISATEUR = ['Admin', 'ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre', 'Pilote', 'SousTraitant'];
-const role = Joi.string().valid(...ROLE_UTILISATEUR);
+// Énumérations métier — SOURCE UNIQUE dans config/enums.js, elle-même
+// vérifiée contre les colonnes ENUM des modèles (enums.coherence.test.js).
+// Elles étaient recopiées ici, et divergeaient : le rapport ne connaissait ni
+// `prise_en_charge` ni `en_retard`, pourtant présents en base.
+//
+// Ré-exportées telles quelles : plusieurs modules les importent depuis ce
+// fichier, les y retirer romprait ces imports sans rien gagner.
+const {
+  ROLE_UTILISATEUR, STATUT_RESERVE, STATUT_CHANTIER, SEVERITE_PRIORITE,
+} = require('../config/enums.js');
 
-// Statuts
-const STATUT_RESERVE = ['creee', 'affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte', 'en_retard', 'cloturee'];
-const STATUT_CHANTIER = ['en_preparation', 'en_cours', 'en_pause', 'archive', 'cloture'];
-const SEVERITE_PRIORITE = ['faible', 'moyenne', 'haute', 'critique'];
+const role = Joi.string().valid(...ROLE_UTILISATEUR);
 
 // Couleur CSS STRICTE — hexadécimal uniquement (#rgb, #rrggbb, #rrggbbaa).
 //

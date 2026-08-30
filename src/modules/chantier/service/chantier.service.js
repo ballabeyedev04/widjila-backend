@@ -4,12 +4,38 @@ const { Op } = require('sequelize');
 const {
   Chantier, Batiment, Etage, Zone, Lot, Reserve, Utilisateur, ChantierMembre,
   Phase, Inspection, Plan, Annotation, Document, Rapport, Checklist,
-  Commentaire, PieceJointe, Organisation,
+  Commentaire, PieceJointe, Organisation, PlanHotspot,
 } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 const NotificationService = require('../../notification/service/notification.service.js');
 const escapeLike = require('../../../utils/escapeLike.js');
 const { GESTION } = require('../../../config/roles.js');
+
+/**
+ * Efface les zones cliquables qui pointaient vers une structure supprimée.
+ *
+ * `cible_type` + `cible_id` forment une association polymorphe : PostgreSQL ne
+ * sait pas la contraindre, donc rien ne nettoie ces lignes automatiquement.
+ * Un hotspot orphelin ne « casse » pas l'affichage — les clients tolèrent une
+ * cible disparue — mais il laisse sur le plan une pastille qui ne mène nulle
+ * part, ce qui est pire qu'une absence de repère.
+ */
+async function _supprimerHotspotsDeLaStructure({ batimentIds, etageIds, zoneIds }, transaction) {
+  const conditions = [
+    { type: 'batiment', ids: batimentIds },
+    { type: 'etage', ids: etageIds },
+    { type: 'zone', ids: zoneIds },
+  ].filter((c) => c.ids && c.ids.length);
+
+  if (!conditions.length) return;
+
+  await PlanHotspot.destroy({
+    where: {
+      [Op.or]: conditions.map((c) => ({ cible_type: c.type, cible_id: { [Op.in]: c.ids } })),
+    },
+    transaction,
+  });
+}
 
 // Statuts « fin de vie » d'un chantier : aucun ne doit pouvoir être atteint
 // tant qu'il reste des réserves ouvertes (cf. changerStatut).
@@ -299,6 +325,23 @@ class ChantierService {
         where: { batimentId: { [Op.in]: batimentIds } }, attributes: ['id'], raw: true, transaction,
       });
       const etageIds = etages.map((e) => e.id);
+      let zoneIds = [];
+      if (etageIds.length) {
+        const zones = await Zone.findAll({
+          where: { etageId: { [Op.in]: etageIds } }, attributes: ['id'], raw: true, transaction,
+        });
+        zoneIds = zones.map((z) => z.id);
+      }
+
+      // Les hotspots pointent vers la structure par une association POLYMORPHE
+      // (cible_type + cible_id), qu'aucune clé étrangère ne peut couvrir : sans
+      // ce nettoyage explicite, le plan global gardait des zones cliquables
+      // menant vers des bâtiments détruits. Voir planHotspot.model.js.
+      await _supprimerHotspotsDeLaStructure(
+        { batimentIds, etageIds, zoneIds },
+        transaction
+      );
+
       if (etageIds.length) {
         await Zone.destroy({ where: { etageId: { [Op.in]: etageIds } }, transaction });
         await Etage.destroy({ where: { batimentId: { [Op.in]: batimentIds } }, transaction });
@@ -360,6 +403,227 @@ class ChantierService {
       type: data.type || 'zone',
     });
     return { success: true, message: 'Zone créée avec succès', zone };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  //  MODIFICATION & SUPPRESSION DE LA STRUCTURE
+  //
+  //  Il n'existait que la création : un bâtiment mal nommé restait mal nommé,
+  //  et une zone créée par erreur restait dans l'arborescence à jamais — donc
+  //  dans les sélecteurs de localisation de chaque réserve.
+  //
+  //  RÈGLE DE SUPPRESSION — on REFUSE tant qu'une réserve pointe sur
+  //  l'élément ou sur l'un de ses descendants, et on dit combien.
+  //
+  //  Une réserve est une pièce contradictoire : elle atteste d'un défaut à un
+  //  endroit précis, et les PV de réception s'y adossent. Effacer sa
+  //  localisation — même en douceur — reviendrait à réécrire après coup ce
+  //  qui a été constaté. Refuser oblige à traiter ou déplacer les réserves
+  //  d'abord, ce qui est une décision métier, pas un effet de bord.
+  //
+  //  Les PLANS, eux, sont simplement DÉTACHÉS (leur rattachement repasse à
+  //  null) : le document reste consultable et remonte d'un niveau, ce qui est
+  //  exactement ce qui doit arriver au plan d'un étage supprimé.
+  //
+  //  Les HOTSPOTS visant l'élément sont effacés : leur cible n'existant plus,
+  //  ils laisseraient sur le plan une pastille qui ne mène nulle part — pire
+  //  qu'une absence de repère.
+  //
+  //  Tous les modèles sont `paranoid` : `destroy()` fait un soft delete, et
+  //  les CASCADE de clés étrangères ne se déclenchent PAS dans ce cas. La
+  //  descente bâtiment → étages → zones est donc explicite.
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Bâtiment du chantier, lui-même dans l'organisation. */
+  static async _batimentCadre(organisationId, chantierId, batimentId) {
+    return Batiment.findOne({
+      where: { id: batimentId, chantierId },
+      include: [{ model: Chantier, as: 'chantier', where: { organisationId }, attributes: ['id'] }],
+    });
+  }
+
+  /** Étage du bâtiment, lui-même dans le chantier et l'organisation. */
+  static async _etageCadre(organisationId, chantierId, batimentId, etageId) {
+    return Etage.findOne({
+      where: { id: etageId, batimentId },
+      include: [{
+        model: Batiment, as: 'batiment', where: { chantierId }, attributes: ['id'], required: true,
+        include: [{ model: Chantier, as: 'chantier', where: { organisationId }, attributes: ['id'], required: true }],
+      }],
+    });
+  }
+
+  /** Zone de l'étage, lui-même dans le bâtiment, le chantier et l'organisation. */
+  static async _zoneCadre(organisationId, chantierId, batimentId, etageId, zoneId) {
+    return Zone.findOne({
+      where: { id: zoneId, etageId },
+      include: [{
+        model: Etage, as: 'etage', where: { batimentId }, attributes: ['id'], required: true,
+        include: [{
+          model: Batiment, as: 'batiment', where: { chantierId }, attributes: ['id'], required: true,
+          include: [{ model: Chantier, as: 'chantier', where: { organisationId }, attributes: ['id'], required: true }],
+        }],
+      }],
+    });
+  }
+
+  /**
+   * Nombre de réserves accrochées à l'un des niveaux visés.
+   *
+   * `Op.or` sur les trois colonnes plutôt que trois requêtes : une réserve
+   * posée sur un appartement porte AUSSI son étage et son bâtiment, mais une
+   * réserve créée depuis la liste peut n'avoir que le bâtiment. Ne regarder
+   * qu'une colonne laisserait passer l'autre cas.
+   */
+  static async _compterReservesLiees({ batimentIds = [], etageIds = [], zoneIds = [] }) {
+    const conditions = [];
+    if (batimentIds.length) conditions.push({ batimentId: { [Op.in]: batimentIds } });
+    if (etageIds.length) conditions.push({ etageId: { [Op.in]: etageIds } });
+    if (zoneIds.length) conditions.push({ zoneId: { [Op.in]: zoneIds } });
+    if (!conditions.length) return 0;
+    return Reserve.count({ where: { [Op.or]: conditions } });
+  }
+
+  /** Détache les plans des niveaux supprimés — le document survit à sa zone. */
+  static async _detacherPlans({ batimentIds = [], etageIds = [], zoneIds = [] }, transaction) {
+    if (zoneIds.length) {
+      await Plan.update({ zoneId: null }, { where: { zoneId: { [Op.in]: zoneIds } }, transaction });
+    }
+    if (etageIds.length) {
+      await Plan.update({ etageId: null }, { where: { etageId: { [Op.in]: etageIds } }, transaction });
+    }
+    if (batimentIds.length) {
+      await Plan.update({ batimentId: null }, { where: { batimentId: { [Op.in]: batimentIds } }, transaction });
+    }
+  }
+
+  /** Message de refus, avec le nombre de réserves qui bloquent. */
+  static _refusReserves(nombre) {
+    return {
+      success: false,
+      message: nombre === 1
+        ? '1 réserve est rattachée à cet élément. Déplacez-la ou supprimez-la avant.'
+        : `${nombre} réserves sont rattachées à cet élément. Déplacez-les ou supprimez-les avant.`,
+    };
+  }
+
+  // -------------------- BÂTIMENT --------------------
+  static async modifierBatiment(organisationId, chantierId, batimentId, data) {
+    const batiment = await ChantierService._batimentCadre(organisationId, chantierId, batimentId);
+    if (!batiment) return { success: false, message: 'Bâtiment introuvable dans ce chantier' };
+
+    const updates = {};
+    if (data.nom !== undefined) updates.nom = data.nom;
+    if (data.code !== undefined) updates.code = data.code || null;
+    await batiment.update(updates);
+
+    return { success: true, message: 'Bâtiment modifié avec succès', batiment };
+  }
+
+  static async supprimerBatiment(organisationId, chantierId, batimentId) {
+    const batiment = await ChantierService._batimentCadre(organisationId, chantierId, batimentId);
+    if (!batiment) return { success: false, message: 'Bâtiment introuvable dans ce chantier' };
+
+    const etages = await Etage.findAll({ where: { batimentId }, attributes: ['id'], raw: true });
+    const etageIds = etages.map((e) => e.id);
+    const zones = etageIds.length
+      ? await Zone.findAll({ where: { etageId: { [Op.in]: etageIds } }, attributes: ['id'], raw: true })
+      : [];
+    const zoneIds = zones.map((z) => z.id);
+    const cibles = { batimentIds: [batimentId], etageIds, zoneIds };
+
+    const nbReserves = await ChantierService._compterReservesLiees(cibles);
+    if (nbReserves > 0) return ChantierService._refusReserves(nbReserves);
+
+    const t = await sequelize.transaction();
+    try {
+      await _supprimerHotspotsDeLaStructure(cibles, t);
+      await ChantierService._detacherPlans(cibles, t);
+      if (zoneIds.length) await Zone.destroy({ where: { id: { [Op.in]: zoneIds } }, transaction: t });
+      if (etageIds.length) await Etage.destroy({ where: { id: { [Op.in]: etageIds } }, transaction: t });
+      await batiment.destroy({ transaction: t });
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
+
+    return { success: true, message: 'Bâtiment supprimé avec succès' };
+  }
+
+  // -------------------- ÉTAGE --------------------
+  static async modifierEtage(organisationId, chantierId, batimentId, etageId, data) {
+    const etage = await ChantierService._etageCadre(organisationId, chantierId, batimentId, etageId);
+    if (!etage) return { success: false, message: 'Étage introuvable dans ce bâtiment' };
+
+    const updates = {};
+    if (data.nom !== undefined) updates.nom = data.nom;
+    if (data.niveau !== undefined) updates.niveau = data.niveau;
+    await etage.update(updates);
+
+    return { success: true, message: 'Étage modifié avec succès', etage };
+  }
+
+  static async supprimerEtage(organisationId, chantierId, batimentId, etageId) {
+    const etage = await ChantierService._etageCadre(organisationId, chantierId, batimentId, etageId);
+    if (!etage) return { success: false, message: 'Étage introuvable dans ce bâtiment' };
+
+    const zones = await Zone.findAll({ where: { etageId }, attributes: ['id'], raw: true });
+    const zoneIds = zones.map((z) => z.id);
+    const cibles = { etageIds: [etageId], zoneIds };
+
+    const nbReserves = await ChantierService._compterReservesLiees(cibles);
+    if (nbReserves > 0) return ChantierService._refusReserves(nbReserves);
+
+    const t = await sequelize.transaction();
+    try {
+      await _supprimerHotspotsDeLaStructure(cibles, t);
+      await ChantierService._detacherPlans(cibles, t);
+      if (zoneIds.length) await Zone.destroy({ where: { id: { [Op.in]: zoneIds } }, transaction: t });
+      await etage.destroy({ transaction: t });
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
+
+    return { success: true, message: 'Étage supprimé avec succès' };
+  }
+
+  // -------------------- ZONE --------------------
+  static async modifierZone(organisationId, chantierId, batimentId, etageId, zoneId, data) {
+    const zone = await ChantierService._zoneCadre(organisationId, chantierId, batimentId, etageId, zoneId);
+    if (!zone) return { success: false, message: 'Zone introuvable dans cet étage' };
+
+    const updates = {};
+    if (data.nom !== undefined) updates.nom = data.nom;
+    if (data.type !== undefined) updates.type = data.type;
+    await zone.update(updates);
+
+    return { success: true, message: 'Zone modifiée avec succès', zone };
+  }
+
+  static async supprimerZone(organisationId, chantierId, batimentId, etageId, zoneId) {
+    const zone = await ChantierService._zoneCadre(organisationId, chantierId, batimentId, etageId, zoneId);
+    if (!zone) return { success: false, message: 'Zone introuvable dans cet étage' };
+
+    const cibles = { zoneIds: [zoneId] };
+
+    const nbReserves = await ChantierService._compterReservesLiees(cibles);
+    if (nbReserves > 0) return ChantierService._refusReserves(nbReserves);
+
+    const t = await sequelize.transaction();
+    try {
+      await _supprimerHotspotsDeLaStructure(cibles, t);
+      await ChantierService._detacherPlans(cibles, t);
+      await zone.destroy({ transaction: t });
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
+
+    return { success: true, message: 'Zone supprimée avec succès' };
   }
 
   // -------------------- LOTS --------------------

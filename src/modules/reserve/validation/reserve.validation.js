@@ -20,12 +20,28 @@ const creerReserveSchema = Joi.object({
   zoneId: uuid.optional().allow(null),
   planId: uuid.optional().allow(null),
   lotId: uuid.optional().allow(null),
+  /**
+   * Phase du chantier — OBLIGATOIRE.
+   *
+   * La règle est portée ICI et pas seulement par les formulaires : une requête
+   * directe à l'API ne doit pas pouvoir créer une réserve sans phase. Le
+   * message est explicite parce qu'il remonte tel quel à l'écran.
+   */
+  phaseId: uuid.required().messages({
+    'any.required': 'Veuillez sélectionner une phase.',
+    'string.empty': 'Veuillez sélectionner une phase.',
+  }),
   titre: Joi.string().trim().min(2).max(200).required(),
   description: Joi.string().trim().max(5000).optional().allow('', null),
   severite: Joi.string().valid(...SEVERITE_PRIORITE).optional(),
   priorite: Joi.string().valid(...SEVERITE_PRIORITE).optional(),
+  // Corps d'état (métier) — référence au catalogue administrable `corps_etat`.
+  // `categorie` juste en dessous reste acceptée : un client mobile non mis à
+  // jour continue de fonctionner, et l'export Excel s'appuie dessus.
+  corpsEtatId: uuid.optional().allow(null),
   categorie: Joi.string().valid('maconnerie', 'gros_oeuvre', 'plomberie', 'electricite', 'carrelage', 'peinture', 'menuiserie', 'etancheite', 'isolation', 'autre').optional(),
   entrepriseId: uuid.optional().allow(null),
+  partenaireId: uuid.optional().allow(null),
   assigneA: uuid.optional().allow(null),
   date_limite: Joi.date().iso().optional().allow('', null),
   // Position sur le plan (x, y) — enregistrée dans reserve_positions
@@ -41,13 +57,22 @@ const modifierReserveSchema = Joi.object({
   description: Joi.string().trim().max(5000).optional().allow('', null),
   severite: Joi.string().valid(...SEVERITE_PRIORITE).optional(),
   priorite: Joi.string().valid(...SEVERITE_PRIORITE).optional(),
+  // Corps d'état (métier) — référence au catalogue administrable `corps_etat`.
+  // `categorie` juste en dessous reste acceptée : un client mobile non mis à
+  // jour continue de fonctionner, et l'export Excel s'appuie dessus.
+  corpsEtatId: uuid.optional().allow(null),
   categorie: Joi.string().valid('maconnerie', 'gros_oeuvre', 'plomberie', 'electricite', 'carrelage', 'peinture', 'menuiserie', 'etancheite', 'isolation', 'autre').optional(),
   batimentId: uuid.optional().allow(null),
   etageId: uuid.optional().allow(null),
   zoneId: uuid.optional().allow(null),
   planId: uuid.optional().allow(null),
   lotId: uuid.optional().allow(null),
+  // Corriger une phase mal choisie reste possible ; la VIDER ne l'est pas
+  // (`allow(null)` volontairement absent) : une réserve déjà rattachée ne doit
+  // jamais retomber sans phase, c'est ce qui garantit l'historique.
+  phaseId: uuid.optional(),
   entrepriseId: uuid.optional().allow(null),
+  partenaireId: uuid.optional().allow(null),
   assigneA: uuid.optional().allow(null),
   date_limite: Joi.date().iso().optional().allow('', null),
   position: Joi.object({
@@ -69,6 +94,11 @@ const ajouterCommentaireSchema = Joi.object({
 // Série de réserves : soit une liste de titres, soit un titre + un nombre
 const creerSerieReservesSchema = Joi.object({
   chantierId: uuid.required(),
+  // Toutes les réserves de la série partagent la même phase : elle est requise
+  // ici comme à la création unitaire.
+  phaseId: uuid.required().messages({
+    'any.required': 'Veuillez sélectionner une phase.',
+  }),
   titres: Joi.array().items(Joi.string().trim().min(2).max(200)).min(1).max(100).optional(),
   titre: Joi.string().trim().min(2).max(200).optional(),
   nombre: Joi.number().integer().min(1).max(100).optional(),
@@ -79,6 +109,10 @@ const creerSerieReservesSchema = Joi.object({
   // valeur libre passait Joi puis échouait à l'INSERT — et depuis que la série
   // est transactionnelle, elle ferait échouer TOUTE la série, plus seulement
   // la première ligne.
+  // Corps d'état (métier) — référence au catalogue administrable `corps_etat`.
+  // `categorie` juste en dessous reste acceptée : un client mobile non mis à
+  // jour continue de fonctionner, et l'export Excel s'appuie dessus.
+  corpsEtatId: uuid.optional().allow(null),
   categorie: Joi.string().valid('maconnerie', 'gros_oeuvre', 'plomberie', 'electricite', 'carrelage', 'peinture', 'menuiserie', 'etancheite', 'isolation', 'autre').optional(),
   batimentId: uuid.optional().allow(null),
   etageId: uuid.optional().allow(null),
@@ -86,6 +120,7 @@ const creerSerieReservesSchema = Joi.object({
   planId: uuid.optional().allow(null),
   lotId: uuid.optional().allow(null),
   entrepriseId: uuid.optional().allow(null),
+  partenaireId: uuid.optional().allow(null),
   assigneA: uuid.optional().allow(null),
   date_limite: Joi.date().iso().optional().allow('', null),
   position: Joi.object({

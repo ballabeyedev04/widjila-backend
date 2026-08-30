@@ -72,7 +72,36 @@ const Reserve = sequelize.define('Reserve', {
     allowNull: false,
     defaultValue: 'moyenne'
   },
+  /**
+   * Phase du chantier au cours de laquelle la réserve a été constatée.
+   *
+   * OBLIGATOIRE à la création (imposé par `creerReserveSchema`), et FIGÉE
+   * ensuite : une réserve relevée en « Pré-cloisons » y reste quand le
+   * chantier passe en « Cloisons ». C'est ce qui rend l'historique par phase
+   * exploitable.
+   *
+   * Nullable en base pour les réserves antérieures à cette règle — leur
+   * attribuer une phase au hasard fabriquerait un historique faux. Voir la
+   * migration 20260829000008-reserve-phase.js.
+   */
+  phaseId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  /**
+   * Corps d'état (métier) de la réserve — référence au catalogue
+   * administrable `corps_etat`.
+   *
+   * Remplace fonctionnellement `categorie` juste en dessous, conservée pour
+   * les clients non mis à jour et pour l'export Excel. Quand les deux sont
+   * présents, `corpsEtatId` fait foi.
+   */
+  corpsEtatId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   // Catégorie de la réserve (module 5 / cahier des charges § Catégorie)
+  // ⚠️ Historique : voir `corpsEtatId` ci-dessus, qui la remplace.
   categorie: {
     type: DataTypes.ENUM('maconnerie', 'gros_oeuvre', 'plomberie', 'electricite', 'carrelage', 'peinture', 'menuiserie', 'etancheite', 'isolation', 'autre'),
     allowNull: true,
@@ -83,8 +112,25 @@ const Reserve = sequelize.define('Reserve', {
     allowNull: false,
     defaultValue: 'creee'
   },
-  // Entreprise (organisation) en charge de la correction
+  // Entreprise (ORGANISATION, avec son propre compte) en charge de la
+  // correction — utilisée quand le sous-traitant travaille lui aussi dans
+  // l'application et doit voir la réserve dans SON espace.
   entrepriseId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  // Entreprise / corps d'état de l'ANNUAIRE du chantier (table `partenaires`).
+  //
+  // C'est le champ « Entreprise concernée » du guide client : la plupart des
+  // entreprises d'un chantier sont de simples fiches de contact, sans compte
+  // dans l'application, et ne peuvent donc pas être désignées par
+  // `entrepriseId` — qui référence une `organisation`.
+  //
+  // Les deux coexistent volontairement : `partenaireId` dit QUI est
+  // responsable (toujours renseignable), `entrepriseId` dit à quel espace
+  // client la réserve doit apparaître (seulement si l'entreprise est
+  // utilisatrice de la plateforme).
+  partenaireId: {
     type: DataTypes.UUID,
     allowNull: true
   },
@@ -122,7 +168,10 @@ const Reserve = sequelize.define('Reserve', {
     { fields: ['chantier_id'] },
     { fields: ['statut'] },
     { fields: ['entreprise_id'] },
+    { fields: ['partenaire_id'] },
     { fields: ['assigne_a'] },
+    { fields: ['corps_etat_id'] },
+    { fields: ['phase_id'] },
     // Un numéro est unique DANS son chantier, pas dans toute la base.
     { name: 'reserves_chantier_numero_unique', unique: true, fields: ['chantier_id', 'numero'] }
   ]

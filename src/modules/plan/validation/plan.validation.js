@@ -5,7 +5,11 @@ const { uuid, couleurHex, urlHttp } = require('../../../validations/common.js');
 
 const uploadPlanSchema = Joi.object({
   chantierId: uuid.required(),
-  zoneId: uuid.optional().allow(null),
+  // Niveau décrit par le plan — au plus un des trois (voir plan.model.js).
+  // Aucun des trois = plan global du chantier.
+  batimentId: uuid.optional().allow(null, ''),
+  etageId: uuid.optional().allow(null, ''),
+  zoneId: uuid.optional().allow(null, ''),
   nom: Joi.string().trim().min(2).max(200).required(),
   format: Joi.string().valid('pdf', 'dwg', 'ifc').optional(),
 });
@@ -77,4 +81,34 @@ const creerAnnotationSchema = Joi.object({
 
 const modifierAnnotationSchema = creerAnnotationSchema.min(1);
 
-module.exports = { uploadPlanSchema, creerAnnotationSchema, modifierAnnotationSchema };
+/**
+ * Hotspot — zone cliquable d'un plan (voir planHotspot.model.js).
+ *
+ * `x`/`y`/`largeur`/`hauteur` sont des POURCENTAGES de la page rendue, d'où
+ * les bornes 0-100 : un repère hors de ces bornes est invisible et signale
+ * une erreur d'unité côté client (des pixels envoyés à la place d'un ratio)
+ * plutôt qu'une intention. On le refuse au lieu de l'enregistrer.
+ */
+const creerHotspotSchema = Joi.object({
+  cible_type: Joi.string().valid('batiment', 'etage', 'zone').required(),
+  cible_id: uuid.required(),
+  libelle: Joi.string().trim().max(100).optional().allow('', null),
+  x: Joi.number().min(0).max(100).required(),
+  y: Joi.number().min(0).max(100).required(),
+  largeur: Joi.number().min(0).max(100).optional().default(0),
+  hauteur: Joi.number().min(0).max(100).optional().default(0),
+  page: Joi.number().integer().min(1).max(10000).optional().default(1),
+});
+
+const modifierHotspotSchema = Joi.object({
+  cible_type: Joi.string().valid('batiment', 'etage', 'zone').optional(),
+  cible_id: uuid.optional(),
+  libelle: Joi.string().trim().max(100).optional().allow('', null),
+  x: Joi.number().min(0).max(100).optional(),
+  y: Joi.number().min(0).max(100).optional(),
+  largeur: Joi.number().min(0).max(100).optional(),
+  hauteur: Joi.number().min(0).max(100).optional(),
+  page: Joi.number().integer().min(1).max(10000).optional(),
+}).min(1);
+
+module.exports = { uploadPlanSchema, creerAnnotationSchema, modifierAnnotationSchema, creerHotspotSchema, modifierHotspotSchema };

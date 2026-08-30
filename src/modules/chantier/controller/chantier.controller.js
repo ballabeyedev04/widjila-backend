@@ -94,6 +94,78 @@ exports.creerEtage = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, message: result.message, data: { etage: result.etage } });
 });
 
+exports.modifierBatiment = asyncHandler(async (req, res) => {
+  const result = await ChantierService.modifierBatiment(
+    await orgDuChantier(req),
+    req.params.id,
+    req.params.batimentId,
+    req.body
+  );
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message, data: { batiment: result.batiment } });
+});
+
+exports.supprimerBatiment = asyncHandler(async (req, res) => {
+  const result = await ChantierService.supprimerBatiment(
+    await orgDuChantier(req),
+    req.params.id,
+    req.params.batimentId
+  );
+  // `BadRequestError` et non `NotFoundError` : le refus le plus fréquent est
+  // « des réserves y sont rattachées », qui décrit un conflit d'état, pas une
+  // ressource absente. Le message porte le nombre — il doit remonter tel quel.
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message });
+});
+
+exports.modifierEtage = asyncHandler(async (req, res) => {
+  const result = await ChantierService.modifierEtage(
+    await orgDuChantier(req),
+    req.params.id,
+    req.params.batimentId,
+    req.params.etageId,
+    req.body
+  );
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message, data: { etage: result.etage } });
+});
+
+exports.supprimerEtage = asyncHandler(async (req, res) => {
+  const result = await ChantierService.supprimerEtage(
+    await orgDuChantier(req),
+    req.params.id,
+    req.params.batimentId,
+    req.params.etageId
+  );
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message });
+});
+
+exports.modifierZone = asyncHandler(async (req, res) => {
+  const result = await ChantierService.modifierZone(
+    await orgDuChantier(req),
+    req.params.id,
+    req.params.batimentId,
+    req.params.etageId,
+    req.params.zoneId,
+    req.body
+  );
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message, data: { zone: result.zone } });
+});
+
+exports.supprimerZone = asyncHandler(async (req, res) => {
+  const result = await ChantierService.supprimerZone(
+    await orgDuChantier(req),
+    req.params.id,
+    req.params.batimentId,
+    req.params.etageId,
+    req.params.zoneId
+  );
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message });
+});
+
 exports.creerZone = asyncHandler(async (req, res) => {
   const result = await ChantierService.creerZone(
     await orgDuChantier(req),

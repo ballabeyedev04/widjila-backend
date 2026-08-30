@@ -11,11 +11,13 @@ const requireOrganisation = require('../../../middlewares/requireOrganisation.mi
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const { OPERATIONNEL, PILOTAGE, SENSIBLE } = require('../../../config/roles.js');
+const { verifierLimite } = require('../../../middlewares/requireFonctionnalite.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const { Chantier } = require('../../../models/index.js');
 const {
   creerChantierSchema, modifierChantierSchema, changerStatutSchema,
   creerBatimentSchema, creerEtageSchema, creerZoneSchema, creerLotSchema,
+  modifierBatimentSchema, modifierEtageSchema, modifierZoneSchema,
   dupliquerChantierSchema, creerPhaseSchema, modifierPhaseSchema,
 } = require('../validation/chantier.validation.js');
 
@@ -36,6 +38,12 @@ router.post(
   checkSubscription,
   requireOrganisation,
   requireRole(...OPERATIONNEL),
+  // Plafond de chantiers de la formule. Aujourd'hui sans effet : le client
+  // n'a fourni AUCUN nombre (la présentation cite « multi-chantiers » comme
+  // avantage Pro, sans chiffrer Essentiel), donc `limite_chantiers` vaut NULL
+  // — illimité — pour les trois formules. La garde est posée pour que fixer
+  // ce plafond depuis l'administration suffise à l'appliquer, sans livraison.
+  verifierLimite('chantiers'),
   validate(creerChantierSchema),
   chantierController.creerChantier
 );
@@ -150,6 +158,68 @@ router.post(
   requireRole(...OPERATIONNEL),
   validate(creerZoneSchema),
   chantierController.creerZone
+);
+
+// ── Modification & suppression de la structure ───────────────────────────────
+// Même groupe que la CRÉATION (OPERATIONNEL) : renommer un bâtiment ou retirer
+// une zone vide relève de la même mise en place du chantier. La garde qui
+// compte n'est pas le rôle mais l'état — le service REFUSE toute suppression
+// tant qu'une réserve pointe sur l'élément (voir chantier.service.js).
+router.put(
+  '/:id/batiments/:batimentId',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL),
+  validate(modifierBatimentSchema),
+  chantierController.modifierBatiment
+);
+
+router.delete(
+  '/:id/batiments/:batimentId',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL),
+  chantierController.supprimerBatiment
+);
+
+router.put(
+  '/:id/batiments/:batimentId/etages/:etageId',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL),
+  validate(modifierEtageSchema),
+  chantierController.modifierEtage
+);
+
+router.delete(
+  '/:id/batiments/:batimentId/etages/:etageId',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL),
+  chantierController.supprimerEtage
+);
+
+router.put(
+  '/:id/batiments/:batimentId/etages/:etageId/zones/:zoneId',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL),
+  validate(modifierZoneSchema),
+  chantierController.modifierZone
+);
+
+router.delete(
+  '/:id/batiments/:batimentId/etages/:etageId/zones/:zoneId',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL),
+  chantierController.supprimerZone
 );
 
 router.post(

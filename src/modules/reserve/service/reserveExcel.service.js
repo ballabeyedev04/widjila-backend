@@ -3,6 +3,7 @@
 const ExcelJS = require('exceljs');
 const { Reserve, Chantier, Batiment, Etage, Zone, Lot, Organisation } = require('../../../models/index.js');
 const ReserveService = require('./reserve.service.js');
+const { SEVERITE_PRIORITE } = require('../../../config/enums.js');
 
 /**
  * Formate une date en 'YYYY-MM-DD' sans supposer son type.
@@ -362,7 +363,7 @@ class ReserveExcelService {
         const normalise = normaliserEntete(brut);
         return valeursAutorisees.includes(normalise) ? normalise : defaut;
       };
-      const NIVEAUX = ['faible', 'moyenne', 'haute', 'critique'];
+      const NIVEAUX = SEVERITE_PRIORITE;
 
       const res = await ReserveService.creerReserve(organisationId, {
         chantierId,

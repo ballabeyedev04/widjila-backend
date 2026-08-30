@@ -28,6 +28,10 @@ jest.mock('../models/index.js', () => ({
   PieceJointe: {},
   ReserveAffectation: { count: jest.fn().mockResolvedValue(0) },
   Signature: {},
+  // Entreprise concernée d'une réserve (annuaire) — voir
+  // reserve.model.js#partenaireId. Déclaré ici pour que le mock reste le
+  // MIROIR des modèles réellement importés par le service.
+  Partenaire: { findOne: jest.fn() },
 }));
 jest.mock('../config/db.js', () => ({
   transaction: jest.fn(),

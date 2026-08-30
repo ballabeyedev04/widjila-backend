@@ -6,7 +6,12 @@ const { uuid } = require('../../../validations/common.js');
 const creerInspectionSchema = Joi.object({
   chantierId: uuid.required(),
   inspecteurId: uuid.optional().allow(null),
-  type: Joi.string().valid('inspection', 'opr', 'visite_contradictoire').optional(),
+  // Le type n'est plus énuméré ici : il vit dans un référentiel
+  // administrable, et une liste figée empêcherait d'en ajouter. Seule la
+  // FORME est contrôlée ; l'existence l'est par le middleware
+  // `verifierTypeReferentiel`, posé sur la route.
+  type: Joi.string().trim().lowercase().pattern(/^[a-z0-9_]+$/).max(50).optional(),
+
   date_visite: Joi.date().iso().optional().allow('', null),
   // Checklist personnalisée (libellés de contrôle)
   checklist: Joi.array().items(
@@ -22,7 +27,12 @@ const creerInspectionSchema = Joi.object({
 
 const modifierInspectionSchema = Joi.object({
   inspecteurId: uuid.optional().allow(null),
-  type: Joi.string().valid('inspection', 'opr', 'visite_contradictoire').optional(),
+  // Le type n'est plus énuméré ici : il vit dans un référentiel
+  // administrable, et une liste figée empêcherait d'en ajouter. Seule la
+  // FORME est contrôlée ; l'existence l'est par le middleware
+  // `verifierTypeReferentiel`, posé sur la route.
+  type: Joi.string().trim().lowercase().pattern(/^[a-z0-9_]+$/).max(50).optional(),
+
   date_visite: Joi.date().iso().optional().allow('', null),
   statut: Joi.string().valid('planifiee', 'en_cours', 'terminee', 'signee').optional(),
   compte_rendu: Joi.string().trim().max(10000).optional().allow('', null),
