@@ -1,6 +1,7 @@
 'use strict';
 
 const { Op, fn, col } = require('sequelize');
+const { STATUT_CHANTIER_EN_DEMANDE } = require('../../../config/enums.js');
 const ExcelJS = require('exceljs');
 const {
   Chantier, Reserve, ReserveHistorique, Batiment, Plan, Inspection, Document, Utilisateur, Organisation,
@@ -20,9 +21,20 @@ const STATUTS_FERMES = ['validee', 'cloturee'];
  * un paramètre client : il ouvre la lecture à toutes les organisations.
  * Un `organisationId` fourni malgré tout reste un filtre (ciblage d'un client).
  */
-const _whereOrganisation = (organisationId, toutesOrganisations) => (
-  toutesOrganisations && !organisationId ? {} : { organisationId }
-);
+/**
+ * Portée d'une requête sur les chantiers.
+ *
+ * Écarte TOUJOURS les demandes de création : un chantier en attente ou refusé
+ * n'existe pas encore, le compter gonflerait le compteur de l'écran d'accueil
+ * et le listerait dans « Vos chantiers » comme un projet en cours.
+ *
+ * La règle vit ici plutôt que sur chaque requête : il y en a cinq, et en
+ * oublier une suffirait à faire diverger deux vues du même portefeuille.
+ */
+const _whereOrganisation = (organisationId, toutesOrganisations) => ({
+  ...(toutesOrganisations && !organisationId ? {} : { organisationId }),
+  statut: { [Op.notIn]: STATUT_CHANTIER_EN_DEMANDE },
+});
 
 class DashboardService {
 

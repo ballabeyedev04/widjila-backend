@@ -84,6 +84,45 @@ describe('groupes de rôles', () => {
   });
 });
 
+describe('changerStatut — le circuit n’est pas une liste déroulante', () => {
+  // Les deux statuts de demande sont servis par `/referentiels/enums`, donc
+  // proposés par la liste « changer le statut ». Sans garde, un chef de projet
+  // remettrait un chantier en activité « en attente » d'un clic — sans
+  // demandeur, sans motif, sans courriel, et hors de toutes les listes.
+  //
+  // Le service interroge la base : on remplace `Chantier.findOne` le temps du
+  // test, sans connexion réelle.
+  const { Chantier } = require('../models/index.js');
+
+  let findOne;
+  beforeEach(() => {
+    findOne = jest.spyOn(Chantier, 'findOne');
+  });
+  afterEach(() => {
+    findOne.mockRestore();
+  });
+
+  it.each(['en_attente_validation', 'rejete'])('refuse de basculer vers « %s »', async (statut) => {
+    findOne.mockResolvedValue({ id: 'c1', statut: 'en_cours' });
+
+    const r = await ChantierService.changerStatut('org1', 'c1', statut);
+
+    expect(r.success).toBe(false);
+    expect(r.message).toEqual(expect.stringContaining('circuit de validation'));
+  });
+
+  it('refuse de faire sortir une demande par la liste déroulante', async () => {
+    // Une demande ne devient pas un chantier actif ainsi : elle se VALIDE,
+    // c'est ce qui prévient le demandeur.
+    findOne.mockResolvedValue({ id: 'c1', statut: 'en_attente_validation' });
+
+    const r = await ChantierService.changerStatut('org1', 'c1', 'en_cours');
+
+    expect(r.success).toBe(false);
+    expect(r.message).toEqual(expect.stringContaining('demande en cours'));
+  });
+});
+
 describe('_refusDepot — garde du parcours « Envoi Plan »', () => {
   const PlanService = require('../modules/plan/service/plan.service.js');
 

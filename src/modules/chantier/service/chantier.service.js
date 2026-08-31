@@ -439,6 +439,28 @@ class ChantierService {
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
+    // ── Le circuit de validation n'est pas une liste déroulante ────────────
+    //
+    // Les deux statuts de demande sont servis par `/referentiels/enums` : sans
+    // cette garde, ils apparaîtraient dans « changer le statut » et un chef de
+    // projet remettrait un chantier en activité « en attente » d'un clic —
+    // sans demandeur, sans motif, sans courriel, et hors de toutes les listes.
+    if (STATUT_CHANTIER_EN_DEMANDE.includes(statut)) {
+      return {
+        success: false,
+        message: 'Ce statut appartient au circuit de validation : il ne se choisit pas ici.',
+      };
+    }
+
+    // Et le sens inverse : une demande ne devient pas un chantier actif par la
+    // liste déroulante. Elle se VALIDE — c'est ce qui prévient le demandeur.
+    if (STATUT_CHANTIER_EN_DEMANDE.includes(chantier.statut)) {
+      return {
+        success: false,
+        message: 'Ce chantier est une demande en cours : validez-la ou refusez-la.',
+      };
+    }
+
     // Règle métier : un chantier ne peut pas être clôturé s'il reste des
     // réserves ouvertes (statut différent de validee/cloturee).
     //
