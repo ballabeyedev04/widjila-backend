@@ -1,5 +1,6 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/db.js');
+const { STATUT_CHANTIER } = require('../config/enums.js');
 
 /**
  * Chantier (projet) — l'unité principale de la plateforme.
@@ -58,10 +59,38 @@ const Chantier = sequelize.define('Chantier', {
     allowNull: true
   },
   // 'cloture' refusée si réserves ouvertes (règle métier — service reserve)
+  //
+  // VARCHAR et non ENUM : la liste des statuts vit dans `config/enums.js`, et
+  // un ENUM PostgreSQL demanderait une migration à chaque valeur ajoutée.
   statut: {
-    type: DataTypes.ENUM('en_preparation', 'en_cours', 'en_pause', 'archive', 'cloture'),
+    type: DataTypes.STRING(30),
     allowNull: false,
-    defaultValue: 'en_preparation'
+    defaultValue: 'en_preparation',
+    validate: { isIn: [STATUT_CHANTIER] }
+  },
+
+  // ── Circuit de validation ─────────────────────────────────────────────────
+  // Un chantier créé par un compte non-Admin naît « en_attente_validation ».
+  // Les trois champs qui suivent tracent QUI a demandé, QUI a tranché et
+  // POURQUOI en cas de refus — sans quoi un demandeur voit sa demande refusée
+  // sans savoir quoi corriger.
+  demandeurId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'utilisateur', key: 'id' }
+  },
+  motifRejet: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  valideParId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'utilisateur', key: 'id' }
+  },
+  valideLe: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'chantiers',
@@ -71,6 +100,7 @@ const Chantier = sequelize.define('Chantier', {
   indexes: [
     { fields: ['organisation_id'] },
     { fields: ['statut'] },
+    { fields: ['demandeur_id'] },
     { fields: ['responsable_id'] }
   ]
 });

@@ -12,7 +12,7 @@ const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware
 const checkSubscription = require('../../../middlewares/checkSubscription.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
-const { OPERATIONNEL, OPERATIONNEL_CONTROLE } = require('../../../config/roles.js');
+const { OPERATIONNEL, OPERATIONNEL_CONTROLE, DEPOSANT } = require('../../../config/roles.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const {
   uploadPlanSchema, creerAnnotationSchema, modifierAnnotationSchema,
@@ -31,7 +31,14 @@ router.post(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole(...OPERATIONNEL_CONTROLE),
+  // `DEPOSANT` et non `OPERATIONNEL_CONTROLE` : le parcours « Envoi Plan »
+  // veut que l'entreprise joigne ses plans à sa demande de chantier.
+  //
+  // Ce n'est qu'un premier filtre GROSSIER. La garde qui compte est dans
+  // `plan.service.js#upload` : un rôle hors OPERATIONNEL_CONTROLE ne dépose
+  // que sur SA PROPRE demande encore en attente. Sur un chantier en activité,
+  // les autorisations sont inchangées.
+  requireRole(...DEPOSANT),
   upload.single('fichier'),
   upload.validateMagicBytes,
   injectChantierId,

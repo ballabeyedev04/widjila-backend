@@ -56,6 +56,15 @@ const GESTION = ['Admin', 'ChefProjet', 'MaitreOuvrage'];
 //     ChefProjet et récupérerait tout ce qui lui est fermé ici.
 const GESTION_MEMBRES = [...GESTION, 'Entreprise'];
 
+// Dépôt d'une demande de chantier — volontairement plus large que
+// OPERATIONNEL.
+//
+// L'entreprise envoie ses plans et demande l'ouverture du chantier : c'est le
+// parcours décrit par le client. Elle n'obtient pour autant AUCUN chantier
+// utilisable — tout dépôt hors super-admin naît « en_attente_validation » et
+// attend le verdict de GESTION (voir chantier.service.js#creerChantier).
+const DEPOSANT = [...OPERATIONNEL, 'Entreprise', 'BureauControle', 'MaitreOuvrage'];
+
 // Actions très sensibles réservées au chef de projet (le rôle Admin passe
 // toujours par le middleware). Ex : supprimer un chantier.
 const SENSIBLE = ['ChefProjet'];
@@ -76,4 +85,4 @@ const RESERVE_INTERVENANTS = ['ChefProjet', 'ConducteurTravaux', 'BureauControle
 // qu'un premier filtre grossier, à l'image du reste du module.
 const SOUS_TRAITANT = ['SousTraitant'];
 
-module.exports = { OPERATIONNEL, OPERATIONNEL_CONTROLE, PILOTAGE, GESTION, GESTION_MEMBRES, SENSIBLE, RESERVE_INTERVENANTS, SOUS_TRAITANT };
+module.exports = { OPERATIONNEL, OPERATIONNEL_CONTROLE, PILOTAGE, GESTION, GESTION_MEMBRES, DEPOSANT, SENSIBLE, RESERVE_INTERVENANTS, SOUS_TRAITANT };

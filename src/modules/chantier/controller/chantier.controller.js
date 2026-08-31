@@ -20,7 +20,9 @@ exports.listerChantiers = asyncHandler(async (req, res) => {
   const result = await ChantierService.listChantiers(
     superAdmin ? (req.query.organisationId || null) : req.user.organisationId,
     req.query,
-    { toutesOrganisations: superAdmin }
+    // `utilisateurId` : « Suivi des demandes » ne montre que SES demandes.
+    // Il vient du jeton, jamais de la requête.
+    { toutesOrganisations: superAdmin, utilisateurId: req.user.id }
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({
@@ -47,7 +49,9 @@ exports.creerChantier = asyncHandler(async (req, res) => {
     throw new ForbiddenError('Vous ne pouvez créer un chantier que dans votre propre organisation.');
   }
 
-  const result = await ChantierService.creerChantier(organisationId, req.body);
+  // L'auteur vient du JETON. Le service en déduit si le chantier naît actif
+  // (super-admin) ou en attente de validation (tout le reste).
+  const result = await ChantierService.creerChantier(organisationId, req.body, req.user);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { chantier: result.chantier } });
 });
@@ -59,7 +63,20 @@ exports.detailChantier = asyncHandler(async (req, res) => {
 });
 
 exports.modifierChantier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.modifierChantier(await orgDuChantier(req), req.params.id, req.body);
+  const result = await ChantierService.modifierChantier(await orgDuChantier(req), req.params.id, req.body, req.user);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message, data: { chantier: result.chantier } });
+});
+
+// ── Validation d'une demande de chantier ─────────────────────────────────────
+exports.validerChantier = asyncHandler(async (req, res) => {
+  const result = await ChantierService.validerChantier(req.params.id, req.user);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message, data: { chantier: result.chantier } });
+});
+
+exports.rejeterChantier = asyncHandler(async (req, res) => {
+  const result = await ChantierService.rejeterChantier(req.params.id, req.user, req.body.motif);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message, data: { chantier: result.chantier } });
 });

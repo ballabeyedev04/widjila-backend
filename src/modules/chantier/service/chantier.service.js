@@ -10,6 +10,9 @@ const sequelize = require('../../../config/db.js');
 const NotificationService = require('../../notification/service/notification.service.js');
 const escapeLike = require('../../../utils/escapeLike.js');
 const { GESTION } = require('../../../config/roles.js');
+const { STATUT_CHANTIER_EN_DEMANDE } = require('../../../config/enums.js');
+const { sendChantierValidationEmail } = require('../../../infrastructure/emailService.js');
+const logger = require('../../../utils/logger.js');
 
 /**
  * Efface les zones cliquables qui pointaient vers une structure supprimée.
@@ -44,10 +47,58 @@ const STATUTS_FERMETURE = ['cloture', 'archive'];
 // Statuts de réserve considérés comme soldés.
 const RESERVE_SOLDEE = ['validee', 'cloturee'];
 
+/**
+ * Destinataires d'une demande de chantier : les comptes actifs de
+ * l'organisation habilités à trancher.
+ *
+ * TOUS, et non le premier trouvé : un seul destinataire en congé suffirait à
+ * bloquer une demande indéfiniment. Le super-admin plateforme n'est pas
+ * concerné — il n'appartient à aucune organisation.
+ */
+async function _valideursDe(organisationId) {
+  const membres = await Utilisateur.findAll({
+    where: {
+      organisationId,
+      role: { [Op.in]: GESTION.filter((r) => r !== 'Admin') },
+      statut: 'actif',
+    },
+    attributes: ['email', 'prenom', 'nom'],
+  });
+  return membres.filter((m) => m.email);
+}
+
+/**
+ * Envoie un courriel du circuit SANS jamais faire échouer l'action métier.
+ *
+ * Une demande enregistrée puis perdue parce que le fournisseur d'envoi était
+ * indisponible serait le pire des deux mondes : l'utilisateur verrait une
+ * erreur alors que sa demande existe. L'échec est journalisé, pas propagé.
+ */
+async function _notifier(charge) {
+  try {
+    await sendChantierValidationEmail(charge);
+  } catch (e) {
+    logger.error(
+      `Courriel de validation de chantier non envoyé (${charge.variante}) : ${e.message}`
+    );
+  }
+}
+
 class ChantierService {
 
   // -------------------- CRÉER UN CHANTIER --------------------
-  static async creerChantier(organisationId, data) {
+  /**
+   * @param {string} organisationId
+   * @param {object} data
+   * @param {object} [auteur]  Compte appelant — `{ id, role, prenom, nom }`.
+   *   Détermine si le chantier naît ACTIF ou EN ATTENTE : seul le super-admin
+   *   plateforme crée un chantier directement utilisable, tout autre compte
+   *   dépose une demande. L'auteur est passé par le contrôleur d'après le
+   *   jeton, JAMAIS d'après le corps de la requête — sinon n'importe qui
+   *   contournerait la validation en s'annonçant « Admin ».
+   */
+  static async creerChantier(organisationId, data, auteur = null) {
+    const enAttente = ChantierService._naitEnAttente(auteur);
     // L'organisation vient soit du compte appelant, soit — pour le super-admin
     // plateforme, qui n'appartient à aucune organisation — du corps de la
     // requête (voir chantier.controller.js#creerChantier). On la valide ici :
@@ -83,11 +134,128 @@ class ChantierService {
       date_fin: data.date_fin || null,
       responsableId: data.responsableId || null,
       budget: data.budget || null,
-      // Absent → le modèle applique 'en_preparation'
-      ...(data.statut ? { statut: data.statut } : {}),
+      // Le statut n'est PAS repris du corps de la requête quand une validation
+      // est due : un `statut: 'en_cours'` envoyé par une entreprise aurait
+      // sinon suffi à sauter le circuit.
+      statut: enAttente ? 'en_attente_validation' : (data.statut || 'en_preparation'),
+      demandeurId: enAttente ? auteur.id : null,
     });
 
-    return { success: true, message: 'Chantier créé avec succès', chantier };
+    if (!enAttente) {
+      return { success: true, message: 'Chantier créé avec succès', chantier };
+    }
+
+    // Les valideurs sont prévenus APRÈS l'enregistrement : une demande qui
+    // existe sans courriel se rattrape à l'écran ; un courriel annonçant une
+    // demande qui n'existe pas ne se rattrape pas.
+    const valideurs = await _valideursDe(organisationId);
+    await Promise.all(valideurs.map((v) => _notifier({
+      to: v.email,
+      variante: 'demande',
+      destinataire: v.prenom || v.nom || '',
+      chantierNom: chantier.nom,
+      chantierCode: chantier.code,
+      demandeurNom: [auteur.prenom, auteur.nom].filter(Boolean).join(' ') || '',
+      chantierId: chantier.id,
+    })));
+
+    return {
+      success: true,
+      message: 'Demande de création de chantier envoyée — elle attend une validation',
+      chantier,
+    };
+  }
+
+  /**
+   * Le chantier naît-il en attente de validation ?
+   *
+   * « N'importe qui qui crée le chantier sauf Admin reste en attente » : seul
+   * le super-admin plateforme échappe au circuit. Un appel sans auteur
+   * identifié (amorçage, tests, duplication interne) crée directement — il n'y
+   * aurait personne à qui attribuer la demande, ni personne pour la trancher.
+   */
+  static _naitEnAttente(auteur) {
+    return Boolean(auteur && auteur.id && auteur.role !== 'Admin');
+  }
+
+  // -------------------- VALIDER / REJETER UNE DEMANDE --------------------
+  /**
+   * Accepte une demande : le chantier devient réellement utilisable.
+   *
+   * Le motif de refus éventuel est EFFACÉ — la demande a été corrigée puis
+   * acceptée, laisser l'ancien motif ferait croire à un refus toujours actif.
+   */
+  static async validerChantier(chantierId, valideur) {
+    const chantier = await Chantier.findByPk(chantierId, {
+      include: [{ model: Utilisateur, as: 'demandeur', attributes: ['email', 'prenom', 'nom'] }],
+    });
+    if (!chantier) return { success: false, message: 'Chantier introuvable' };
+
+    if (!STATUT_CHANTIER_EN_DEMANDE.includes(chantier.statut)) {
+      return { success: false, message: 'Ce chantier n’est pas en attente de validation' };
+    }
+
+    await chantier.update({
+      statut: 'en_preparation',
+      motifRejet: null,
+      valideParId: valideur.id,
+      valideLe: new Date(),
+    });
+
+    if (chantier.demandeur && chantier.demandeur.email) {
+      await _notifier({
+        to: chantier.demandeur.email,
+        variante: 'validee',
+        destinataire: chantier.demandeur.prenom || chantier.demandeur.nom || '',
+        chantierNom: chantier.nom,
+        chantierCode: chantier.code,
+        chantierId: chantier.id,
+      });
+    }
+
+    return { success: true, message: 'Chantier validé', chantier };
+  }
+
+  /**
+   * Refuse une demande, avec un motif.
+   *
+   * Le motif est OBLIGATOIRE (garanti en amont par la validation de schéma) :
+   * c'est la seule indication dont dispose le demandeur pour corriger, et le
+   * client a demandé qu'il puisse « corriger et renvoyer ».
+   *
+   * Le chantier n'est PAS supprimé : sa structure et ses plans doivent
+   * survivre à la correction, sans quoi tout serait à ressaisir.
+   */
+  static async rejeterChantier(chantierId, valideur, motif) {
+    const chantier = await Chantier.findByPk(chantierId, {
+      include: [{ model: Utilisateur, as: 'demandeur', attributes: ['email', 'prenom', 'nom'] }],
+    });
+    if (!chantier) return { success: false, message: 'Chantier introuvable' };
+
+    if (chantier.statut !== 'en_attente_validation') {
+      return { success: false, message: 'Ce chantier n’est pas en attente de validation' };
+    }
+
+    await chantier.update({
+      statut: 'rejete',
+      motifRejet: motif,
+      valideParId: valideur.id,
+      valideLe: new Date(),
+    });
+
+    if (chantier.demandeur && chantier.demandeur.email) {
+      await _notifier({
+        to: chantier.demandeur.email,
+        variante: 'rejetee',
+        destinataire: chantier.demandeur.prenom || chantier.demandeur.nom || '',
+        chantierNom: chantier.nom,
+        chantierCode: chantier.code,
+        motif,
+        chantierId: chantier.id,
+      });
+    }
+
+    return { success: true, message: 'Demande refusée', chantier };
   }
 
   // -------------------- LISTER LES CHANTIERS --------------------
@@ -103,7 +271,11 @@ class ChantierService {
    *   Le drapeau est posé par le contrôleur d'après le rôle, JAMAIS d'après
    *   un paramètre de requête : il ouvre la lecture à toutes les organisations.
    */
-  static async listChantiers(organisationId, { page = 1, limit = 20, search = '', statut } = {}, { toutesOrganisations = false } = {}) {
+  static async listChantiers(
+    organisationId,
+    { page = 1, limit = 20, search = '', statut, demandes } = {},
+    { toutesOrganisations = false, utilisateurId = null } = {}
+  ) {
     const where = {};
     if (!toutesOrganisations) where.organisationId = organisationId;
     else if (organisationId) where.organisationId = organisationId; // filtre facultatif du super-admin
@@ -114,7 +286,27 @@ class ChantierService {
         { code: { [Op.iLike]: motif } },
       ];
     }
-    if (statut) where.statut = statut;
+    // ── Chantiers en activité / demandes ──────────────────────────────────
+    //
+    // Par défaut la liste ÉCARTE les demandes : un chantier en attente ou
+    // refusé n'est pas un chantier, et le laisser apparaître ferait travailler
+    // des équipes sur un projet qui n'existe pas encore.
+    //
+    // Les deux vues du client ouvrent explicitement cette réserve :
+    //   - `demandes=mes`       → « Suivi des demandes » du demandeur ;
+    //   - `demandes=a_valider` → la file d'attente de ceux qui tranchent.
+    if (statut) {
+      where.statut = statut;
+    } else if (demandes === 'mes') {
+      where.statut = { [Op.in]: STATUT_CHANTIER_EN_DEMANDE };
+      // Ses PROPRES demandes : sans ce filtre, un demandeur verrait celles de
+      // toute l'organisation, y compris leurs motifs de refus.
+      if (utilisateurId) where.demandeurId = utilisateurId;
+    } else if (demandes === 'a_valider') {
+      where.statut = 'en_attente_validation';
+    } else {
+      where.statut = { [Op.notIn]: STATUT_CHANTIER_EN_DEMANDE };
+    }
 
     const { rows, count } = await Chantier.findAndCountAll({
       where,
@@ -124,6 +316,9 @@ class ChantierService {
         // organisations » du super-admin affiche des chantiers homonymes sans
         // moyen de savoir à quel client ils appartiennent.
         { model: Organisation, as: 'organisation', attributes: ['id', 'nom'] },
+        // L'auteur de la demande : la file d'attente doit dire QUI demande,
+        // un nom de chantier seul ne permet pas de trancher.
+        { model: Utilisateur, as: 'demandeur', attributes: ['id', 'nom', 'prenom', 'email'] },
       ],
       order: [['createdAt', 'DESC']],
       limit,
@@ -184,7 +379,11 @@ class ChantierService {
   }
 
   // -------------------- MODIFIER UN CHANTIER --------------------
-  static async modifierChantier(organisationId, chantierId, data) {
+  /**
+   * @param {object} [auteur]  Compte appelant. Sert au RENVOI d'une demande
+   *   refusée : corriger un chantier « rejete » le repropose à la validation.
+   */
+  static async modifierChantier(organisationId, chantierId, data, auteur = null) {
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
@@ -200,7 +399,38 @@ class ChantierService {
       if (data[champ] !== undefined) updates[champ] = data[champ];
     }
 
+    // ── Renvoi après refus ────────────────────────────────────────────────
+    //
+    // Le client a demandé que le demandeur « puisse corriger et renvoyer ».
+    // Corriger un chantier refusé le remet donc dans la file d'attente, sans
+    // écran ni bouton supplémentaire : la correction EST le renvoi.
+    //
+    // Le motif est effacé — il porte sur la version corrigée, qui n'existe
+    // plus. Le laisser afficherait un reproche déjà traité.
+    const renvoi = chantier.statut === 'rejete' && ChantierService._naitEnAttente(auteur);
+    if (renvoi) {
+      updates.statut = 'en_attente_validation';
+      updates.motifRejet = null;
+      updates.valideParId = null;
+      updates.valideLe = null;
+    }
+
     await chantier.update(updates);
+
+    if (renvoi) {
+      const valideurs = await _valideursDe(organisationId);
+      await Promise.all(valideurs.map((v) => _notifier({
+        to: v.email,
+        variante: 'demande',
+        destinataire: v.prenom || v.nom || '',
+        chantierNom: chantier.nom,
+        chantierCode: chantier.code,
+        demandeurNom: [auteur.prenom, auteur.nom].filter(Boolean).join(' ') || '',
+        chantierId: chantier.id,
+      })));
+      return { success: true, message: 'Demande corrigée et renvoyée pour validation', chantier };
+    }
+
     return { success: true, message: 'Chantier mis à jour avec succès', chantier };
   }
 

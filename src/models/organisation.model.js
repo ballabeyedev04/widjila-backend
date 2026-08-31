@@ -41,6 +41,25 @@ const Organisation = sequelize.define('Organisation', {
     type: DataTypes.STRING(50),
     allowNull: true
   },
+  // Identifiants fiscaux des autres pays couverts — voir config/pays.js, qui
+  // décide lesquels s'affichent selon le pays choisi.
+  //   nif : Mali          — Numéro d'Identification Fiscale
+  //   ncc : Côte d'Ivoire — Numéro de Compte Contribuable
+  //   idu : Côte d'Ivoire — Identifiant Unique (remplace peu à peu RCCM/NCC,
+  //                         les deux systèmes coexistant, les trois sont
+  //                         proposés et aucun n'est obligatoire)
+  nif: {
+    type: DataTypes.STRING(50),
+    allowNull: true
+  },
+  ncc: {
+    type: DataTypes.STRING(50),
+    allowNull: true
+  },
+  idu: {
+    type: DataTypes.STRING(50),
+    allowNull: true
+  },
   telephone: {
     type: DataTypes.STRING(50),
     allowNull: true
@@ -57,10 +76,18 @@ const Organisation = sequelize.define('Organisation', {
     type: DataTypes.STRING(100),
     allowNull: true
   },
+  /**
+   * Code ISO 3166-1 alpha-2 du pays (`FR`, `SN`, `ML`, `CI`).
+   *
+   * C'est lui qui commande les champs d'identification affichés au client —
+   * voir `config/pays.js`. La colonne reste large : d'anciennes lignes
+   * peuvent porter un libellé non converti, et les tronquer aurait inventé
+   * une donnée fausse (voir la migration 20260831000001).
+   */
   pays: {
     type: DataTypes.STRING(100),
     allowNull: true,
-    defaultValue: 'France'
+    defaultValue: 'FR'
   },
   logo_url: {
     type: DataTypes.STRING(255),

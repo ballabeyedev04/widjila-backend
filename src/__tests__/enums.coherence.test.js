@@ -47,7 +47,6 @@ describe('config/enums.js reflète les colonnes ENUM', () => {
   const cas = [
     ['rôles utilisateur', 'utilisateur.model.js', 0, ENUMS.ROLE_UTILISATEUR],
     ['statuts utilisateur', 'utilisateur.model.js', 1, ENUMS.STATUT_UTILISATEUR],
-    ['statuts chantier', 'chantier.model.js', 0, ENUMS.STATUT_CHANTIER],
     ['types inspection', 'inspection.model.js', 0, ENUMS.TYPE_INSPECTION],
     ['statuts inspection', 'inspection.model.js', 1, ENUMS.STATUT_INSPECTION],
     ['statuts convocation', 'convocation.model.js', 0, ENUMS.STATUT_CONVOCATION],
@@ -62,6 +61,25 @@ describe('config/enums.js reflète les colonnes ENUM', () => {
 
   it.each(cas)('%s', (_libelle, fichier, index, attendu) => {
     expect(enumModele(fichier, index)).toEqual(attendu);
+  });
+
+  /**
+   * `chantiers.statut` a quitté l'ENUM pour un VARCHAR contraint par le
+   * modèle : le circuit de validation ajoute des statuts, et un ENUM
+   * PostgreSQL aurait demandé une migration à chacun.
+   *
+   * Le cas ne peut donc plus être vérifié par lecture d'un `DataTypes.ENUM`.
+   * Ce qui le remplace vaut mieux : on vérifie que le modèle IMPORTE la liste
+   * au lieu de la recopier. Recopiée, elle divergerait ; importée, elle ne
+   * peut pas.
+   */
+  it('statuts chantier — le modèle importe la liste au lieu de la recopier', () => {
+    const source = fs.readFileSync(path.join(DOSSIER_MODELES, 'chantier.model.js'), 'utf8');
+
+    expect(source).toMatch(/require\(['"]\.\.\/config\/enums\.js['"]\)/);
+    expect(source).toMatch(/isIn:\s*\[STATUT_CHANTIER\]/);
+    // Et surtout : plus aucune liste de statuts en dur dans le modèle.
+    expect(source).not.toMatch(/DataTypes\.ENUM\([^)]*en_preparation/);
   });
 
   it('sévérité et priorité partagent la même échelle', () => {

@@ -46,7 +46,18 @@ const ROLE_UTILISATEUR = [
 const STATUT_UTILISATEUR = ['actif', 'inactif', 'en_attente_validation', 'rejete'];
 
 // ── Chantiers ───────────────────────────────────────────────────────────────
-const STATUT_CHANTIER = ['en_preparation', 'en_cours', 'en_pause', 'archive', 'cloture'];
+// 'en_attente_validation' et 'rejete' encadrent la CREATION : tout chantier
+// cree par un compte non-Admin y passe avant d'exister reellement. Ils sont
+// places en tete parce qu'ils precedent 'en_preparation' dans le temps.
+const STATUT_CHANTIER = [
+  'en_attente_validation', 'rejete',
+  'en_preparation', 'en_cours', 'en_pause', 'archive', 'cloture',
+];
+
+// Statuts d'un chantier qui n'a PAS encore ete valide. Un tel chantier n'est
+// pas un chantier en activite : il est ecarte des listes courantes, et n'est
+// visible que par son demandeur et par ceux qui valident.
+const STATUT_CHANTIER_EN_DEMANDE = ['en_attente_validation', 'rejete'];
 
 // ── Réserves ────────────────────────────────────────────────────────────────
 //
@@ -118,6 +129,7 @@ const VUE_PUBLIQUE = {
   roles: ROLE_UTILISATEUR,
   statutsUtilisateur: STATUT_UTILISATEUR,
   statutsChantier: STATUT_CHANTIER,
+  statutsChantierEnDemande: STATUT_CHANTIER_EN_DEMANDE,
   statutsReserve: STATUT_RESERVE,
   severites: SEVERITE_PRIORITE,
   priorites: SEVERITE_PRIORITE,
@@ -140,6 +152,7 @@ module.exports = {
   ROLE_UTILISATEUR,
   STATUT_UTILISATEUR,
   STATUT_CHANTIER,
+  STATUT_CHANTIER_EN_DEMANDE,
   STATUT_RESERVE,
   SEVERITE_PRIORITE,
   CATEGORIE_RESERVE,

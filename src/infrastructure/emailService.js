@@ -113,6 +113,43 @@ async function sendInscriptionRejeteeEmail({ to, nom, prenom, motif, organisatio
 }
 
 /**
+ * Emails du circuit de validation des chantiers.
+ *
+ * Les trois messages partagent un gabarit — voir
+ * `templates/mail/chantierValidation.template.js`.
+ *
+ * `to` accepte une liste : la demande part à TOUS ceux qui peuvent la
+ * trancher, pas au premier trouvé. Un seul destinataire en congé suffirait
+ * sinon à bloquer une demande indéfiniment.
+ */
+async function sendChantierValidationEmail({
+  to, variante, destinataire, chantierNom, chantierCode, demandeurNom, motif, chantierId,
+}) {
+  const template = require('../templates/mail/chantierValidation.template.js');
+  const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+
+  const SUJETS = {
+    demande: `Nouvelle demande de chantier — ${chantierNom}`,
+    validee: `Votre chantier « ${chantierNom} » est validé`,
+    rejetee: `Suite à votre demande de chantier — ${chantierNom}`,
+  };
+
+  return sendEmail({
+    to,
+    subject: SUJETS[variante] || SUJETS.demande,
+    html: template({
+      variante,
+      destinataire,
+      chantierNom,
+      chantierCode,
+      demandeurNom,
+      motif,
+      lien: chantierId ? `${frontendUrl}/chantiers/${chantierId}` : undefined,
+    }),
+  });
+}
+
+/**
  * Email INTERNE — une demande de suppression de compte a été déposée sur la
  * page publique.
  *
@@ -138,5 +175,6 @@ module.exports = {
   sendWelcomeEmail,
   sendInscriptionValideeEmail,
   sendInscriptionRejeteeEmail,
+  sendChantierValidationEmail,
   sendDemandeSuppressionEmail,
 };

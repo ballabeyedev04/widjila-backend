@@ -10,7 +10,7 @@ const checkOrganisation = require('../../../middlewares/checkOrganisation.middle
 const requireOrganisation = require('../../../middlewares/requireOrganisation.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
-const { OPERATIONNEL, PILOTAGE, SENSIBLE } = require('../../../config/roles.js');
+const { OPERATIONNEL, PILOTAGE, SENSIBLE, GESTION, DEPOSANT } = require('../../../config/roles.js');
 const { verifierLimite } = require('../../../middlewares/requireFonctionnalite.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const { Chantier } = require('../../../models/index.js');
@@ -19,6 +19,7 @@ const {
   creerBatimentSchema, creerEtageSchema, creerZoneSchema, creerLotSchema,
   modifierBatimentSchema, modifierEtageSchema, modifierZoneSchema,
   dupliquerChantierSchema, creerPhaseSchema, modifierPhaseSchema,
+  rejeterChantierSchema,
 } = require('../validation/chantier.validation.js');
 
 // ── Chantiers ────────────────────────────────────────────────────────────────
@@ -37,7 +38,15 @@ router.post(
   checkActiveUser,
   checkSubscription,
   requireOrganisation,
-  requireRole(...OPERATIONNEL),
+  // `DEPOSANT` et non `OPERATIONNEL` : le client demande que « n'importe qui
+  // qui crée le chantier sauf Admin reste en attente ». L'entreprise, qui
+  // dépose ses plans et demande l'ouverture du chantier, en était exclue —
+  // elle recevait un 403 avant même d'atteindre le circuit de validation.
+  //
+  // Élargir la route n'élargit PAS ce qui est créé : tout dépôt hors
+  // super-admin naît « en_attente_validation » et n'existe comme chantier
+  // qu'une fois validé (voir chantier.service.js#creerChantier).
+  requireRole(...DEPOSANT),
   // Plafond de chantiers de la formule. Aujourd'hui sans effet : le client
   // n'a fourni AUCUN nombre (la présentation cite « multi-chantiers » comme
   // avantage Pro, sans chiffrer Essentiel), donc `limite_chantiers` vaut NULL
@@ -59,6 +68,31 @@ router.put(
   requireRole(...OPERATIONNEL),
   validate(modifierChantierSchema),
   chantierController.modifierChantier
+);
+
+// ── Validation des demandes de chantier ──────────────────────────────────────
+// `GESTION` : le verdict appartient à ceux qui dirigent l'organisation, pas à
+// ceux qui exécutent. `checkOrganisation` interdit de trancher la demande d'un
+// autre client.
+router.patch(
+  '/:id/valider',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  checkOrganisation(Chantier, 'organisationId'),
+  requireRole(...GESTION),
+  chantierController.validerChantier
+);
+
+router.patch(
+  '/:id/rejeter',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  checkOrganisation(Chantier, 'organisationId'),
+  requireRole(...GESTION),
+  validate(rejeterChantierSchema),
+  chantierController.rejeterChantier
 );
 
 router.patch(

@@ -2,6 +2,7 @@
 
 const Joi = require('joi');
 const { telephone, motDePasse, nom, prenom, email } = require('../../../validations/common.js');
+const { PAYS, CHAMPS, champsDuPays } = require('../../../config/pays.js');
 
 const registerSchema = Joi.object({
   // Utilisateur
@@ -14,15 +15,58 @@ const registerSchema = Joi.object({
   // Organisation (entreprise) créée à l'inscription
   organisationNom: Joi.string().trim().min(2).max(150).optional().allow('', null),
   raison_sociale: Joi.string().trim().max(255).optional().allow('', null),
-  siret: Joi.string().trim().max(50).optional().allow('', null),
-  rccm: Joi.string().trim().max(50).optional().allow('', null),
-  ninea: Joi.string().trim().alphanum().max(15).optional().allow('', null),
+
+  // ── Identifiants d'entreprise, selon le PAYS ─────────────────────────────
+  //
+  // Tous sont déclarés facultatifs ici — une entreprise en cours
+  // d'immatriculation n'a pas encore ses numéros, et les exiger l'empêcherait
+  // de s'inscrire. Le contrôle de COHÉRENCE (un NINEA n'a rien à faire dans
+  // une inscription française) est appliqué juste après par `.custom()`, qui
+  // seul connaît le pays choisi.
+  ...Object.fromEntries(
+    Object.values(CHAMPS).map((c) => [
+      c.cle,
+      Joi.string().trim().max(50).optional().allow('', null),
+    ])
+  ),
+
   organisationTelephone: telephone.optional().allow('', null),
   organisationEmail: email.optional().allow('', null),
   organisationAdresse: Joi.string().trim().max(200).optional().allow('', null),
   organisationVille: Joi.string().trim().max(100).optional().allow('', null),
-  organisationPays: Joi.string().trim().max(100).optional().allow('', null),
-});
+  // Code ISO 3166-1 alpha-2. `.valid()` ferme la porte à un pays inventé :
+  // un code inconnu n'aurait aucun champ d'identification associé, et
+  // l'inscription passerait sans qu'aucun identifiant ne soit vérifié.
+  organisationPays: Joi.string().trim().uppercase()
+    .valid(...PAYS.map((p) => p.code))
+    .optional().allow('', null),
+})
+  .custom((valeurs, aide) => {
+    const pays = valeurs.organisationPays;
+    if (!pays) return valeurs;
+
+    const autorises = champsDuPays(pays);
+
+    for (const [cle, champ] of Object.entries(CHAMPS)) {
+      const valeur = valeurs[cle];
+      if (valeur === undefined || valeur === null || valeur === '') continue;
+
+      // Identifiant sans rapport avec le pays : on REFUSE plutôt que d'ignorer
+      // en silence. Une donnée acceptée puis jetée fait croire à
+      // l'utilisateur qu'elle est enregistrée.
+      if (!autorises.includes(cle)) {
+        return aide.message(
+          `Le champ « ${champ.libelle} » ne s'applique pas au pays sélectionné.`
+        );
+      }
+
+      if (!new RegExp(champ.motif).test(valeur)) {
+        return aide.message(`« ${champ.libelle} » est invalide — ${champ.aide}.`);
+      }
+    }
+
+    return valeurs;
+  });
 
 const loginSchema = Joi.object({
   // Les bornes ne sont pas cosmétiques : sans `.max()`, une chaîne de 250 000

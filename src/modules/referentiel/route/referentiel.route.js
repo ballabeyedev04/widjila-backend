@@ -19,6 +19,11 @@ const referentielController = require('../controller/referentiel.controller.js')
  * Ici, rien ne s'écrit : ces valeurs sont des colonnes ENUM PostgreSQL, les
  * modifier demande une migration.
  */
+// PUBLIQUE — c'est le formulaire d'INSCRIPTION qui la consomme, et son
+// utilisateur n'a pas encore de session. Aucune donnée sensible : ce sont les
+// noms des administrations fiscales de quatre pays.
+router.get('/pays', referentielController.getPays);
+
 router.get('/enums', auth, checkActiveUser, referentielController.getEnums);
 
 module.exports = router;

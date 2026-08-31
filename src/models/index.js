@@ -72,6 +72,11 @@ Chantier.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisati
 // Responsable du chantier (utilisateur)
 Utilisateur.hasMany(Chantier, { foreignKey: 'responsableId', as: 'chantiers_responsable' });
 Chantier.belongsTo(Utilisateur, { foreignKey: 'responsableId', as: 'responsable' });
+// Circuit de validation : le demandeur reçoit les courriels de verdict, le
+// valideur figure dans l'historique. Deux associations distinctes vers le même
+// modèle, d'où les alias explicites.
+Chantier.belongsTo(Utilisateur, { foreignKey: 'demandeurId', as: 'demandeur' });
+Chantier.belongsTo(Utilisateur, { foreignKey: 'valideParId', as: 'validePar' });
 
 // Affectation des utilisateurs à plusieurs chantiers — module 1
 Utilisateur.belongsToMany(Chantier, { through: ChantierMembre, foreignKey: 'utilisateurId', as: 'chantiers' });

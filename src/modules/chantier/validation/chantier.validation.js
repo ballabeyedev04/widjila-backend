@@ -31,6 +31,18 @@ const changerStatutSchema = Joi.object({
   statut: Joi.string().valid(...STATUT_CHANTIER).required(),
 });
 
+// Refus d'une demande de chantier.
+//
+// Le motif est OBLIGATOIRE et d'une longueur minimale : c'est la seule
+// explication que reçoit le demandeur, et « non » ne lui dit pas quoi
+// corriger. Le plafond protège le gabarit du courriel.
+const rejeterChantierSchema = Joi.object({
+  motif: Joi.string().trim().min(10).max(2000).required().messages({
+    'string.min': 'Précisez le motif du refus (10 caractères au minimum) — c’est la seule indication reçue par le demandeur.',
+    'any.required': 'Le motif du refus est obligatoire.',
+  }),
+});
+
 const creerBatimentSchema = Joi.object({
   nom: Joi.string().trim().min(2).max(100).required(),
   code: Joi.string().trim().max(50).optional().allow('', null),
@@ -93,6 +105,7 @@ module.exports = {
   creerChantierSchema,
   modifierChantierSchema,
   changerStatutSchema,
+  rejeterChantierSchema,
   creerBatimentSchema,
   creerEtageSchema,
   creerZoneSchema,

@@ -109,6 +109,37 @@ class SubscriptionService {
 
   /** Statut d'abonnement, essai compris. */
   static async getStatus(organisationId) {
+    // Compte SANS organisation — le super-admin plateforme, essentiellement.
+    //
+    // `findByPk(null)` ne trouve rien, et le contrôleur traduisait cette
+    // absence en 403. C'était faux à deux titres : le super-admin a bien le
+    // droit d'appeler cette route, et il n'a tout simplement pas d'abonnement
+    // à déclarer. Résultat : un 403 dans la console à CHAQUE page de l'espace
+    // d'administration, puisque la mise en page interroge ce statut partout.
+    //
+    // On répond donc un statut neutre et valide. Le client sait déjà lire
+    // `source: 'aucun'` — c'est ce que renvoie `DroitsService` pour une
+    // organisation sans droits.
+    if (!organisationId) {
+      return {
+        success: true,
+        status: {
+          isSubscribed: false,
+          trialEnded: false,
+          joursRestantsTrial: 0,
+          trialEndsAt: null,
+          planActuel: null,
+          planCode: null,
+          source: 'aucun',
+          dateFin: null,
+          // Distingue « pas d'abonnement » de « pas concerné » : sans ce
+          // drapeau, l'interface afficherait un bandeau « aucun abonnement »
+          // à un super-admin qui n'a aucune raison d'en souscrire un.
+          sansOrganisation: true,
+        },
+      };
+    }
+
     const org = await Organisation.findByPk(organisationId, {
       attributes: ['id', 'nom', 'is_subscribed', 'trial_ends_at', 'abonnement'],
     });
@@ -138,6 +169,26 @@ class SubscriptionService {
 
   /** État complet : formule courante, droits, usage et catalogue. */
   static async getPlanDetails(organisationId) {
+    // Même raison que `getStatus` : un compte sans organisation — le
+    // super-admin plateforme — n'a pas de formule, ce n'est pas un refus
+    // d'accès. On renvoie le CATALOGUE, qui l'intéresse toujours, et des
+    // droits vides plutôt qu'un 403.
+    if (!organisationId) {
+      return {
+        success: true,
+        data: {
+          droits: await DroitsService.getDroits(null),
+          usage: {
+            utilisateurs: { courant: 0, limite: 0 },
+            chantiers: { courant: 0, limite: 0 },
+          },
+          souscription: null,
+          plans: await SubscriptionService.getPlans(),
+          sansOrganisation: true,
+        },
+      };
+    }
+
     const org = await Organisation.findByPk(organisationId, { attributes: ['id', 'nom'] });
     if (!org) return { success: false, message: 'Organisation introuvable' };
 

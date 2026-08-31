@@ -17,7 +17,9 @@ const { organisationCible, estSuperAdmin } = require('../../../utils/organisatio
 exports.uploaderPlan = asyncHandler(async (req, res) => {
   const data = { ...req.body, uploaderId: req.user.id };
   const organisationId = await organisationCible(req, { chantierId: req.params.chantierId });
-  const result = await PlanService.upload(organisationId, req.params.chantierId, data, req.file);
+  // L'auteur vient du JETON : c'est lui qui décide si le dépôt est permis
+  // (voir `_refusDepot`), jamais un champ du corps de la requête.
+  const result = await PlanService.upload(organisationId, req.params.chantierId, data, req.file, req.user);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { plan: result.plan } });
 });

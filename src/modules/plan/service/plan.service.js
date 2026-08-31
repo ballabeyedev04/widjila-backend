@@ -5,6 +5,7 @@ const { Plan, Chantier, Annotation, Reserve, ReservePosition, Media, Organisatio
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
+const { OPERATIONNEL_CONTROLE } = require('../../../config/roles.js');
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  VERSIONNEMENT DES PLANS (audit § 6)
@@ -158,13 +159,47 @@ async function _resoudreRattachement(chantierId, data) {
 
 class PlanService {
 
+  /**
+   * Ce compte a-t-il le droit de déposer un plan sur ce chantier ?
+   *
+   * La route laisse passer `DEPOSANT` pour ouvrir le parcours « Envoi Plan » à
+   * l'entreprise. Ce serait trop large sans cette garde : l'entreprise pourrait
+   * déposer des plans sur N'IMPORTE QUEL chantier en activité de l'organisation.
+   *
+   * La règle tient en une phrase : hors OPERATIONNEL_CONTROLE (et hors
+   * super-admin), on ne dépose que sur SA PROPRE demande encore en attente.
+   * Une fois le chantier validé, les autorisations redeviennent celles d'avant.
+   *
+   * @returns {string|null} Message de refus, ou `null` si le dépôt est permis.
+   */
+  static _refusDepot(chantier, auteur) {
+    // Pas d'auteur identifié : appels internes (duplication, amorçage). La garde
+    // ne s'applique qu'aux dépôts venus d'une requête.
+    if (!auteur || !auteur.role) return null;
+    if (auteur.role === 'Admin' || OPERATIONNEL_CONTROLE.includes(auteur.role)) return null;
+  
+    if (chantier.statut !== 'en_attente_validation') {
+      return 'Vous ne pouvez déposer des plans que sur une demande de chantier en attente de validation.';
+    }
+    if (String(chantier.demandeurId) !== String(auteur.id)) {
+      return 'Vous ne pouvez déposer des plans que sur vos propres demandes de chantier.';
+    }
+    return null;
+  }
+
   // -------------------- UPLOAD D'UN PLAN --------------------
   /**
    * Enregistre un plan avec versionning : si un plan du même nom existe
    * déjà sur le chantier, la version suivante est créée (les réserves
    * restent liées à la version sur laquelle elles ont été posées).
    */
-  static async upload(organisationId, chantierId, data, fichier) {
+  /**
+   * Dépôt d'un plan.
+   *
+   * @param {object} [auteur]  Compte appelant, issu du jeton. Sert à la garde
+   *   fine du parcours « Envoi Plan » — voir `_refusDepot`.
+   */
+  static async upload(organisationId, chantierId, data, fichier, auteur = null) {
     if (!fichier || !fichier.buffer) {
       return { success: false, message: 'Fichier plan manquant' };
     }
@@ -174,6 +209,9 @@ class PlanService {
     // changeant simplement :chantierId dans l'URL.
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
+
+    const refus = PlanService._refusDepot(chantier, auteur);
+    if (refus) return { success: false, message: refus };
 
     // Rattachement résolu AVANT l'écriture disque : un rattachement invalide
     // doit échouer sans avoir rien déposé sur le disque.

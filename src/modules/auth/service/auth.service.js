@@ -11,6 +11,7 @@ const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const { journaliserConnexion } = require('./connexionLog.service.js');
 const MfaService = require('./mfa.service.js');
+const { TOUS_CHAMPS } = require('../../../config/pays.js');
 
 // Hash constant utilisé pour égaliser le temps de réponse login (anti timing-attack)
 // Généré une seule fois avec bcrypt.hash(randomBytes, 12) — jamais comparé à un vrai mot de passe
@@ -145,7 +146,7 @@ class AuthService {
   static async register(body) {
     const {
       nom, prenom, email, mot_de_passe, telephone, fonction,
-      organisationNom, raison_sociale, siret, rccm, ninea,
+      organisationNom, raison_sociale,
       organisationTelephone, organisationEmail, organisationAdresse,
       organisationVille, organisationPays,
     } = body;
@@ -179,8 +180,8 @@ class AuthService {
         if (telExist) { await t.rollback(); return { success: false, message: 'Ce numéro de téléphone est déjà utilisé' }; }
       }
 
-      if (siret) {
-        const orgExist = await Organisation.findOne({ where: { siret }, transaction: t });
+      if (body.siret) {
+        const orgExist = await Organisation.findOne({ where: { siret: body.siret }, transaction: t });
         if (orgExist) { await t.rollback(); return { success: false, message: 'Ce SIRET est déjà enregistré' }; }
       }
 
@@ -191,14 +192,24 @@ class AuthService {
       const organisation = await Organisation.create({
         nom: organisationNom,
         raison_sociale: raison_sociale || organisationNom,
-        siret: siret || null,
-        rccm: rccm || null,
-        ninea: ninea || null,
+
+        // Identifiants d'entreprise, repris tels que le schéma les a validés.
+        //
+        // Énumérés depuis `config/pays.js` plutôt qu'un par un : les trois
+        // qui manquaient (NIF, NCC, IDU) étaient tout simplement absents de
+        // cette liste, donc silencieusement jetés à l'inscription. Ajouter un
+        // pays ne demandera plus de repasser ici.
+        ...Object.fromEntries(
+          TOUS_CHAMPS.map((cle) => [cle, body[cle] || null])
+        ),
+
         telephone: organisationTelephone || null,
         email: (organisationEmail || '').toLowerCase() || null,
         adresse: organisationAdresse || null,
         ville: organisationVille || null,
-        pays: organisationPays || 'France',
+        // Code ISO, et non le libellé : c'est lui qui commande l'affichage
+        // des champs d'identification côté client.
+        pays: organisationPays || 'FR',
         trial_ends_at: trialEndsAt,
       }, { transaction: t });
 
