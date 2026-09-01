@@ -68,6 +68,22 @@ const errorHandler = (err, req, res, next) => { // eslint-disable-line no-unused
   if (err.name === 'SequelizeForeignKeyConstraintError') {
     return res.status(400).json({ success: false, message: 'Référence invalide : ressource liée introuvable' });
   }
+  // Identifiant malformé — typiquement un `:id` qui n'est pas un UUID.
+  //
+  // PostgreSQL rejette la valeur (« invalid input syntax for type uuid ») et
+  // Sequelize remonte une `SequelizeDatabaseError`. Ce n'est PAS une panne :
+  // c'est une requête qui désigne une ressource qui ne peut pas exister. La
+  // traiter en 500 déclenchait une alerte de supervision pour une faute
+  // d'URL, faisait afficher « erreur interne » au lieu de « introuvable », et
+  // laissait fuir le détail SQL hors production.
+  //
+  // Seul ce cas précis est reclassé : toute autre `SequelizeDatabaseError`
+  // (colonne absente, contrainte, schéma périmé) reste un vrai 500, car c'est
+  // bien le serveur qui est en tort.
+  if (err.name === 'SequelizeDatabaseError' && /invalid input syntax for type uuid/i.test(err.message || '')) {
+    return res.status(404).json({ success: false, message: 'Ressource introuvable' });
+  }
+
   if (
     err.name === 'SequelizeConnectionError' ||
     err.name === 'SequelizeConnectionRefusedError' ||
