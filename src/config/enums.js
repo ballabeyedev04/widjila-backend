@@ -45,6 +45,21 @@ const ROLE_UTILISATEUR = [
 
 const STATUT_UTILISATEUR = ['actif', 'inactif', 'en_attente_validation', 'rejete'];
 
+// ── Plans ───────────────────────────────────────────────────────────────────
+//
+// Un plan déposé avec une demande de chantier n'est pas encore exploitable :
+// il attend la même validation que le chantier auquel il est joint. Sans ce
+// statut, un plan en attente serait indiscernable d'un plan validé, et les
+// équipes y poseraient des réserves sur un chantier qui n'existe pas encore.
+const STATUT_PLAN = ['en_attente_validation', 'actif', 'rejete'];
+
+// ── Niveaux ─────────────────────────────────────────────────────────────────
+//
+// Les trois SECTIONS de l'écran de dépôt de plans. Ce n'est pas une cote
+// (`etages.niveau`, un entier) mais la nature du niveau : SS2 et R+2 ont des
+// cotes opposées, et rien dans un entier ne dit qu'un niveau est une toiture.
+const TYPE_NIVEAU = ['sous_sol', 'etage', 'toiture'];
+
 // ── Chantiers ───────────────────────────────────────────────────────────────
 // 'en_attente_validation' et 'rejete' encadrent la CREATION : tout chantier
 // cree par un compte non-Admin y passe avant d'exister reellement. Ils sont
@@ -130,6 +145,8 @@ const VUE_PUBLIQUE = {
   statutsUtilisateur: STATUT_UTILISATEUR,
   statutsChantier: STATUT_CHANTIER,
   statutsChantierEnDemande: STATUT_CHANTIER_EN_DEMANDE,
+  statutsPlan: STATUT_PLAN,
+  typesNiveau: TYPE_NIVEAU,
   statutsReserve: STATUT_RESERVE,
   severites: SEVERITE_PRIORITE,
   priorites: SEVERITE_PRIORITE,
@@ -153,6 +170,8 @@ module.exports = {
   STATUT_UTILISATEUR,
   STATUT_CHANTIER,
   STATUT_CHANTIER_EN_DEMANDE,
+  STATUT_PLAN,
+  TYPE_NIVEAU,
   STATUT_RESERVE,
   SEVERITE_PRIORITE,
   CATEGORIE_RESERVE,

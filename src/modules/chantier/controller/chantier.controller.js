@@ -22,7 +22,9 @@ exports.listerChantiers = asyncHandler(async (req, res) => {
     req.query,
     // `utilisateurId` : « Suivi des demandes » ne montre que SES demandes.
     // Il vient du jeton, jamais de la requête.
-    { toutesOrganisations: superAdmin, utilisateurId: req.user.id }
+    // `auteur` : applique le cloisonnement des chantiers issus du circuit.
+    // Il vient du jeton, jamais de la requête.
+    { toutesOrganisations: superAdmin, utilisateurId: req.user.id, auteur: req.user }
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({
@@ -57,7 +59,9 @@ exports.creerChantier = asyncHandler(async (req, res) => {
 });
 
 exports.detailChantier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.getChantier(req.params.id);
+  // L'auteur est transmis : sans lui, le cloisonnement de la liste se
+  // contournerait en ouvrant l'URL du chantier directement.
+  const result = await ChantierService.getChantier(req.params.id, req.user);
   if (!result.success) throw new NotFoundError(result.message);
   res.status(200).json({ success: true, message: 'Chantier récupéré', data: { chantier: result.chantier } });
 });

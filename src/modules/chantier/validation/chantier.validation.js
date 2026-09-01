@@ -2,6 +2,7 @@
 
 const Joi = require('joi');
 const { uuid, STATUT_CHANTIER } = require('../../../validations/common.js');
+const { TYPE_NIVEAU } = require('../../../config/enums.js');
 
 const creerChantierSchema = Joi.object({
   // Organisation destinataire. Renseignée UNIQUEMENT par le super-admin
@@ -51,6 +52,16 @@ const creerBatimentSchema = Joi.object({
 const creerEtageSchema = Joi.object({
   nom: Joi.string().trim().min(1).max(100).required(),
   niveau: Joi.number().integer().optional(),
+  // Nature du niveau — range l'étage sous « SOUS-SOLS », « ÉTAGES » ou
+  // « TOITURE ». Facultative : le modèle applique 'etage', et les écrans
+  // existants ne l'envoient pas.
+  typeNiveau: Joi.string().valid(...TYPE_NIVEAU).optional(),
+  // Code choisi dans le référentiel (`/referentiels/codes-niveau`). Non
+  // contraint à la liste ici : le référentiel est extensible en cours de
+  // saisie, et revalider contre un instantané rejetterait un code créé la
+  // seconde d'avant. Le format, lui, est vérifié.
+  codeNiveau: Joi.string().trim().max(20).pattern(/^[A-Za-z0-9+\-]+$/).optional().allow('', null),
+  description: Joi.string().trim().max(2000).optional().allow('', null),
 });
 
 const creerZoneSchema = Joi.object({

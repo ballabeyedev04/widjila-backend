@@ -48,6 +48,46 @@ const STATUTS_FERMETURE = ['cloture', 'archive'];
 const RESERVE_SOLDEE = ['validee', 'cloturee'];
 
 /**
+ * Restreint la visibilité aux chantiers qu'un compte a le droit de voir.
+ *
+ * Le client demande qu'un chantier validé ne soit utilisable que par
+ * l'entreprise qui l'a demandé. La règle ne vise QUE les chantiers issus du
+ * circuit (`demandeurId` renseigné) : les autres — c'est-à-dire tous ceux qui
+ * existent aujourd'hui — gardent leur visibilité d'organisation. Élargir le
+ * cloisonnement à l'existant ferait disparaître des chantiers de l'écran de
+ * leurs équipes sans que personne ne l'ait demandé.
+ *
+ * Voient malgré tout une demande qui n'est pas la leur : les rôles de GESTION
+ * (ils la tranchent, puis supervisent le chantier validé) et le super-admin
+ * plateforme, déjà hors organisation.
+ *
+ * @returns {object|null} Fragment de `where`, ou `null` si aucun filtre.
+ */
+function _filtreCloisonnement(auteur) {
+  if (!auteur || !auteur.id) return null;
+  if (auteur.role === 'Admin' || GESTION.includes(auteur.role)) return null;
+
+  return {
+    [Op.or]: [
+      // Chantiers hors circuit : visibilité d'organisation, inchangée.
+      { demandeurId: null },
+      // Chantiers issus du circuit : les siens seulement.
+      { demandeurId: auteur.id },
+      // Chantiers auxquels le compte est explicitement affecté. L'affectation
+      // existe déjà (`ChantierMembre`) : la prendre en compte ici évitera de
+      // retoucher cette règle quand l'interface l'exposera.
+      {
+        id: {
+          [Op.in]: sequelize.literal(
+            `(SELECT chantier_id FROM chantier_membres WHERE utilisateur_id = ${sequelize.escape(auteur.id)})`
+          ),
+        },
+      },
+    ],
+  };
+}
+
+/**
  * Destinataires d'une demande de chantier : les comptes actifs de
  * l'organisation habilités à trancher.
  *
@@ -202,6 +242,18 @@ class ChantierService {
       valideLe: new Date(),
     });
 
+    // Les plans joints suivent le chantier : validés avec lui, ils deviennent
+    // exploitables au même instant. Sans cette cascade, le chantier serait
+    // ouvert mais ses plans resteraient invisibles — l'entreprise recevrait un
+    // courriel de validation pour un chantier vide.
+    //
+    // Ciblé sur les plans EN ATTENTE : un plan déjà actif (dépôt ultérieur sur
+    // un chantier revalidé) n'a pas à être retouché.
+    await Plan.update(
+      { statut: 'actif' },
+      { where: { chantierId: chantier.id, statut: 'en_attente_validation' } }
+    );
+
     if (chantier.demandeur && chantier.demandeur.email) {
       await _notifier({
         to: chantier.demandeur.email,
@@ -274,7 +326,7 @@ class ChantierService {
   static async listChantiers(
     organisationId,
     { page = 1, limit = 20, search = '', statut, demandes } = {},
-    { toutesOrganisations = false, utilisateurId = null } = {}
+    { toutesOrganisations = false, utilisateurId = null, auteur = null } = {}
   ) {
     const where = {};
     if (!toutesOrganisations) where.organisationId = organisationId;
@@ -307,6 +359,11 @@ class ChantierService {
     } else {
       where.statut = { [Op.notIn]: STATUT_CHANTIER_EN_DEMANDE };
     }
+
+    // Cloisonnement — appliqué APRÈS les autres filtres, en `Op.and`, pour ne
+    // pas écraser un `Op.or` déjà posé par la recherche.
+    const cloisonnement = _filtreCloisonnement(auteur);
+    if (cloisonnement) where[Op.and] = [...(where[Op.and] || []), cloisonnement];
 
     const { rows, count } = await Chantier.findAndCountAll({
       where,
@@ -354,7 +411,12 @@ class ChantierService {
   }
 
   // -------------------- DÉTAIL D'UN CHANTIER --------------------
-  static async getChantier(chantierId) {
+  /**
+   * @param {object} [auteur]  Compte appelant. Applique le cloisonnement des
+   *   chantiers issus du circuit — sans lui, le filtre de la liste se
+   *   contournerait en ouvrant l'URL du chantier directement.
+   */
+  static async getChantier(chantierId, auteur = null) {
     const chantier = await Chantier.findByPk(chantierId, {
       include: [
         { model: Utilisateur, as: 'responsable', attributes: ['id', 'nom', 'prenom', 'email', 'photoProfil'] },
@@ -375,7 +437,37 @@ class ChantierService {
       order: [[{ model: Batiment, as: 'batiments' }, 'nom', 'ASC']],
     });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
+
+    // Cloisonnement : un chantier issu du circuit n'appartient qu'à son
+    // demandeur (et à ceux qui le valident). « Introuvable » plutôt que
+    // « interdit » — répondre 403 confirmerait l'existence du chantier d'un
+    // concurrent à qui n'a pas à le savoir.
+    if (!ChantierService._peutVoir(chantier, auteur)) {
+      return { success: false, message: 'Chantier introuvable' };
+    }
+
     return { success: true, chantier };
+  }
+
+  /**
+   * Ce compte peut-il voir ce chantier ?
+   *
+   * Miroir de `_filtreCloisonnement`, appliqué à un objet déjà chargé. Les
+   * deux doivent dire la même chose : la liste et le détail qui divergeraient
+   * donneraient un chantier introuvable dans la liste mais ouvrable par son
+   * URL — ou l'inverse.
+   *
+   * L'affectation explicite n'est PAS relue ici : elle demanderait une requête
+   * de plus sur chaque lecture, et l'interface ne l'expose pas encore. Un
+   * membre affecté à un chantier issu du circuit le verra dans sa liste et
+   * recevra « introuvable » en l'ouvrant — à corriger le jour où l'affectation
+   * sera exposée.
+   */
+  static _peutVoir(chantier, auteur) {
+    if (!auteur || !auteur.id) return true;
+    if (auteur.role === 'Admin' || GESTION.includes(auteur.role)) return true;
+    if (!chantier.demandeurId) return true;
+    return String(chantier.demandeurId) === String(auteur.id);
   }
 
   // -------------------- MODIFIER UN CHANTIER --------------------
@@ -633,6 +725,11 @@ class ChantierService {
       batimentId,
       nom: data.nom,
       niveau: data.niveau ?? 0,
+      // Nature du niveau : c'est elle qui range l'étage sous « SOUS-SOLS »,
+      // « ÉTAGES » ou « TOITURE ». Absente, le modèle applique 'etage'.
+      ...(data.typeNiveau ? { typeNiveau: data.typeNiveau } : {}),
+      codeNiveau: data.codeNiveau || null,
+      description: data.description || null,
     });
     return { success: true, message: 'Étage créé avec succès', etage };
   }

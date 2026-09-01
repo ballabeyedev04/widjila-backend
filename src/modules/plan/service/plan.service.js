@@ -213,6 +213,13 @@ class PlanService {
     const refus = PlanService._refusDepot(chantier, auteur);
     if (refus) return { success: false, message: refus };
 
+    // Un plan joint à une demande attend la MÊME validation que son chantier.
+    // Sans cela, il serait indiscernable d'un plan validé et des équipes y
+    // poseraient des réserves sur un chantier qui n'existe pas encore.
+    const statutPlan = chantier.statut === 'en_attente_validation'
+      ? 'en_attente_validation'
+      : 'actif';
+
     // Rattachement résolu AVANT l'écriture disque : un rattachement invalide
     // doit échouer sans avoir rien déposé sur le disque.
     const rattachement = await _resoudreRattachement(chantierId, data);
@@ -251,6 +258,7 @@ class PlanService {
             page_count: data.page_count || null,
             fichier_nom: fichier.originalname || null,
             uploaderId: data.uploaderId || null,
+            statut: statutPlan,
           }, { transaction: t });
 
           await t.commit();

@@ -179,6 +179,13 @@ class ReserveService {
     if (planId) {
       const p = await Plan.findOne({ where: { id: planId, chantierId } });
       if (!p) return 'Plan non rattaché à ce chantier';
+      // Un plan en attente appartient à un chantier qui n'existe pas encore :
+      // une réserve posée dessus survivrait à un refus, rattachée à un plan
+      // que personne ne validera jamais. Le client l'a demandé pour l'écran
+      // de validation ; la garde vit ici, où elle couvre tous les chemins.
+      if (p.statut === 'en_attente_validation') {
+        return 'Ce plan attend une validation : aucune réserve ne peut y être posée.';
+      }
     }
     if (lotId) {
       const l = await Lot.findOne({ where: { id: lotId, chantierId } });

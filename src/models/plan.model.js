@@ -1,5 +1,6 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/db.js');
+const { STATUT_PLAN } = require('../config/enums.js');
 
 /**
  * Plan numérique — import PDF/DWG/IFC avec versionning.
@@ -69,6 +70,24 @@ const Plan = sequelize.define('Plan', {
   uploaderId: {
     type: DataTypes.UUID,
     allowNull: true
+  },
+  /**
+   * Cycle de validation du plan.
+   *
+   * Un plan déposé avec une demande de chantier attend la même validation que
+   * le chantier auquel il est joint. Sans ce statut, il serait indiscernable
+   * d'un plan validé et des équipes y poseraient des réserves sur un chantier
+   * qui n'existe pas encore.
+   *
+   * Défaut `actif` : un plan déposé sur un chantier DÉJÀ validé est
+   * immédiatement exploitable — c'est le cas courant, et le circuit ne doit
+   * rien changer au parcours existant.
+   */
+  statut: {
+    type: DataTypes.STRING(30),
+    allowNull: false,
+    defaultValue: 'actif',
+    validate: { isIn: [STATUT_PLAN] }
   }
 }, {
   tableName: 'plans',

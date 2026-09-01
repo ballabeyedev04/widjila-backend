@@ -3,6 +3,8 @@
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { VUE_PUBLIQUE } = require('../../../config/enums.js');
 const { VUE_PUBLIQUE: PAYS } = require('../../../config/pays.js');
+const CodeNiveauService = require('../service/codeNiveau.service.js');
+const { BadRequestError } = require('../../../errors/AppError.js');
 
 /**
  * Énumérations métier servies aux clients.
@@ -44,4 +46,42 @@ exports.getPays = asyncHandler(async (req, res) => {
     message: 'Pays récupérés',
     data: { pays: PAYS },
   });
+});
+
+// ── Codes de niveau (SS1, RDC, R+1…) ─────────────────────────────────────────
+
+/**
+ * Codes proposés à la saisie d'un niveau, par section.
+ *
+ * Pas de cache HTTP, contrairement à `/enums` : cette liste s'enrichit depuis
+ * le mobile, et un cache d'une heure ferait disparaître pendant une heure le
+ * code que l'utilisateur vient lui-même de créer.
+ */
+exports.listerCodesNiveau = asyncHandler(async (req, res) => {
+  const result = await CodeNiveauService.lister(req.user.organisationId, {
+    typeNiveau: req.query.typeNiveau,
+  });
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({
+    success: true,
+    message: 'Codes de niveau récupérés',
+    data: { codes: result.codes },
+  });
+});
+
+/** Le « + » de l'écran de dépôt : créer un code absent de la liste. */
+exports.creerCodeNiveau = asyncHandler(async (req, res) => {
+  const result = await CodeNiveauService.creer(req.user.organisationId, req.body);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(201).json({
+    success: true,
+    message: result.message,
+    data: { code: result.code },
+  });
+});
+
+exports.desactiverCodeNiveau = asyncHandler(async (req, res) => {
+  const result = await CodeNiveauService.desactiver(req.user.organisationId, req.params.id);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message });
 });
