@@ -4,6 +4,7 @@ const { RedisStore } = require('rate-limit-redis');
 const redisClient = require('../config/redis.js');
 const {
   authRateLimitConfig,
+  sessionRateLimitConfig,
   mutationRateLimitConfig,
   adminRateLimitConfig,
   otpEmailRateLimitConfig,
@@ -31,8 +32,15 @@ const sharedStore = (prefix) => {
   });
 };
 
-// Auth routes (login, register, refresh) — 5 req / 15 min par IP
+// Tentatives d'AUTHENTIFICATION (login, register, mfa, mot de passe oublié)
+// — 5 req / 15 min par IP. Compteur volontairement strict : ce sont les seules
+// routes où un attaquant peut deviner un secret en réessayant.
 const authRateLimit = rateLimit({ ...authRateLimitConfig, store: sharedStore('auth') });
+
+// Cycle de vie de la SESSION (refresh, logout) — 60 req / 15 min par IP.
+// Compteur SÉPARÉ (préfixe distinct) : sans quoi un rafraîchissement de jeton
+// consommerait le budget des tentatives de connexion.
+const sessionRateLimit = rateLimit({ ...sessionRateLimitConfig, store: sharedStore('session') });
 
 // Mutations sensibles (modifier profil, changer mdp) — 20 req / 15 min par IP
 const mutationRateLimit = rateLimit({ ...mutationRateLimitConfig, store: sharedStore('mutation') });
@@ -64,4 +72,7 @@ const authenticatedRateLimit = rateLimit({
   keyGenerator: (req, res) => req.user?.id || ipKeyGenerator(req, res),
 });
 
-module.exports = { authRateLimit, mutationRateLimit, adminRateLimit, otpEmailRateLimit, authenticatedRateLimit };
+module.exports = {
+  authRateLimit, sessionRateLimit, mutationRateLimit,
+  adminRateLimit, otpEmailRateLimit, authenticatedRateLimit,
+};

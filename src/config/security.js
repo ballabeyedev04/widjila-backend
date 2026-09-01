@@ -138,10 +138,33 @@ const authRateLimitConfig = {
   // Overridables par env (AUTH_RATE_LIMIT_MAX / AUTH_RATE_LIMIT_WINDOW_MIN) pour
   // ajuster la sensibilité en déploiement (ou desserrer en test d'intégration).
   windowMs: (parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MIN || '15', 10)) * 60 * 1000,
-  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '5', 10),
+  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '8', 10),
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Trop de tentatives. Veuillez réessayer dans 15 minutes.' }
+};
+
+/**
+ * Cycle de vie de la SESSION — rafraîchissement et déconnexion.
+ *
+ * Volontairement bien plus large que `authRateLimitConfig` : ces routes ne se
+ * forcent pas par tâtonnement. Elles exigent un refresh token signé, présent
+ * en base, non révoqué, non expiré, dont le compte est actif — un attaquant
+ * devrait forger un JWT valide, ce qu'aucun quota ne rendra plus difficile.
+ *
+ * Les compter avec les tentatives de connexion avait un coût réel : un
+ * intercepteur qui rafraîchit tout seul épuisait le budget de connexion, et
+ * deux clients sur une même IP se bloquaient l'un l'autre.
+ *
+ * La limite subsiste tout de même : chaque appel touche la base, et rien ne
+ * justifie d'en accepter des milliers.
+ */
+const sessionRateLimitConfig = {
+  windowMs: (parseInt(process.env.SESSION_RATE_LIMIT_WINDOW_MIN || '15', 10)) * 60 * 1000,
+  max: parseInt(process.env.SESSION_RATE_LIMIT_MAX || '60', 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Trop de requêtes de session. Veuillez réessayer dans quelques minutes.' }
 };
 
 // Routes de mutation sensibles (modifier profil, changer mdp, supprimer compte)
@@ -240,6 +263,7 @@ module.exports = {
   rateLimitConfig,
   authenticatedRateLimitConfig,
   authRateLimitConfig,
+  sessionRateLimitConfig,
   mutationRateLimitConfig,
   adminRateLimitConfig,
   otpEmailRateLimitConfig,

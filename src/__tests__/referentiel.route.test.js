@@ -32,6 +32,7 @@ jest.mock('../middlewares/rateLimit.middleware.js', () => {
   const passe = (req, res, next) => next();
   return {
     authRateLimit: passe,
+    sessionRateLimit: passe,
     mutationRateLimit: passe,
     adminRateLimit: passe,
     otpEmailRateLimit: passe,
