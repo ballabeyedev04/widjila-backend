@@ -273,3 +273,40 @@ describe('usage affiché', () => {
     expect(usage.chantiers).toEqual({ courant: 4, limite: null });
   });
 });
+
+describe('joursRestants — compte à rebours calculé côté serveur', () => {
+  // Le mobile affiche cette valeur telle quelle. La calculer chez lui
+  // reviendrait à faire confiance à l'horloge d'un téléphone de chantier,
+  // parfois fausse de plusieurs jours — sur une information qui déclenche une
+  // décision d'achat.
+  it('arrondit au jour SUPÉRIEUR : une échéance dans 36 h vaut 2 jours', () => {
+    const dans36h = new Date(Date.now() + 36 * 3600 * 1000);
+    expect(DroitsService.joursRestants(dans36h)).toBe(2);
+  });
+
+  it('rend 0 et jamais un nombre négatif pour une échéance passée', () => {
+    const hier = new Date(Date.now() - 48 * 3600 * 1000);
+    expect(DroitsService.joursRestants(hier)).toBe(0);
+  });
+
+  it('rend null sans échéance — à distinguer de 0, qui veut dire « expire aujourd’hui »', () => {
+    expect(DroitsService.joursRestants(null)).toBeNull();
+    expect(DroitsService.joursRestants(undefined)).toBeNull();
+  });
+
+  it('accompagne les droits d’un essai en cours', async () => {
+    Organisation.findByPk.mockResolvedValue(orgAvecEssai(10));
+    AbonnementSouscrit.findOne.mockResolvedValue(null);
+
+    const droits = await DroitsService.getDroits(ORG);
+
+    expect(droits.source).toBe('essai');
+    expect(droits.joursRestants).toBe(10);
+  });
+
+  it('vaut null quand aucun droit n’est ouvert', async () => {
+    Organisation.findByPk.mockResolvedValue(null);
+    const droits = await DroitsService.getDroits(ORG);
+    expect(droits.joursRestants).toBeNull();
+  });
+});

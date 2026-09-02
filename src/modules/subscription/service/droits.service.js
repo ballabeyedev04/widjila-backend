@@ -61,8 +61,24 @@ class DroitsService {
    *   3. sinon → aucun droit.
    *
    * @returns {Promise<{actif, source, planCode, planNom, fonctionnalites,
-   *   limiteUtilisateurs, limiteChantiers, essaiEnCours, dateFin}>}
+   *   limiteUtilisateurs, limiteChantiers, essaiEnCours, dateFin, joursRestants}>}
    */
+  /**
+   * Jours restants avant `dateFin`, arrondis au jour SUPÉRIEUR.
+   *
+   * Calculé côté serveur et non par le client : l'horloge d'un téléphone de
+   * chantier peut être fausse de plusieurs jours, et « il vous reste 3 jours »
+   * est une information sur laquelle on prend une décision d'achat.
+   *
+   * `null` quand aucune échéance n'est connue — à distinguer de `0`, qui
+   * signifie « expire aujourd'hui ».
+   */
+  static joursRestants(dateFin) {
+    if (!dateFin) return null;
+    const restant = new Date(dateFin) - new Date();
+    return Math.max(0, Math.ceil(restant / (1000 * 60 * 60 * 24)));
+  }
+
   static async getDroits(organisationId) {
     const aucun = {
       actif: false,
@@ -74,6 +90,7 @@ class DroitsService {
       limiteChantiers: 0,
       essaiEnCours: false,
       dateFin: null,
+      joursRestants: null,
     };
 
     if (!organisationId) return aucun;
@@ -100,6 +117,7 @@ class DroitsService {
         limiteChantiers: plan ? plan.limite_chantiers : null,
         essaiEnCours: false,
         dateFin: souscription.date_fin,
+        joursRestants: DroitsService.joursRestants(souscription.date_fin),
       };
     }
 
@@ -122,6 +140,7 @@ class DroitsService {
         limiteChantiers: null,
         essaiEnCours: true,
         dateFin: organisation.trial_ends_at,
+        joursRestants: DroitsService.joursRestants(organisation.trial_ends_at),
       };
     }
 
