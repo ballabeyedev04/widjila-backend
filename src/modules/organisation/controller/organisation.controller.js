@@ -74,7 +74,10 @@ exports.ajouterMembre = asyncHandler(async (req, res) => {
   const result = await OrganisationService.ajouterMembre(
     req.user.organisationId,
     req.body,
-    req.user.role // garde d'élévation : voir OrganisationService._refusElevation
+    // L'appelant en entier : son rôle sert de garde d'élévation (voir
+    // OrganisationService._refusElevation), son nom figure dans le courriel
+    // reçu par le nouveau membre.
+    req.user
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({
@@ -82,8 +85,11 @@ exports.ajouterMembre = asyncHandler(async (req, res) => {
     message: result.message,
     data: {
       utilisateur: formatUser(result.utilisateur),
-      // Renvoyé UNE SEULE FOIS — à communiquer au membre par un canal sûr
+      // Renvoyé UNE SEULE FOIS. Le client ne l'affiche QUE si l'envoi du
+      // courriel a échoué : sinon le membre l'a déjà reçu, et le montrer une
+      // seconde fois ne ferait que le faire circuler davantage.
       motDePasseTemporaire: result.motDePasseTemporaire,
+      emailEnvoye: result.emailEnvoye,
     },
   });
 });

@@ -150,6 +150,39 @@ async function sendChantierValidationEmail({
 }
 
 /**
+ * Email — un membre vient d'être ajouté à une organisation, avec ses
+ * identifiants de connexion.
+ *
+ * Remplace l'affichage du mot de passe temporaire dans une fenêtre côté
+ * client : celui-ci n'est renvoyé qu'UNE fois par le serveur, et il restait
+ * ensuite à le transmettre à l'intéressé par un moyen quelconque. Ici il part
+ * directement à la bonne adresse.
+ *
+ * `motDePasse` est nul quand le créateur en a choisi un lui-même : le serveur
+ * ne le connaît alors qu'en empreinte, et le message renvoie vers lui.
+ */
+async function sendNouveauMembreEmail({
+  to, prenom, nom, auteurNom, organisationNom, role, motDePasse,
+}) {
+  const template = require('../templates/mail/nouveauMembre.template.js');
+  const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+  return sendEmail({
+    to,
+    subject: `Vous avez été ajouté à ${organisationNom} — SuivieChantier`,
+    html: template({
+      prenom,
+      nom,
+      auteurNom,
+      organisationNom,
+      role,
+      email: to,
+      motDePasse,
+      lien: `${frontendUrl}/login`,
+    }),
+  });
+}
+
+/**
  * Email INTERNE — une demande de suppression de compte a été déposée sur la
  * page publique.
  *
@@ -176,5 +209,6 @@ module.exports = {
   sendInscriptionValideeEmail,
   sendInscriptionRejeteeEmail,
   sendChantierValidationEmail,
+  sendNouveauMembreEmail,
   sendDemandeSuppressionEmail,
 };

@@ -11,6 +11,8 @@ const formatUser = require('../../../utils/formatUser.js');
 const { SAFE_USER_ATTRIBUTES } = formatUser;
 const escapeLike = require('../../../utils/escapeLike.js');
 const { GESTION } = require('../../../config/roles.js');
+const { libelleRole } = require('../../../utils/libelleRole.js');
+const { sendNouveauMembreEmail } = require('../../../infrastructure/emailService.js');
 
 // Rôles autorisés pour les contacts importés (jamais 'Admin')
 const ROLES_IMPORT = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre', 'Pilote', 'SousTraitant'];
@@ -18,6 +20,42 @@ const ROLES_IMPORT = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entr
 // Rôles qu'un membre peut attribuer/modifier au sein de son organisation
 // (le rôle 'Admin' = super-admin plateforme, jamais assignable ici).
 const ROLES_ORGANISATION = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre', 'Pilote', 'SousTraitant'];
+
+/**
+ * Envoie ses identifiants au nouveau membre, SANS jamais faire échouer sa
+ * création.
+ *
+ * Le compte existe déjà en base quand cet appel a lieu. Propager une panne du
+ * fournisseur d'envoi produirait le pire des deux mondes : l'appelant verrait
+ * une erreur alors que le membre est bel et bien créé, et le recréerait — pour
+ * se heurter cette fois à « un compte existe déjà avec cet email ».
+ *
+ * Le résultat est RENVOYÉ (et non seulement journalisé) : le client doit
+ * savoir si le mot de passe temporaire est parti, ou s'il lui revient de le
+ * transmettre lui-même. C'est la seule occasion de le lire.
+ *
+ * @returns {Promise<boolean>} `true` si le courriel est parti.
+ */
+async function _envoyerIdentifiants({ utilisateur, auteur, organisationNom, motDePasse }) {
+  try {
+    const envoi = await sendNouveauMembreEmail({
+      to: utilisateur.email,
+      prenom: utilisateur.prenom,
+      nom: utilisateur.nom,
+      auteurNom: [auteur?.prenom, auteur?.nom].filter(Boolean).join(' ').trim() || 'Un administrateur',
+      organisationNom: organisationNom || 'votre organisation',
+      role: libelleRole(utilisateur.role),
+      motDePasse,
+    });
+    // `sendEmail` renvoie `null` quand RESEND_API_KEY n'est pas configurée
+    // (développement local) : rien n'est parti, et le dire évite de laisser
+    // croire qu'un mot de passe a été transmis alors qu'il est perdu.
+    return envoi !== null;
+  } catch (e) {
+    logger.error(`Courriel d'invitation non envoyé : ${e.message}`);
+    return false;
+  }
+}
 
 class OrganisationService {
 
@@ -129,7 +167,18 @@ class OrganisationService {
    *   d'élévation. Absent (appel interne, script) : aucune restriction
    *   supplémentaire, le contrôle de route reste seul maître.
    */
-  static async ajouterMembre(organisationId, data, roleAuteur = null) {
+  /**
+   * @param {string} organisationId
+   * @param {object} data
+   * @param {object|null} [auteur]  Compte appelant — `{ role, prenom, nom }`.
+   *   Son ROLE sert de garde d'élévation ; son NOM figure dans le courriel
+   *   reçu par le nouveau membre (« X vous a ajouté en tant que Y »). Passé
+   *   par le contrôleur d'après le jeton, jamais d'après le corps de la
+   *   requête.
+   */
+  static async ajouterMembre(organisationId, data, auteur = null) {
+    const roleAuteur = auteur ? auteur.role : null;
+
     if (data.role === 'Admin') {
       return { success: false, message: "Le rôle 'Admin' est réservé au super-admin de la plateforme" };
     }
@@ -176,11 +225,29 @@ class OrganisationService {
 
     logger.info(`Membre ajouté à l'organisation ${organisationId} : ${emailClean}`);
 
+    // Le nouveau membre reçoit ses identifiants directement.
+    //
+    // Auparavant, le mot de passe temporaire n'était renvoyé qu'à l'appelant,
+    // qui devait le lire dans une fenêtre puis le transmettre par ses propres
+    // moyens. Le serveur ne le connaît qu'ici : une fenêtre refermée trop vite
+    // rendait le compte inutilisable.
+    const organisation = await Organisation.findByPk(organisationId, { attributes: ['nom'] });
+    const emailEnvoye = await _envoyerIdentifiants({
+      utilisateur,
+      auteur,
+      organisationNom: organisation ? organisation.nom : null,
+      motDePasse: motDePasseTemporaire,
+    });
+
     return {
       success: true,
       message: 'Membre ajouté avec succès',
       utilisateur,
-      motDePasseTemporaire, // renvoyé une seule fois
+      // Toujours renvoyé — c'est l'unique occasion de le lire. Le client ne
+      // l'affiche que si `emailEnvoye` est faux : sans ce repli, une panne
+      // d'envoi coûterait le compte.
+      motDePasseTemporaire,
+      emailEnvoye,
     };
   }
 
