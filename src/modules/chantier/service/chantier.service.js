@@ -260,6 +260,32 @@ class ChantierService {
       valideLe: new Date(),
     });
 
+    // Le DEMANDEUR devient membre du chantier qu'il a obtenu.
+    //
+    // Le cloisonnement le laissait déjà passer par `demandeurId`, mais cette
+    // porte est une coïncidence de circuit, pas une appartenance : elle ne
+    // survivrait pas à un changement de propriétaire du chantier, et elle ne
+    // dit rien aux autres écrans. L'affectation, elle, est explicite et
+    // durable — c'est elle qui décrit l'équipe.
+    //
+    // `findOrCreate` sur l'index unique (chantier, utilisateur) : revalider un
+    // chantier rejeté puis corrigé ne crée pas de doublon.
+    //
+    // Un échec ici ne fait PAS échouer la validation : le chantier est ouvert,
+    // c'est l'essentiel, et le demandeur y accède de toute façon par
+    // `demandeurId`. Bloquer une validation pour une ligne de liaison serait
+    // disproportionné.
+    if (chantier.demandeurId) {
+      try {
+        await ChantierMembre.findOrCreate({
+          where: { chantierId: chantier.id, utilisateurId: chantier.demandeurId },
+          defaults: { roleChantier: 'demandeur' },
+        });
+      } catch (err) {
+        logger.warn(`[chantier] Affectation du demandeur impossible (${err.message})`);
+      }
+    }
+
     // Les plans joints suivent le chantier : validés avec lui, ils deviennent
     // exploitables au même instant. Sans cette cascade, le chantier serait
     // ouvert mais ses plans resteraient invisibles — l'entreprise recevrait un
