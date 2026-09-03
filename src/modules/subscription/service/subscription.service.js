@@ -432,7 +432,13 @@ class SubscriptionService {
   static async _appliquerEvenement(type, objet) {
     switch (type) {
       case 'payment_intent.succeeded':
-        await SubscriptionService._activerDepuisPaiement(objet.id, objet.customer);
+        await SubscriptionService._activerDepuisPaiement(
+          objet.id,
+          objet.customer,
+          // Ce que Stripe a REELLEMENT encaisse, en centimes. C'est la
+          // seule source qui fasse foi sur le montant.
+          { montantRecu: objet.amount_received, devise: objet.currency }
+        );
         break;
 
       case 'payment_intent.payment_failed':
@@ -470,7 +476,7 @@ class SubscriptionService {
    * qui identifie sans ambiguïté la souscription créée en attente, et son prix
    * proposé.
    */
-  static async _activerDepuisPaiement(referencePaiement, stripeCustomerId) {
+  static async _activerDepuisPaiement(referencePaiement, stripeCustomerId, encaisse = {}) {
     const souscription = await AbonnementSouscrit.findOne({
       where: { reference_paiement: referencePaiement },
     });
@@ -480,6 +486,47 @@ class SubscriptionService {
       return;
     }
     if (souscription.statut === 'active') return; // déjà activée
+
+    // ── Le montant encaissé doit correspondre à la formule activée ─────────
+    //
+    // La PaymentIntent est bien créée côté serveur à partir de
+    // `plans_abonnement.prix` — un client ne peut donc pas choisir son prix.
+    // Mais entre la création et l'encaissement, la ligne de catalogue a pu
+    // être modifiée par un administrateur, ou la souscription rattachée à une
+    // autre référence. Activer sans vérifier reviendrait à ouvrir une formule
+    // sur la foi de son seul identifiant.
+    //
+    // On compare donc ce que STRIPE dit avoir encaissé au prix figé dans la
+    // souscription. En cas d'écart, on n'active pas : mieux vaut un abonnement
+    // à ouvrir à la main qu'une formule accordée sans son prix.
+    const { montantRecu, devise } = encaisse;
+    if (montantRecu != null) {
+      const attendu = Math.round(Number(souscription.prix_paye) * 100);
+
+      if (!Number.isFinite(attendu) || attendu <= 0) {
+        logger.error(
+          `[paiement] Souscription ${souscription.id} sans prix exploitable `
+          + `(prix_paye=${souscription.prix_paye}) — activation refusée`
+        );
+        return;
+      }
+      if (montantRecu !== attendu) {
+        logger.error(
+          `[paiement] ÉCART DE MONTANT sur ${referencePaiement} : encaissé `
+          + `${montantRecu}, attendu ${attendu} pour la formule `
+          + `${souscription.plan_code} — activation refusée`
+        );
+        return;
+      }
+      if (devise && String(devise).toUpperCase() !== String(souscription.devise).toUpperCase()) {
+        // 49 EUR et 49 USD ne sont pas le même paiement.
+        logger.error(
+          `[paiement] ÉCART DE DEVISE sur ${referencePaiement} : encaissé `
+          + `${devise}, attendu ${souscription.devise} — activation refusée`
+        );
+        return;
+      }
+    }
 
     const debut = new Date();
     await souscription.update({
