@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const sharp = require('sharp');
 const { Media, Reserve, Inspection, Chantier } = require('../../../models/index.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
 const logger = require('../../../utils/logger.js');
@@ -28,6 +29,52 @@ class MediaService {
     return inspection && inspection.chantier ? inspection : null;
   }
 
+  /**
+   * Vignette d'une photo — `null` si elle ne peut pas être produite.
+   *
+   * ## Pourquoi elle manquait
+   *
+   * La colonne `thumbnail_url` existait et TROIS consommateurs la lisaient
+   * déjà, chacun avec un repli `thumbnail_url || url`. Comme rien ne
+   * l'écrivait jamais, le repli était le seul chemin emprunté :
+   *
+   *   - la grille de photos d'une réserve téléchargeait l'ORIGINAL — plusieurs
+   *     mégaoctets sortis d'un appareil photo de téléphone — pour l'afficher
+   *     sur 104 points de large ;
+   *   - le générateur de rapports PDF faisait de même, en chargeant chaque
+   *     original entier en mémoire serveur (son propre commentaire dit
+   *     pourtant « la vignette d'abord : plus légère ») ;
+   *   - les aperçus de liste (réserves, plans) idem.
+   *
+   * ## Choix
+   *
+   * `rotate()` sans argument applique l'orientation EXIF. Sans lui, les
+   * photos prises en portrait ressortent couchées : `sharp` lit les pixels
+   * bruts et ignore l'étiquette d'orientation que les visionneuses honorent.
+   *
+   * `withoutEnlargement` : une image déjà plus petite que 400 px n'est pas
+   * agrandie — on produirait un fichier PLUS LOURD que l'original.
+   *
+   * Un échec ne fait jamais échouer l'envoi : la photo reste enregistrée, et
+   * les trois consommateurs retombent sur l'original comme aujourd'hui.
+   */
+  static async _vignette(buffer, originalname, sousDossier) {
+    try {
+      const vignette = await sharp(buffer)
+        .rotate()
+        .resize({ width: 400, withoutEnlargement: true })
+        .jpeg({ quality: 72 })
+        .toBuffer();
+
+      // Même sous-dossier que l'original : mêmes règles de visibilité, et la
+      // suppression d'un média efface déjà les DEUX URL (voir `supprimer`).
+      return await storeFile(vignette, `vignette-${originalname}.jpg`, sousDossier);
+    } catch (err) {
+      logger.warn(`[media] Vignette non générée (${err.message}) — repli sur l'original`);
+      return null;
+    }
+  }
+
   // -------------------- ENREGISTREMENT COMMUN --------------------
   static async _enregistrer(reserveId, inspectionId, type, fichier, meta = {}, uploaderId = null) {
     if (!fichier || !fichier.buffer) {
@@ -36,6 +83,13 @@ class MediaService {
 
     const sousDossier = type === 'video' ? 'medias/videos' : type === 'audio' ? 'medias/audios' : 'medias/photos';
     const url = await storeFile(fichier.buffer, fichier.originalname, sousDossier);
+
+    // Uniquement pour les images : `sharp` lèverait sur une vidéo ou un son,
+    // et `_vignette` renverrait `null` de toute façon — autant ne pas payer
+    // la tentative.
+    const thumbnailUrl = sousDossier === 'medias/photos'
+      ? await MediaService._vignette(fichier.buffer, fichier.originalname, sousDossier)
+      : null;
 
     const checksum = crypto.createHash('sha256').update(fichier.buffer).digest('hex');
 
@@ -46,6 +100,7 @@ class MediaService {
         inspectionId: inspectionId || null,
         type,
         url,
+        thumbnail_url: thumbnailUrl,
         latitude: meta.latitude || null,
         longitude: meta.longitude || null,
         largeur: meta.largeur || null,

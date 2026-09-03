@@ -125,6 +125,24 @@ async function _notifier(charge) {
 }
 
 class ChantierService {
+  /**
+   * Règle de visibilité des chantiers, exposée pour que d'AUTRES vues du même
+   * portefeuille l'appliquent à l'identique.
+   *
+   * Elle ne vivait que dans `listChantiers`. Le tableau de bord, lui,
+   * comptait à l'échelle de l'organisation : une entreprise voyait
+   * « 1 chantier » sur son écran d'accueil et une liste vide juste à côté,
+   * pour un chantier qu'elle n'avait pas le droit d'ouvrir. Un compteur qui
+   * annonce ce qu'on ne peut pas atteindre passe pour une panne de
+   * chargement — c'est exactement ainsi qu'il a été signalé.
+   *
+   * @param {object|null} auteur `req.user`
+   * @returns {object|null} Fragment de `where`, ou `null` si l'auteur voit tout.
+   */
+  static filtreCloisonnement(auteur) {
+    return _filtreCloisonnement(auteur);
+  }
+
 
   // -------------------- CRÉER UN CHANTIER --------------------
   /**

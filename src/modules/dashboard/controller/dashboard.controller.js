@@ -20,7 +20,9 @@ function porteeTransversale(req) {
   const superAdmin = estSuperAdmin(req.user);
   return {
     organisationId: superAdmin ? (req.query.organisationId || null) : req.user.organisationId,
-    options: { toutesOrganisations: superAdmin },
+    // `auteur` : le tableau de bord doit compter ce que CE compte peut voir,
+    // exactement comme la liste des chantiers.
+    options: { toutesOrganisations: superAdmin, auteur: req.user },
   };
 }
 

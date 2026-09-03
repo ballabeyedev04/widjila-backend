@@ -7,6 +7,7 @@ const {
   Chantier, Reserve, ReserveHistorique, Batiment, Plan, Inspection, Document, Utilisateur, Organisation,
 } = require('../../../models/index.js');
 const cache = require('../../../utils/cache.js');
+const ChantierService = require('../../chantier/service/chantier.service.js');
 
 const STATUTS_FERMES = ['validee', 'cloturee'];
 
@@ -31,10 +32,24 @@ const STATUTS_FERMES = ['validee', 'cloturee'];
  * La règle vit ici plutôt que sur chaque requête : il y en a cinq, et en
  * oublier une suffirait à faire diverger deux vues du même portefeuille.
  */
-const _whereOrganisation = (organisationId, toutesOrganisations) => ({
-  ...(toutesOrganisations && !organisationId ? {} : { organisationId }),
-  statut: { [Op.notIn]: STATUT_CHANTIER_EN_DEMANDE },
-});
+const _whereOrganisation = (organisationId, toutesOrganisations, auteur = null) => {
+  const where = {
+    ...(toutesOrganisations && !organisationId ? {} : { organisationId }),
+    statut: { [Op.notIn]: STATUT_CHANTIER_EN_DEMANDE },
+  };
+
+  // MÊME cloisonnement que la liste des chantiers (`ChantierService`) : le
+  // tableau de bord ne doit compter que ce que l'utilisateur peut réellement
+  // ouvrir. Sans cela, une entreprise lisait « 1 chantier » face à une liste
+  // vide — le compteur portait sur l'organisation, la liste sur ses droits.
+  //
+  // `null` pour les rôles de GESTION et le super-admin : ils voient tout, la
+  // requête reste inchangée pour eux.
+  const cloisonnement = auteur ? ChantierService.filtreCloisonnement(auteur) : null;
+  if (cloisonnement) where[Op.and] = [...(where[Op.and] || []), cloisonnement];
+
+  return where;
+};
 
 class DashboardService {
 
@@ -53,12 +68,21 @@ class DashboardService {
    * premier à saturer la base si beaucoup d'utilisateurs l'ouvrent en même
    * temps (audit — Charge à 10 000 utilisateurs §4).
    */
-  static async statsGlobales(organisationId, { toutesOrganisations = false } = {}) {
-    const whereOrg = _whereOrganisation(organisationId, toutesOrganisations);
+  static async statsGlobales(organisationId, { toutesOrganisations = false, auteur = null } = {}) {
+    const whereOrg = _whereOrganisation(organisationId, toutesOrganisations, auteur);
     // La portée fait partie de la clé : sans cela la vue « toutes
     // organisations » et une organisation absente partageraient la même entrée
     // de cache (toutes deux `organisationId = null`).
-    const cleCache = `dashboard:stats-globales:${toutesOrganisations && !organisationId ? 'toutes' : organisationId}`;
+    // L'auteur fait partie de la clé DÈS QU'IL RESTREINT la vue : deux
+    // comptes de la même organisation ne voient plus le même portefeuille, et
+    // partager une entrée leur servirait les chiffres de l'autre. Les rôles de
+    // GESTION, eux, n'ajoutent rien à la clé et continuent de se partager une
+    // seule entrée — c'est le cas le plus fréquent, et le plus coûteux.
+    const restreint = auteur ? ChantierService.filtreCloisonnement(auteur) : null;
+    const portee = toutesOrganisations && !organisationId ? 'toutes' : organisationId;
+    const cleCache = restreint
+        ? `dashboard:stats-globales:${portee}:u:${auteur.id}`
+        : `dashboard:stats-globales:${portee}`;
     const enCache = await cache.lire(cleCache);
     if (enCache) return enCache;
 
