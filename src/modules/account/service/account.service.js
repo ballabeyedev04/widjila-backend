@@ -3,6 +3,7 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
+const sequelize = require('../../../config/db.js');
 const {
   Utilisateur, UserOtp, ConnexionLog, RefreshToken, MfaChallenge, DeviceToken,
   Notification, Commentaire, Reserve, ReserveHistorique, Media, Signature, Annotation,
@@ -261,9 +262,38 @@ class AccountService {
    * @param {import('sequelize').Model} utilisateur — instance déjà chargée
    * @returns {Promise<{ connexionLogsAnonymises: number }>}
    */
-  static async pseudonymiserEtSupprimer(utilisateur) {
+  static async pseudonymiserEtSupprimer(utilisateur, { transaction: externe } = {}) {
     const userId = utilisateur.id;
     const ancienEmail = utilisateur.email;
+
+    // ── Tout ou rien ──────────────────────────────────────────────────────
+    //
+    // Sept ecritures s'enchainaient sans transaction. Un incident au milieu —
+    // coupure de connexion, verrou, redemarrage — laissait un compte a MOITIE
+    // anonymise : nom et courriel deja remplaces, mais jetons de session
+    // toujours valides et appareils toujours enregistres.
+    //
+    // Autrement dit, un compte « supprime » qui continue d'agir et de recevoir
+    // des notifications, tout en paraissant vivant a l'administration puisque
+    // la suppression logique (etape 4) n'a jamais eu lieu. C'est une atteinte a
+    // l'integrite ET au droit a l'effacement, pour une panne passagere.
+    //
+    // La transaction est acceptee de l'exterieur quand l'appelant en tient
+    // deja une — la suppression d'une organisation supprime ses membres un a
+    // un, et ces suppressions doivent tomber avec elle.
+    const t = externe || (await sequelize.transaction());
+    const proprietaire = !externe;
+
+    try {
+      return await AccountService._pseudonymiser(utilisateur, userId, ancienEmail, t, proprietaire);
+    } catch (err) {
+      if (proprietaire) await t.rollback();
+      throw err;
+    }
+  }
+
+  /** Le corps de la pseudonymisation, une fois la transaction etablie. */
+  static async _pseudonymiser(utilisateur, userId, ancienEmail, t, proprietaire) {
 
     // 1) Table `utilisateur` — réécriture des colonnes directement identifiantes.
     //    L'email pseudonyme est déterministe (`deleted_<id>@deleted.local`) et le
@@ -285,7 +315,7 @@ class AccountService {
       statut: 'inactif',
       mfa_secret: null,
       mfa_active: false,
-    });
+    }, { transaction: t });
 
     // 2) ConnexionLog — la table duplique l'email EN CLAIR dans sa propre colonne
     //    indexée à chaque tentative de connexion (réussie ou échouée), avec l'IP,
@@ -307,7 +337,10 @@ class AccountService {
     //    sans `utilisateurId` (email inconnu / compte non résolu).
     const [connexionLogsAnonymises] = await ConnexionLog.update(
       { email: null, ip: null, userAgent: null, donnees: null },
-      { where: { [Op.or]: [{ utilisateurId: userId }, { email: ancienEmail }] } }
+      {
+        where: { [Op.or]: [{ utilisateurId: userId }, { email: ancienEmail }] },
+        transaction: t,
+      }
     );
 
     // 3) Sessions, secrets et appareils — un compte supprimé ne doit plus pouvoir
@@ -315,19 +348,23 @@ class AccountService {
     //    jeton push est lui-même un identifiant d'appareil rattaché à la personne.
     await RefreshToken.update(
       { revoked: true },
-      { where: { utilisateurId: userId, revoked: false } }
+      { where: { utilisateurId: userId, revoked: false }, transaction: t }
     );
-    await UserOtp.destroy({ where: { utilisateurId: userId } });
-    await MfaChallenge.destroy({ where: { utilisateurId: userId } });
-    await DeviceToken.destroy({ where: { utilisateurId: userId } });
+    await UserOtp.destroy({ where: { utilisateurId: userId }, transaction: t });
+    await MfaChallenge.destroy({ where: { utilisateurId: userId }, transaction: t });
+    await DeviceToken.destroy({ where: { utilisateurId: userId }, transaction: t });
 
     // 4) Suppression logique — la ligne reste pour l'intégrité référentielle
     //    (réserves, commentaires, historiques créés par cette personne), mais
     //    ne contient plus de donnée identifiante. Le job de purge l'efface
     //    définitivement (force: true) au bout de la durée de rétention.
-    await utilisateur.destroy();
+    await utilisateur.destroy({ transaction: t });
+
+    if (proprietaire) await t.commit();
 
     // Jamais d'email complet dans les logs (donnée personnelle).
+    // APRES le commit : journaliser une suppression qui serait ensuite annulee
+    // laisserait une trace fausse.
     logger.info('[rgpd] Compte pseudonymisé puis supprimé', { userId, connexionLogsAnonymises });
 
     return { connexionLogsAnonymises };

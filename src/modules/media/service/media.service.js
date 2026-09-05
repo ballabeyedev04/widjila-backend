@@ -81,6 +81,32 @@ class MediaService {
       return { success: false, message: 'Fichier média manquant' };
     }
 
+    // ── Rejeu d'un envoi deja abouti ──────────────────────────────────────
+    //
+    // Le mobile met les photos prises hors ligne dans une file d'attente. Si
+    // le serveur ecrit le media puis que la reponse se perd — coupure en
+    // pleine reponse, delai depasse sur un reseau de chantier — le client
+    // n'a pas d'acquittement : l'action reste en file et repart au prochain
+    // passage. Sans garde, la meme photo se retrouvait DEUX FOIS sur la
+    // reserve.
+    //
+    // Le controle porte sur l'empreinte du CONTENU, deja calculee et stockee
+    // jusqu'ici sans jamais servir. Deux octets identiques sur la meme
+    // reserve, c'est le meme cliche : le second n'apporte rien.
+    //
+    // Il vient AVANT l'ecriture du fichier, et non apres : un rejeu ne repaye
+    // ainsi ni le stockage, ni la generation de vignette — precisement ce
+    // qu'on ne veut pas refaire sur une connexion qui vient d'echouer.
+    const checksum = crypto.createHash('sha256').update(fichier.buffer).digest('hex');
+
+    const parent = reserveId ? { reserveId } : inspectionId ? { inspectionId } : null;
+    if (parent) {
+      const dejaPresent = await Media.findOne({ where: { ...parent, checksum } });
+      if (dejaPresent) {
+        return { success: true, message: 'Média déjà enregistré', media: dejaPresent, rejeu: true };
+      }
+    }
+
     const sousDossier = type === 'video' ? 'medias/videos' : type === 'audio' ? 'medias/audios' : 'medias/photos';
     const url = await storeFile(fichier.buffer, fichier.originalname, sousDossier);
 
@@ -90,8 +116,6 @@ class MediaService {
     const thumbnailUrl = sousDossier === 'medias/photos'
       ? await MediaService._vignette(fichier.buffer, fichier.originalname, sousDossier)
       : null;
-
-    const checksum = crypto.createHash('sha256').update(fichier.buffer).digest('hex');
 
     let media;
     try {
