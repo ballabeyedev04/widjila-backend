@@ -387,14 +387,25 @@ class DashboardService {
     // Créations par mois (sur 6 derniers mois)
     const depuis = new Date();
     depuis.setMonth(depuis.getMonth() - 6);
+    // `col('created_at')` et non `col('createdAt')`.
+    //
+    // Le piege est asymetrique : dans `where`, `createdAt` est un ATTRIBUT,
+    // que Sequelize traduit en `created_at` puisque le modele est declare
+    // `underscored: true`. Dans `col()`, la chaine part TELLE QUELLE dans le
+    // SQL — aucune traduction. Ecrire `col('createdAt')` produisait donc
+    // `to_char("createdAt", ...)`, une colonne qui n'existe pas, et la
+    // requete repondait 500.
+    //
+    // Rien ne le signalait : les deux ecritures se cotoient dans le meme
+    // objet, l'une correcte, l'autre non.
     const mois = await Reserve.findAll({
       where: { ...where, createdAt: { [Op.gte]: depuis } },
       attributes: [
-        [fn('to_char', col('createdAt'), 'YYYY-MM'), 'mois'],
+        [fn('to_char', col('created_at'), 'YYYY-MM'), 'mois'],
         [fn('COUNT', col('id')), 'n'],
       ],
       group: ['mois'],
-      order: [[fn('to_char', col('createdAt'), 'YYYY-MM'), 'ASC']],
+      order: [[fn('to_char', col('created_at'), 'YYYY-MM'), 'ASC']],
       raw: true,
     });
 
@@ -430,8 +441,8 @@ class DashboardService {
     const series = await Promise.all([
       Reserve.findAll({
         where: { ...where, createdAt: { [Op.gte]: debutAnnee } },
-        attributes: [[fn('to_char', col('createdAt'), 'YYYY-MM'), 'mois'], [fn('COUNT', col('id')), 'n']],
-        group: ['mois'], order: [[fn('to_char', col('createdAt'), 'YYYY-MM'), 'ASC']], raw: true,
+        attributes: [[fn('to_char', col('created_at'), 'YYYY-MM'), 'mois'], [fn('COUNT', col('id')), 'n']],
+        group: ['mois'], order: [[fn('to_char', col('created_at'), 'YYYY-MM'), 'ASC']], raw: true,
       }).then((rows) => rows.map((r) => ({ mois: r.mois, creees: Number(r.n) }))),
       Reserve.findAll({
         where: {
@@ -439,8 +450,8 @@ class DashboardService {
           statut: 'validee',
           updatedAt: { [Op.gte]: debutAnnee },
         },
-        attributes: [[fn('to_char', col('updatedAt'), 'YYYY-MM'), 'mois'], [fn('COUNT', col('id')), 'n']],
-        group: ['mois'], order: [[fn('to_char', col('updatedAt'), 'YYYY-MM'), 'ASC']], raw: true,
+        attributes: [[fn('to_char', col('updated_at'), 'YYYY-MM'), 'mois'], [fn('COUNT', col('id')), 'n']],
+        group: ['mois'], order: [[fn('to_char', col('updated_at'), 'YYYY-MM'), 'ASC']], raw: true,
       }).then((rows) => rows.map((r) => ({ mois: r.mois, validees: Number(r.n) }))),
     ]);
 

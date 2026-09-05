@@ -1,6 +1,6 @@
 'use strict';
 
-const { Op } = require('sequelize');
+const { Op, fn, col } = require('sequelize');
 const {
   Chantier, Batiment, Etage, Zone, Lot, Reserve, Utilisateur, ChantierMembre,
   Phase, Inspection, Plan, Annotation, Document, Rapport, Checklist,
@@ -427,15 +427,36 @@ class ChantierService {
       distinct: true,
     });
 
-    // Compteurs de réserves par chantier (batch — une requête, pas N+1)
+    // Compteurs de réserves ET de plans par chantier.
+    //
+    // Deux requêtes groupées, pas 2×N : le nombre de chantiers de la page ne
+    // change pas le coût.
+    //
+    // Le compte de PLANS sert la file d'attente du super-admin. Une demande
+    // de chantier se juge en partie sur les documents joints — « est-ce que
+    // l'entreprise a fourni le plan de masse ? » — et cette information
+    // n'apparaissait nulle part dans la liste : il fallait ouvrir chaque
+    // demande pour découvrir qu'elle n'avait aucune pièce.
     const chantierIds = rows.map((c) => c.id);
-    const compteurs = chantierIds.length
-      ? await Reserve.findAll({
-          where: { chantierId: chantierIds },
-          attributes: ['chantierId', 'statut'],
-          raw: true,
-        })
-      : [];
+    const [compteurs, plansParChantier] = chantierIds.length
+      ? await Promise.all([
+          Reserve.findAll({
+            where: { chantierId: chantierIds },
+            attributes: ['chantierId', 'statut'],
+            raw: true,
+          }),
+          Plan.findAll({
+            where: { chantierId: chantierIds },
+            attributes: ['chantierId', [fn('COUNT', col('id')), 'n']],
+            group: ['chantierId'],
+            raw: true,
+          }),
+        ])
+      : [[], []];
+
+    const plansMap = Object.fromEntries(
+      plansParChantier.map((p) => [p.chantierId, Number(p.n)])
+    );
 
     const statsMap = {};
     for (const c of compteurs) {
@@ -448,6 +469,7 @@ class ChantierService {
     const chantiers = rows.map((c) => {
       const cj = c.toJSON();
       cj.statsReserves = statsMap[c.id] || { total: 0, ouvertes: 0, validees: 0 };
+      cj.nbPlans = plansMap[c.id] || 0;
       return cj;
     });
 

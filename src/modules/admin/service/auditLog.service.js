@@ -43,7 +43,25 @@ class AuditLogService {
   static async listLogs({ page = 1, limit = 20, adminId, action, cibleType, depuis } = {}) {
     const where = {};
     if (adminId) where.adminId = adminId;
-    if (action) where.action = action;
+    // Le filtre d'action accepte deux formes, et c'est necessaire.
+    //
+    // Les actions journalisees sont des CHEMINS pointes, derives de la route
+    // appelee : `notifications.device-token.create`, `chantiers.valider.update`.
+    // L'ecran d'administration, lui, propose des verbes — « create », « update »,
+    // « delete » — parce que c'est la question qu'on se pose devant un journal :
+    // « qu'est-ce qui a ete supprime aujourd'hui ? », pas « qui a appele
+    // /chantiers/:id ».
+    //
+    // L'egalite stricte ne rapprochait jamais les deux : filtrer sur « delete »
+    // ne renvoyait rien, quel que soit le contenu du journal. Le filtre
+    // paraissait fonctionner, et repondait toujours « aucun evenement ».
+    //
+    // Une valeur SANS point est donc traitee comme un verbe et rapprochee du
+    // suffixe ; une valeur pointee reste une action precise, comparee telle
+    // quelle.
+    if (action) {
+      where.action = action.includes('.') ? action : { [Op.endsWith]: `.${action}` };
+    }
     if (cibleType) where.cibleType = cibleType;
     if (depuis) where.createdAt = { [Op.gte]: new Date(depuis) };
 
