@@ -485,7 +485,34 @@ class AuthService {
     // 4. Rotation : révoquer l'ancien token, émettre un nouveau couple
     const t = await sequelize.transaction();
     try {
-      await storedToken.update({ revoked: true }, { transaction: t });
+      // Révocation CONDITIONNELLE, et non `storedToken.update(...)`.
+      //
+      // Entre la lecture de l'étape 2 et cette écriture, rien ne verrouillait
+      // la ligne. Deux rafraîchissements simultanés portant le même jeton
+      // passaient donc tous les deux le contrôle `revoked`, et repartaient
+      // chacun avec un couple valide : deux familles de jetons vivantes issues
+      // d'un seul, ce qui vide la rotation de son intérêt — on ne peut plus
+      // distinguer un client légitime d'un jeton volé rejoué.
+      //
+      // `WHERE revoked = false` fait de cette mise à jour l'arbitre : la
+      // première transaction pose le verrou de ligne, la seconde attend, puis
+      // ne touche plus rien. C'est exactement le motif déjà employé par
+      // `logout` ci-dessous.
+      //
+      // Le mobile sérialise déjà ses propres rafraîchissements (file d'attente
+      // dans `dio_client_factory.dart`), mais deux appareils — ou l'espace
+      // d'administration — partagent parfois une session : la garantie doit
+      // venir de la base, pas de la discipline du client.
+      const [revoques] = await RefreshToken.update(
+        { revoked: true },
+        { where: { tokenHash, revoked: false }, transaction: t }
+      );
+      if (revoques === 0) {
+        // Quelqu'un d'autre a consommé ce jeton entre-temps. Le perdant
+        // repart en session expirée plutôt qu'avec un second couple valide.
+        await t.rollback();
+        return { success: false, message: 'Refresh token révoqué' };
+      }
 
       const newAccessToken  = _generateAccessToken(utilisateur);
       const newRefreshToken = _generateRefreshToken(utilisateur);

@@ -86,6 +86,10 @@ class DashboardService {
     const enCache = await cache.lire(cleCache);
     if (enCache) return enCache;
 
+    // Portee des COMPTES : l'organisation, rien d'autre. Voir plus bas.
+    const whereUtilisateurs =
+      toutesOrganisations && !organisationId ? {} : { organisationId };
+
     const chantiers = await Chantier.findAll({
       where: whereOrg,
       attributes: ['id', 'nom', 'code', 'statut'],
@@ -102,7 +106,19 @@ class DashboardService {
       plans: 0,
       inspections: 0,
       documents: 0,
-      utilisateurs: await Utilisateur.count({ where: whereOrg }),
+      // Le compte des UTILISATEURS se fait sur l'organisation seule.
+      //
+      // `whereOrg` decrit des CHANTIERS : il porte un filtre de statut de
+      // chantier et, depuis l'ajout du cloisonnement, un `demandeurId` et une
+      // sous-requete sur `chantier_membres`. Aucune de ces colonnes n'existe
+      // sur `utilisateurs` : la requete partait en erreur SQL, et l'ecran
+      // d'accueil repondait 500 a TOUT role hors gestion — c'est-a-dire aux
+      // entreprises, clients, sous-traitants et pilotes.
+      //
+      // Le nombre de comptes d'une organisation ne depend d'ailleurs pas des
+      // chantiers qu'on a le droit d'ouvrir : ces deux portees n'ont aucune
+      // raison de partager un filtre.
+      utilisateurs: await Utilisateur.count({ where: whereUtilisateurs }),
     };
 
     if (chantierIds.length === 0) {
