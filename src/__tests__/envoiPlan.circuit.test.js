@@ -24,11 +24,17 @@ describe('_peutVoir — cloisonnement des chantiers issus du circuit', () => {
     expect(ChantierService._peutVoir(DEMANDE, { id: 'u1', role: 'Entreprise' })).toBe(true);
   });
 
-  it('cache la demande d’un autre', () => {
-    // C'est le cœur de la règle : « utilisables pour cette entreprise
-    // uniquement ». Sans elle, une entreprise verrait les chantiers de ses
-    // concurrents dans la même organisation.
-    expect(ChantierService._peutVoir(DEMANDE, { id: 'u2', role: 'Entreprise' })).toBe(false);
+  it('cache la demande d’un autre aux rôles cloisonnés', () => {
+    // La règle vit toujours, pour ceux qui n'ont pas la main sur toute
+    // l'organisation : un conducteur de travaux ne voit pas la demande d'un
+    // collègue.
+    expect(ChantierService._peutVoir(DEMANDE, { id: 'u2', role: 'ConducteurTravaux' })).toBe(false);
+  });
+
+  it('le titulaire de l’organisation voit les demandes de son organisation', () => {
+    // Elles sont déposées SUR SON organisation : les lui cacher revenait à lui
+    // cacher son propre portefeuille.
+    expect(ChantierService._peutVoir(DEMANDE, { id: 'u2', role: 'Entreprise' })).toBe(true);
   });
 
   it.each(['ChefProjet', 'MaitreOuvrage', 'Admin'])(

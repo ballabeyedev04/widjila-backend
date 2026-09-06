@@ -11,6 +11,9 @@ const logger = require('../../../utils/logger.js');
 const NotificationService = require('../../notification/service/notification.service.js');
 const escapeLike = require('../../../utils/escapeLike.js');
 const { PILOTAGE } = require('../../../config/roles.js');
+// Statuts du CIRCUIT de validation : un chantier qui les porte n'existe pas
+// encore comme chantier.
+const { STATUT_CHANTIER_EN_DEMANDE } = require('../../../config/enums.js');
 
 // ─── Statuts que le sous-traitant peut lui-même déclarer ───────────────────────
 // Il ne peut ni affecter (déjà fait par un rôle de pilotage), ni prononcer de
@@ -302,10 +305,34 @@ class ReserveService {
     return null;
   }
 
+  /**
+   * Un chantier qui n'existe pas encore n'accueille pas de réserve.
+   *
+   * La garde vivait au niveau du PLAN seulement : une réserve posée sans plan
+   * — ce que l'application permet, un chantier dont les plans ne sont pas
+   * encore déposés ne devant pas bloquer un relevé — passait donc sur une
+   * DEMANDE en attente. Refusée ensuite, la demande laissait des réserves
+   * rattachées à un chantier que personne ne validera jamais.
+   *
+   * Règle donnée par le client : les réserves viennent APRÈS la validation du
+   * chantier et de ses plans.
+   *
+   * @returns {string|null} Message de refus, ou `null`.
+   */
+  static _refusSurDemande(chantier) {
+    if (!STATUT_CHANTIER_EN_DEMANDE.includes(chantier.statut)) return null;
+    return chantier.statut === 'rejete'
+      ? 'Cette demande de chantier a été refusée : aucune réserve ne peut y être posée.'
+      : 'Ce chantier attend une validation : aucune réserve ne peut y être posée.';
+  }
+
   // -------------------- CRÉER UNE RÉSERVE --------------------
   static async creerReserve(organisationId, data, utilisateurId) {
     const chantier = await Chantier.findOne({ where: { id: data.chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
+
+    const refus = ReserveService._refusSurDemande(chantier);
+    if (refus) return { success: false, message: refus };
 
     // IDEMPOTENCE (mode hors ligne du mobile) : le client fournit l'id, et
     // peut renvoyer la meme creation si la reponse s'est perdue en route
@@ -420,6 +447,11 @@ class ReserveService {
   static async creerReserveSerie(organisationId, data, utilisateurId) {
     const chantier = await Chantier.findOne({ where: { id: data.chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
+
+    // Même garde que la création unitaire : la série est un autre chemin vers
+    // la même écriture, et une garde posée sur un seul des deux ne garde rien.
+    const refusDemande = ReserveService._refusSurDemande(chantier);
+    if (refusDemande) return { success: false, message: refusDemande };
 
     // CORRECTIF (audit § 3 / § 8) — contrôles absents de la version en série
     const erreurRef = await ReserveService._verifierReferences(organisationId, data);

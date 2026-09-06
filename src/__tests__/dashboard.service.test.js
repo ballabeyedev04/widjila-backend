@@ -55,11 +55,18 @@ const DashboardService = require('../modules/dashboard/service/dashboard.service
 
 const ORG = 'org-1';
 
-/** Un compte d'entreprise : cloisonné, donc le cas qui plantait. */
-const entreprise = { id: 'u-entreprise', role: 'Entreprise' };
+/** Un compte CLOISONNÉ — il ne voit que ce qui le concerne.
+ *
+ * C'était 'Entreprise' à l'origine. Ce rôle est désormais le titulaire de son
+ * organisation et voit tout ce qui lui appartient ; le conducteur de travaux
+ * prend sa place ici, la mécanique testée étant la même. */
+const restreint = { id: 'u-conducteur', role: 'ConducteurTravaux' };
 
 /** Un compte de gestion : voit tout, aucun cloisonnement. */
 const gestion = { id: 'u-gestion', role: 'ChefProjet' };
+
+/** Le titulaire : dans GESTION, donc sans cloisonnement lui non plus. */
+const entreprise = { id: 'u-entreprise', role: 'Entreprise' };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -130,15 +137,23 @@ describe('statsGlobales — portée du where CHANTIERS', () => {
   });
 
   it('applique le cloisonnement à un rôle restreint', async () => {
-    await DashboardService.statsGlobales(ORG, { auteur: entreprise });
+    await DashboardService.statsGlobales(ORG, { auteur: restreint });
 
-    // Le même cloisonnement que la liste des chantiers : sans lui, une
-    // entreprise lisait « 1 chantier » face à une liste vide.
+    // Le même cloisonnement que la liste des chantiers : sans lui, un compte
+    // restreint lisait « 1 chantier » face à une liste vide.
     expect(whereDesChantiers()[Op.and]).toBeDefined();
   });
 
   it('n’applique AUCUN cloisonnement à un rôle de gestion', async () => {
     await DashboardService.statsGlobales(ORG, { auteur: gestion });
+
+    expect(whereDesChantiers()[Op.and]).toBeUndefined();
+  });
+
+  it('n’en applique pas davantage au titulaire de l’organisation', async () => {
+    // Le portefeuille est le sien : le compter partiellement lui donnerait un
+    // tableau de bord qui contredit sa propre liste de chantiers.
+    await DashboardService.statsGlobales(ORG, { auteur: entreprise });
 
     expect(whereDesChantiers()[Op.and]).toBeUndefined();
   });
@@ -148,20 +163,20 @@ describe('statsGlobales — clé de cache', () => {
   const cleUtilisee = () => cache.lire.mock.calls[0][0];
 
   it('un compte RESTREINT a sa propre entrée', async () => {
-    await DashboardService.statsGlobales(ORG, { auteur: entreprise });
+    await DashboardService.statsGlobales(ORG, { auteur: restreint });
 
-    expect(cleUtilisee()).toContain(entreprise.id);
+    expect(cleUtilisee()).toContain(restreint.id);
   });
 
   it('deux comptes restreints ne partagent PAS d’entrée', async () => {
     // Le point qui compte : une entrée partagée servirait à l'un les chiffres
     // de l'autre, de façon intermittente et invisible.
-    await DashboardService.statsGlobales(ORG, { auteur: entreprise });
+    await DashboardService.statsGlobales(ORG, { auteur: restreint });
     const premiere = cleUtilisee();
 
     cache.lire.mockClear();
     await DashboardService.statsGlobales(ORG, {
-      auteur: { id: 'u-autre', role: 'Entreprise' },
+      auteur: { id: 'u-autre', role: 'ConducteurTravaux' },
     });
 
     expect(cleUtilisee()).not.toBe(premiere);

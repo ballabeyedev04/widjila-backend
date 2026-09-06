@@ -22,18 +22,27 @@ const escapeHtml = require('../../utils/escapeHtml.js');
  * @param {string} [data.motif]         Obligatoire pour 'rejetee'.
  * @param {string} [data.lien]          Bouton d'action.
  */
-module.exports = ({ variante, destinataire, chantierNom, chantierCode, demandeurNom, motif, lien }) => {
+module.exports = ({ variante, destinataire, chantierNom, chantierCode, demandeurNom, organisationNom, motif, lien }) => {
   const nomSafe = escapeHtml(destinataire);
   const chantierSafe = escapeHtml(chantierNom);
   const codeSafe = escapeHtml(chantierCode);
   const demandeurSafe = escapeHtml(demandeurNom);
+  const organisationSafe = escapeHtml(organisationNom);
+
+  // « L'entreprise Sotraco (Moussa Diop) » quand l'organisation est connue,
+  // « Moussa Diop » sinon. Un super-admin reçoit les demandes de TOUTES les
+  // organisations : sans le nom de la société, il ne sait pas de qui vient
+  // celle qu'il lit.
+  const auteurSafe = organisationSafe
+    ? `l’entreprise ${organisationSafe}${demandeurSafe ? ` (${demandeurSafe})` : ''}`
+    : demandeurSafe;
   const motifSafe = escapeHtml(motif);
 
   const TEXTES = {
     demande: {
       couleur: '#1d4ed8',
       titre: 'Nouvelle demande de chantier',
-      intro: `<strong>${demandeurSafe}</strong> a déposé une demande de création de chantier. Elle attend votre décision : tant qu'elle n'est pas validée, le chantier n'apparaît pas dans la liste des chantiers en activité.`,
+      intro: `<strong>${auteurSafe}</strong> a déposé une demande de création de chantier. Elle attend votre décision : tant qu'elle n'est pas validée, le chantier n'apparaît pas dans la liste des chantiers en activité, et les plans qui y sont joints restent eux aussi en attente.`,
       bouton: 'Examiner la demande',
     },
     validee: {

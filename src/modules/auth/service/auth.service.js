@@ -187,8 +187,7 @@ class AuthService {
 
       const hashedPassword = await bcrypt.hash(mot_de_passe, bcryptConfig.saltRounds);
 
-      // 1. Créer l'organisation (avec trial de 7 jours)
-      const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      // 1. Créer l'organisation — SANS démarrer l'essai gratuit
       const organisation = await Organisation.create({
         nom: organisationNom,
         raison_sociale: raison_sociale || organisationNom,
@@ -210,7 +209,19 @@ class AuthService {
         // Code ISO, et non le libellé : c'est lui qui commande l'affichage
         // des champs d'identification côté client.
         pays: organisationPays || 'FR',
-        trial_ends_at: trialEndsAt,
+
+        // L'essai ne démarre PAS ici, et le NULL est explicite (il écrase le
+        // défaut du modèle, qui protège les organisations créées par d'autres
+        // chemins). Le compte qui suit naît « en_attente_validation » : tant
+        // que le super-admin n'a pas tranché, la connexion est refusée et
+        // l'entreprise ne peut rien essayer. Faire courir l'essai pendant ce
+        // délai revenait à le lui facturer sans qu'elle y ait accès — et une
+        // validation tardive la faisait arriver sur « essai terminé » à sa
+        // toute première connexion.
+        //
+        // Le compte à rebours part à la validation, dans
+        // essai.service.js#demarrerEssai. Voir config/essai.js.
+        trial_ends_at: null,
       }, { transaction: t });
 
       // 2. Créer le premier utilisateur — admin de son organisation

@@ -124,6 +124,7 @@ async function sendInscriptionRejeteeEmail({ to, nom, prenom, motif, organisatio
  */
 async function sendChantierValidationEmail({
   to, variante, destinataire, chantierNom, chantierCode, demandeurNom, motif, chantierId,
+  organisationNom,
 }) {
   const template = require('../templates/mail/chantierValidation.template.js');
   const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
@@ -134,6 +135,21 @@ async function sendChantierValidationEmail({
     rejetee: `Suite à votre demande de chantier — ${chantierNom}`,
   };
 
+  // Le lien dépend de la variante, et c'est nécessaire.
+  //
+  // `/chantiers/:id` ne mène nulle part tant que la demande n'est pas
+  // validée : le serveur écarte les demandes de la liste des chantiers. Le
+  // valideur qui suivait le bouton « Examiner la demande » arrivait donc sur
+  // un écran vide, et devait retrouver la demande à la main.
+  //
+  // Un refus renvoie au même écran : c'est là que l'entreprise lit le motif et
+  // reprend sa demande.
+  const lien = chantierId
+    ? (variante === 'validee'
+        ? `${frontendUrl}/chantiers/${chantierId}`
+        : `${frontendUrl}/chantiers/demandes/${chantierId}`)
+    : undefined;
+
   return sendEmail({
     to,
     subject: SUJETS[variante] || SUJETS.demande,
@@ -143,8 +159,9 @@ async function sendChantierValidationEmail({
       chantierNom,
       chantierCode,
       demandeurNom,
+      organisationNom,
       motif,
-      lien: chantierId ? `${frontendUrl}/chantiers/${chantierId}` : undefined,
+      lien,
     }),
   });
 }

@@ -1,6 +1,7 @@
 'use strict';
 
 const { ForbiddenError } = require('../errors/AppError.js');
+const { TRIAL_JOURS } = require('../config/essai.js');
 
 /**
  * Middleware de vérification d'abonnement / trial.
@@ -65,6 +66,12 @@ const checkSubscription = async (req, res, next) => {
     // gratuit ILLIMITÉ. Les organisations créées hors du parcours d'inscription
     // (filiales, agences, création par l'admin plateforme) n'avaient jamais de
     // date d'essai. Absence de date ⇒ essai terminé.
+    //
+    // NULL signifie désormais aussi « essai pas encore démarré », le cas d'une
+    // inscription en attente de validation. La règle ne change pas pour
+    // autant : ce compte-là ne peut pas s'authentifier (checkActiveUser), donc
+    // il n'arrive jamais ici. Et fermer l'accès reste le bon défaut — c'est
+    // l'ouvrir qui avait créé la faille.
     const trialEnded = !organisation.trial_ends_at || new Date(organisation.trial_ends_at) < now;
     const hasActiveSubscription = organisation.is_subscribed === true;
 
@@ -81,7 +88,7 @@ const checkSubscription = async (req, res, next) => {
 
     // Trial expiré et pas d'abonnement → bloquer
     return next(new ForbiddenError(
-      'Votre période d\'essai de 7 jours est terminée. Veuillez souscrire un abonnement pour continuer.',
+      `Votre période d'essai de ${TRIAL_JOURS} jours est terminée. Veuillez souscrire un abonnement pour continuer.`,
       'SUBSCRIPTION_REQUIRED',
       { trialEnded: true, trialEndsAt: organisation.trial_ends_at }
     ));

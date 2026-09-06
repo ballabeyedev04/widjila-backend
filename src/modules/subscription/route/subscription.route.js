@@ -8,7 +8,7 @@ const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware
 const { rawBodyMiddleware } = require('../../../middlewares/rawBody.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
-const { GESTION } = require('../../../config/roles.js');
+const { FACTURATION } = require('../../../config/roles.js');
 const { creerPaymentIntentSchema } = require('../validation/subscription.validation.js');
 
 // ── Page d'abonnement (accessible même sans abonnement) ─────────────────────────
@@ -26,25 +26,38 @@ router.get('/plan-details', auth, checkActiveUser, subscriptionController.getPla
 router.get('/droits', auth, checkActiveUser, subscriptionController.getDroits);
 
 // Historique des souscriptions, avec le prix RÉELLEMENT payé à chaque fois.
-router.get('/historique', auth, checkActiveUser, requireRole(...GESTION), subscriptionController.getHistorique);
+//
+// `FACTURATION` et non `GESTION` : le compte 'Entreprise' créé à l'inscription
+// est le TITULAIRE de l'abonnement. Lui refuser la lecture de ses propres
+// paiements revenait à lui cacher ce qu'il a réglé — l'écran d'abonnement du
+// mobile masquait d'ailleurs la section entière pour ce rôle.
+router.get('/historique', auth, checkActiveUser, requireRole(...FACTURATION), subscriptionController.getHistorique);
 
 // ── Création PaymentIntent (choix du plan) ──────────────────────────────────────
-// Engager une dépense pour l'organisation relève de la gestion.
+// Engager une dépense pour l'organisation relève de la gestion — et le
+// titulaire de l'abonnement en fait partie.
+//
+// Sans 'Entreprise' dans ce groupe, le compte issu de l'inscription publique
+// recevait un 403 sur le SEUL geste qui lève le mur de fin d'essai. Le bouton
+// « Choisir » existait pourtant, sur le mobile comme sur le web : il menait à
+// un refus.
 router.post(
   '/payment-intent',
   auth,
   checkActiveUser,
-  requireRole(...GESTION),
+  requireRole(...FACTURATION),
   validate(creerPaymentIntentSchema),
   subscriptionController.creerPaymentIntent
 );
 
 // ── Changement de plan (abonnement existant) ────────────────────────────────────
+// Même groupe que la souscription : qui peut souscrire peut changer de
+// formule, sans quoi il faudrait résilier puis reprendre.
 router.post(
   '/change-plan',
   auth,
   checkActiveUser,
-  requireRole(...GESTION),
+  requireRole(...FACTURATION),
   validate(creerPaymentIntentSchema),
   subscriptionController.changerPlan
 );
@@ -53,11 +66,15 @@ router.post(
 // Sans requireRole, n'importe quel membre — y compris un rôle Client externe —
 // pouvait résilier l'abonnement et déclencher un 403 SUBSCRIPTION_REQUIRED sur
 // toutes les routes métier, pour tous les membres, en une seule requête.
+//
+// `FACTURATION` : le titulaire doit pouvoir résilier ce qu'il a souscrit.
+// Le laisser sur GESTION créait une organisation qui peut payer mais jamais
+// arrêter — il aurait fallu écrire au support pour cela.
 router.post(
   '/cancel',
   auth,
   checkActiveUser,
-  requireRole(...GESTION),
+  requireRole(...FACTURATION),
   subscriptionController.annulerAbonnement
 );
 

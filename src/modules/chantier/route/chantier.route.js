@@ -10,7 +10,7 @@ const checkOrganisation = require('../../../middlewares/checkOrganisation.middle
 const requireOrganisation = require('../../../middlewares/requireOrganisation.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
-const { OPERATIONNEL, PILOTAGE, SENSIBLE, GESTION, DEPOSANT } = require('../../../config/roles.js');
+const { OPERATIONNEL, PILOTAGE, SENSIBLE, DEPOSANT, TITULAIRE, VALIDATION_CHANTIER } = require('../../../config/roles.js');
 const { verifierLimite } = require('../../../middlewares/requireFonctionnalite.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const { Chantier } = require('../../../models/index.js');
@@ -71,16 +71,18 @@ router.put(
 );
 
 // ── Validation des demandes de chantier ──────────────────────────────────────
-// `GESTION` : le verdict appartient à ceux qui dirigent l'organisation, pas à
-// ceux qui exécutent. `checkOrganisation` interdit de trancher la demande d'un
-// autre client.
+// `VALIDATION_CHANTIER` et non `GESTION` : le titulaire 'Entreprise' est dans
+// GESTION depuis qu'il a tous les droits sur son organisation — mais valider
+// SA PROPRE demande annulerait le circuit. Il dépose, un autre tranche.
+// `checkOrganisation` interdit par ailleurs de trancher la demande d'un autre
+// client.
 router.patch(
   '/:id/valider',
   auth,
   checkActiveUser,
   checkSubscription,
   checkOrganisation(Chantier, 'organisationId'),
-  requireRole(...GESTION),
+  requireRole(...VALIDATION_CHANTIER),
   chantierController.validerChantier
 );
 
@@ -90,7 +92,7 @@ router.patch(
   checkActiveUser,
   checkSubscription,
   checkOrganisation(Chantier, 'organisationId'),
-  requireRole(...GESTION),
+  requireRole(...VALIDATION_CHANTIER),
   validate(rejeterChantierSchema),
   chantierController.rejeterChantier
 );
@@ -276,7 +278,7 @@ router.post(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole('ChefProjet', 'MaitreOeuvre'),
+  requireRole('ChefProjet', 'MaitreOeuvre', TITULAIRE),
   chantierController.assignerMembres
 );
 
@@ -285,7 +287,7 @@ router.delete(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole('ChefProjet', 'MaitreOeuvre'),
+  requireRole('ChefProjet', 'MaitreOeuvre', TITULAIRE),
   chantierController.retirerMembreChantier
 );
 

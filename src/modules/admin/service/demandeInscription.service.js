@@ -1,8 +1,10 @@
 'use strict';
 
 const { Op } = require('sequelize');
+const sequelize = require('../../../config/db.js');
 const { Utilisateur, Organisation } = require('../../../models/index.js');
 const AuditLogService = require('./auditLog.service.js');
+const EssaiService = require('../../subscription/service/essai.service.js');
 const {
   sendInscriptionValideeEmail,
   sendInscriptionRejeteeEmail,
@@ -119,7 +121,21 @@ class DemandeInscriptionService {
     };
     if (role) updates.role = role;
 
-    await demande.update(updates);
+    // Ouverture du compte et démarrage de l'essai : les deux vont ensemble.
+    //
+    // Séparées, un échec entre les deux laisserait une entreprise autorisée à
+    // se connecter mais dont l'essai n'a jamais démarré — donc reçue par
+    // « votre période d'essai est terminée » dès sa première visite, sans
+    // recours autre qu'une correction en base.
+    const t = await sequelize.transaction();
+    try {
+      await demande.update(updates, { transaction: t });
+      await EssaiService.demarrerEssai(demande.organisationId, { transaction: t });
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
 
     await AuditLogService.logAction({
       admin,

@@ -7,6 +7,7 @@ const auth = require('../../../middlewares/auth.middleware.js');
 const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware.js');
 const checkSubscription = require('../../../middlewares/checkSubscription.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
+const { TITULAIRE } = require('../../../config/roles.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const { creerPartenaireSchema, modifierPartenaireSchema } = require('../validation/partenaire.validation.js');
@@ -21,7 +22,7 @@ router.post(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre'),
+  requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre', TITULAIRE),
   validate(creerPartenaireSchema),
   verifierTypeReferentiel('partenaire'),
   partenaireController.creerPartenaire
@@ -35,7 +36,7 @@ router.post(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre'),
+  requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre', TITULAIRE),
   validate(creerPartenaireSchema),
   verifierTypeReferentiel('partenaire'),
   partenaireController.creerPartenaire
@@ -46,7 +47,7 @@ router.put(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre'),
+  requireRole('ChefProjet', 'ConducteurTravaux', 'MaitreOuvrage', 'MaitreOeuvre', TITULAIRE),
   validate(modifierPartenaireSchema),
   verifierTypeReferentiel('partenaire'),
   partenaireController.modifierPartenaire
@@ -57,7 +58,7 @@ router.delete(
   auth,
   checkActiveUser,
   checkSubscription,
-  requireRole('ChefProjet'),
+  requireRole('ChefProjet', TITULAIRE),
   partenaireController.supprimerPartenaire
 );
 

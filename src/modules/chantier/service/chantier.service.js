@@ -88,19 +88,36 @@ function _filtreCloisonnement(auteur) {
 }
 
 /**
- * Destinataires d'une demande de chantier : les comptes actifs de
- * l'organisation habilités à trancher.
+ * Destinataires d'une demande de chantier : tous ceux qui peuvent la trancher.
  *
  * TOUS, et non le premier trouvé : un seul destinataire en congé suffirait à
- * bloquer une demande indéfiniment. Le super-admin plateforme n'est pas
- * concerné — il n'appartient à aucune organisation.
+ * bloquer une demande indéfiniment.
+ *
+ * ## Pourquoi les super-admins plateforme en font partie
+ *
+ * Ils en étaient exclus, au motif qu'ils n'appartiennent à aucune
+ * organisation. Or c'est précisément EUX qui tranchent : `requireRole(...GESTION)`
+ * garde la validation, et 'Admin' y figure.
+ *
+ * Et surtout, l'organisation issue d'une inscription publique n'a qu'un seul
+ * compte, de rôle 'Entreprise' (auth.service.js#register). Aucun ChefProjet,
+ * aucun MaitreOuvrage. La requête ne ramenait donc AUCUN destinataire :
+ * l'entreprise déposait sa demande, et personne n'était prévenu. Elle
+ * attendait une réponse que nul ne savait devoir donner.
+ *
+ * Le `Op.or` couvre les deux populations en une requête, sans doublon : une
+ * ligne ne peut correspondre qu'une fois.
  */
 async function _valideursDe(organisationId) {
   const membres = await Utilisateur.findAll({
     where: {
-      organisationId,
-      role: { [Op.in]: GESTION.filter((r) => r !== 'Admin') },
       statut: 'actif',
+      [Op.or]: [
+        // Les valideurs DANS l'organisation, quand elle en a.
+        { organisationId, role: { [Op.in]: GESTION.filter((r) => r !== 'Admin') } },
+        // Les super-admins plateforme : hors organisation, mais décisionnaires.
+        { role: 'Admin' },
+      ],
     },
     attributes: ['email', 'prenom', 'nom'],
   });
@@ -162,7 +179,10 @@ class ChantierService {
     // requête (voir chantier.controller.js#creerChantier). On la valide ici :
     // sans ce contrôle, un identifiant inexistant remontait sous forme
     // d'erreur de clé étrangère PostgreSQL, illisible côté interface.
-    const organisation = await Organisation.findByPk(organisationId, { attributes: ['id'] });
+    // `nom` en plus de `id` : il sert au courriel envoyé aux valideurs, plus
+    // bas. Le relire dans une seconde requête coûterait un aller-retour pour
+    // la même ligne.
+    const organisation = await Organisation.findByPk(organisationId, { attributes: ['id', 'nom'] });
     if (!organisation) {
       return { success: false, message: 'Organisation introuvable' };
     }
@@ -214,6 +234,11 @@ class ChantierService {
       chantierNom: chantier.nom,
       chantierCode: chantier.code,
       demandeurNom: [auteur.prenom, auteur.nom].filter(Boolean).join(' ') || '',
+      // Le nom de l'ENTREPRISE, et pas seulement celui de la personne : un
+      // super-admin reçoit les demandes de toutes les organisations de la
+      // plateforme, et « Moussa Diop demande un chantier » ne lui dit pas de
+      // quelle société il s'agit.
+      organisationNom: organisation.nom || '',
       chantierId: chantier.id,
     })));
 

@@ -18,7 +18,7 @@
 
 const ChantierService = require('../modules/chantier/service/chantier.service.js');
 const { STATUT_CHANTIER, STATUT_CHANTIER_EN_DEMANDE } = require('../config/enums.js');
-const { DEPOSANT, GESTION } = require('../config/roles.js');
+const { DEPOSANT, GESTION, VALIDATION_CHANTIER } = require('../config/roles.js');
 
 describe('_naitEnAttente — qui passe par la validation', () => {
   it.each(['ChefProjet', 'ConducteurTravaux', 'MaitreOeuvre', 'Entreprise', 'BureauControle', 'MaitreOuvrage'])(
@@ -77,10 +77,18 @@ describe('groupes de rôles', () => {
     expect(DEPOSANT).not.toContain('Client');
   });
 
-  it('réserve le verdict à la gestion, entreprise exclue', () => {
+  it('réserve le verdict, entreprise exclue', () => {
     // Sans quoi une entreprise validerait sa propre demande, et le circuit ne
     // servirait à rien.
-    expect(GESTION).not.toContain('Entreprise');
+    //
+    // Le groupe a changé de nom : 'Entreprise' est désormais dans GESTION —
+    // c'est le titulaire de son organisation, il y a tous les droits. Le
+    // VERDICT reste la seule porte qu'il ne franchit pas, sur un groupe à
+    // part (`VALIDATION_CHANTIER`).
+    expect(VALIDATION_CHANTIER).not.toContain('Entreprise');
+    expect(VALIDATION_CHANTIER).toContain('Admin');
+    // Et il est bien dans GESTION : c'est ce qui lui ouvre le reste.
+    expect(GESTION).toContain('Entreprise');
   });
 });
 
@@ -133,32 +141,41 @@ describe('_refusDepot — garde du parcours « Envoi Plan »', () => {
     expect(PlanService._refusDepot(demandeDe('u1'), { id: 'u1', role: 'Entreprise' })).toBeNull();
   });
 
+  it.each(['en_preparation', 'en_cours', 'en_pause', 'archive', 'cloture'])(
+    'laisse le titulaire déposer sur un chantier « %s » de son organisation',
+    (statut) => {
+      // Ce dépôt lui était refusé tant qu'il était traité comme un
+      // intervenant extérieur. Il est le TITULAIRE de l'organisation : le
+      // chantier est le sien, à tout moment de sa vie.
+      expect(PlanService._refusDepot({ statut, demandeurId: 'u1' }, { id: 'u1', role: 'Entreprise' }))
+        .toBeNull();
+    }
+  );
+
   it('refuse le dépôt sur la demande de quelqu’un d’autre', () => {
-    // La route laisse passer `DEPOSANT` ; sans cette garde, une entreprise
-    // joindrait ses plans à la demande d'un concurrent de la même organisation.
-    expect(PlanService._refusDepot(demandeDe('u1'), { id: 'u2', role: 'Entreprise' })).toEqual(
+    // La garde vit toujours, pour les rôles de `DEPOSANT` qui ne sont PAS
+    // opérationnels — le maître d'ouvrage, par exemple. Sans elle, il
+    // joindrait ses plans à la demande d'un autre.
+    expect(PlanService._refusDepot(demandeDe('u1'), { id: 'u2', role: 'MaitreOuvrage' })).toEqual(
       expect.stringContaining('vos propres demandes')
     );
   });
 
   it.each(['en_preparation', 'en_cours', 'en_pause', 'archive', 'cloture'])(
-    'refuse le dépôt de l’entreprise sur un chantier « %s »',
+    'refuse à un déposant non opérationnel un chantier « %s »',
     (statut) => {
-      // Le point le plus sensible de l'élargissement : une fois le chantier
-      // validé, l'entreprise NE doit pas pouvoir y déposer de plans — c'était
-      // déjà interdit avant, et ça doit le rester.
-      expect(PlanService._refusDepot({ statut, demandeurId: 'u1' }, { id: 'u1', role: 'Entreprise' }))
+      expect(PlanService._refusDepot({ statut, demandeurId: 'u1' }, { id: 'u1', role: 'MaitreOuvrage' }))
         .toEqual(expect.stringContaining('en attente de validation'));
     }
   );
 
   it('refuse le dépôt sur une demande déjà refusée', () => {
     // Une demande « rejete » attend une correction, pas des pièces jointes.
-    expect(PlanService._refusDepot({ statut: 'rejete', demandeurId: 'u1' }, { id: 'u1', role: 'Entreprise' }))
+    expect(PlanService._refusDepot({ statut: 'rejete', demandeurId: 'u1' }, { id: 'u1', role: 'MaitreOuvrage' }))
       .not.toBeNull();
   });
 
-  it.each(['ChefProjet', 'ConducteurTravaux', 'MaitreOeuvre', 'BureauControle', 'Admin'])(
+  it.each(['ChefProjet', 'ConducteurTravaux', 'MaitreOeuvre', 'BureauControle', 'Admin', 'Entreprise'])(
     'ne restreint pas %s (non-régression)',
     (role) => {
       // Ces rôles déposaient déjà des plans sur n'importe quel chantier de

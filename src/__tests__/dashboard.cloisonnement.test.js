@@ -36,8 +36,15 @@ describe('filtreCloisonnement — qui voit quoi', () => {
     expect(ChantierService.filtreCloisonnement(auteur('Admin'))).toBeNull();
   });
 
-  it('une entreprise EST cloisonnée — c’est le cas du signalement', () => {
-    const filtre = ChantierService.filtreCloisonnement(auteur('Entreprise'));
+  it('le titulaire de l’organisation voit tout ce qui lui appartient', () => {
+    // Il était cloisonné comme un intervenant extérieur, et ne voyait donc que
+    // ses propres demandes — sur SON organisation. Le tableau de bord annonçait
+    // « 1 chantier » et la liste restait vide.
+    expect(ChantierService.filtreCloisonnement(auteur('Entreprise'))).toBeNull();
+  });
+
+  it('un conducteur de travaux, lui, reste cloisonné', () => {
+    const filtre = ChantierService.filtreCloisonnement(auteur('ConducteurTravaux'));
 
     expect(filtre).not.toBeNull();
     // Trois portes : chantier hors circuit, sa propre demande, ou affectation
@@ -45,10 +52,6 @@ describe('filtreCloisonnement — qui voit quoi', () => {
     // aucune — d'où la liste vide.
     const alternatives = filtre[Object.getOwnPropertySymbols(filtre)[0]];
     expect(alternatives).toHaveLength(3);
-  });
-
-  it('un conducteur de travaux aussi', () => {
-    expect(ChantierService.filtreCloisonnement(auteur('ConducteurTravaux'))).not.toBeNull();
   });
 
   it('sans auteur identifié, aucun filtre n’est fabriqué', () => {

@@ -44,8 +44,14 @@ const rejeterChantierSchema = Joi.object({
   }),
 });
 
+// `min(1)` et non `min(2)` : sur un chantier, les bâtiments s'appellent « A »,
+// « B », « C » — c'est même ainsi que le client les décrit. Le plancher à deux
+// caractères refusait ces noms-là d'un 422, sur l'écran de dépôt où le
+// bâtiment est la toute première chose à créer. Les niveaux et les zones
+// acceptaient déjà un caractère : ce plancher était une divergence, pas une
+// règle.
 const creerBatimentSchema = Joi.object({
-  nom: Joi.string().trim().min(2).max(100).required(),
+  nom: Joi.string().trim().min(1).max(100).required(),
   code: Joi.string().trim().max(50).optional().allow('', null),
 });
 
@@ -75,7 +81,9 @@ const creerZoneSchema = Joi.object({
  * répondrait « modifié » sans rien changer.
  */
 const modifierBatimentSchema = Joi.object({
-  nom: Joi.string().trim().min(2).max(100).optional(),
+  // Même plancher qu'à la création : sans quoi un bâtiment « A » se créerait
+  // mais ne se renommerait plus.
+  nom: Joi.string().trim().min(1).max(100).optional(),
   code: Joi.string().trim().max(50).optional().allow('', null),
 }).min(1);
 

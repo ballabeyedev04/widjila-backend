@@ -8,6 +8,8 @@ const AuditLogService = require('./auditLog.service.js');
 const AccountService = require('../../account/service/account.service.js');
 const { SAFE_USER_ATTRIBUTES } = require('../../../utils/formatUser.js');
 const escapeLike = require('../../../utils/escapeLike.js');
+const sequelize = require('../../../config/db.js');
+const EssaiService = require('../../subscription/service/essai.service.js');
 
 /**
  * Gestion des utilisateurs — SUPER-ADMIN plateforme (rôle 'Admin').
@@ -132,7 +134,30 @@ class GestionUtilisateurService {
       updates.mot_de_passe = await bcrypt.hash(data.mot_de_passe, bcryptConfig.saltRounds);
     }
 
-    await utilisateur.update(updates);
+    // Cet écran est la SECONDE porte d'entrée vers un compte actif : le
+    // super-admin peut y débloquer une inscription en attente sans passer par
+    // l'écran « Demandes ». L'essai doit démarrer ici aussi, sinon
+    // l'organisation ouverte par ce chemin garde un `trial_ends_at` NULL,
+    // c'est-à-dire un essai réputé TERMINÉ (config/essai.js) — et se heurte
+    // au mur de l'abonnement dès sa première connexion.
+    const activation = updates.statut === 'actif'
+      && utilisateur.statut === 'en_attente_validation';
+
+    const t = await sequelize.transaction();
+    try {
+      await utilisateur.update(updates, { transaction: t });
+      if (activation) {
+        // APRÈS l'écriture, à dessein : cet écran permet aussi de déplacer un
+        // compte d'une organisation à l'autre. L'instance porte alors déjà la
+        // nouvelle, et c'est bien l'essai de celle où le compte atterrit qu'il
+        // faut démarrer.
+        await EssaiService.demarrerEssai(utilisateur.organisationId, { transaction: t });
+      }
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
 
     // Ne jamais journaliser le mot de passe (ni même son hash) dans l'audit
     const { mot_de_passe: _ignore, ...detailsSurs } = updates;

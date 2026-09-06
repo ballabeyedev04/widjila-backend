@@ -22,33 +22,50 @@
 const OrganisationService = require('../modules/organisation/service/organisation.service.js');
 
 describe('_refusElevation', () => {
-  describe('appelant hors gestion (Entreprise)', () => {
+  describe('appelant hors gestion (Client)', () => {
     it.each(['ChefProjet', 'MaitreOuvrage', 'Admin'])(
       'refuse d’attribuer le rôle %s',
       (role) => {
-        // `Admin` n'est pas dans GESTION côté « rôle visé » pour tous les
-        // chemins, mais il l'est bien dans la liste : la garde le couvre
-        // aussi, en plus du refus explicite déjà présent.
-        const refus = OrganisationService._refusElevation('Entreprise', role);
-        if (role === 'Admin') {
-          // `Admin` figure dans GESTION : il est refusé par cette garde-ci.
-          expect(refus).not.toBeNull();
-        } else {
-          expect(refus).not.toBeNull();
-          expect(refus.success).toBe(false);
-          expect(refus.message).toContain('gestion');
-        }
+        // La garde vit toujours : un intervenant extérieur ne se fabrique pas
+        // un compte de gestion. Elle ne vise plus 'Entreprise', qui EST la
+        // gestion de son organisation.
+        const refus = OrganisationService._refusElevation('Client', role);
+
+        expect(refus).not.toBeNull();
+        expect(refus.success).toBe(false);
+        expect(refus.message).toContain('gestion');
       }
     );
 
-    it.each(['ConducteurTravaux', 'BureauControle', 'MaitreOeuvre', 'Entreprise', 'Client', 'Pilote', 'SousTraitant'])(
+    it.each(['ConducteurTravaux', 'BureauControle', 'MaitreOeuvre', 'Client', 'Pilote', 'SousTraitant'])(
       'laisse attribuer le rôle %s',
       (role) => {
-        // Sans cela, la fonctionnalité demandée — une entreprise constitue son
-        // propre effectif — n'existerait plus.
+        expect(OrganisationService._refusElevation('Client', role)).toBeNull();
+      }
+    );
+  });
+
+  describe('le titulaire constitue son effectif', () => {
+    it.each(['ChefProjet', 'MaitreOuvrage', 'ConducteurTravaux', 'MaitreOeuvre', 'BureauControle'])(
+      'laisse une Entreprise attribuer le rôle %s',
+      (role) => {
+        // C'est son organisation : elle y nomme ses chefs de projet et ses
+        // conducteurs de travaux sans passer par personne.
         expect(OrganisationService._refusElevation('Entreprise', role)).toBeNull();
       }
     );
+
+    it('ne lui ouvre pas pour autant le rôle Admin', () => {
+      // Le super-admin plateforme reste hors de portée — refusé en clair par
+      // `ajouterMembre` et `modifierMembre`, jamais par cette garde-ci.
+      const source = require('fs').readFileSync(
+        require('path').join(__dirname, '..', 'modules', 'organisation', 'service', 'organisation.service.js'),
+        'utf8'
+      );
+
+      expect(source).toContain("data.role === 'Admin'");
+      expect(source).toContain('réservé au super-admin');
+    });
   });
 
   describe('appelant déjà dans GESTION', () => {

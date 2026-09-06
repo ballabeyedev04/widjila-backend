@@ -147,17 +147,34 @@ describe('ajouterMembre — quand l’envoi échoue', () => {
 });
 
 describe('ajouterMembre — garde d’élévation conservée', () => {
-  it('refuse toujours qu’une Entreprise crée un rôle de gestion', async () => {
+  it('refuse toujours qu’un rôle extérieur crée un rôle de gestion', async () => {
     // Non-régression : le troisième paramètre est passé de « le rôle » à
     // « l'auteur complet ». La garde doit continuer de lire le rôle dedans.
+    //
+    // L'auteur n'est plus une Entreprise — celle-ci est désormais la gestion
+    // de son organisation et nomme ses chefs de projet. Un 'Client', lui,
+    // reste un intervenant extérieur.
     const result = await OrganisationService.ajouterMembre(
       ORG,
       { ...DONNEES, role: 'ChefProjet' },
-      { id: 'u-2', role: 'Entreprise', prenom: 'A', nom: 'B' }
+      { id: 'u-2', role: 'Client', prenom: 'A', nom: 'B' }
     );
 
     expect(result.success).toBe(false);
     expect(Utilisateur.create).not.toHaveBeenCalled();
     expect(sendNouveauMembreEmail).not.toHaveBeenCalled();
+  });
+
+  it('refuse à quiconque de fabriquer un super-admin plateforme', async () => {
+    // Y compris au titulaire : le rôle 'Admin' n'appartient pas à
+    // l'organisation, il appartient à la plateforme.
+    const result = await OrganisationService.ajouterMembre(
+      ORG,
+      { ...DONNEES, role: 'Admin' },
+      { id: 'u-2', role: 'Entreprise', prenom: 'A', nom: 'B' }
+    );
+
+    expect(result.success).toBe(false);
+    expect(Utilisateur.create).not.toHaveBeenCalled();
   });
 });

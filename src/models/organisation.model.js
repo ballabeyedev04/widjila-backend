@@ -1,9 +1,11 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/db.js');
 
-// Durée de l'essai gratuit offert à toute nouvelle organisation (cf. message
-// de checkSubscription.middleware.js : « votre période d'essai de 7 jours »).
-const TRIAL_JOURS = 7;
+// Durée de l'essai gratuit et instant de son démarrage : source unique, dans
+// config/essai.js. Le nombre de jours apparaissait ici, dans register(), dans
+// le message de checkSubscription et dans une migration — quatre endroits à
+// tenir d'accord, donc quatre occasions de diverger.
+const { finEssai } = require('../config/essai.js');
 
 /**
  * Organisation — une entreprise cliente de la plateforme (multi-tenant).
@@ -99,7 +101,8 @@ const Organisation = sequelize.define('Organisation', {
     allowNull: true,
     defaultValue: 'Starter'
   },
-  // Trial gratuit de 7 jours.
+  // Essai gratuit — voir config/essai.js pour la durée et pour la raison
+  // pour laquelle l'horloge démarre à la VALIDATION, pas à l'inscription.
   //
   // CORRECTIF (audit § 7) — `trial_ends_at` NULL = ACCÈS GRATUIT PERMANENT.
   // checkSubscription calcule `trialEnded = trial_ends_at && …` : une valeur
@@ -110,13 +113,18 @@ const Organisation = sequelize.define('Organisation', {
   // Le défaut (JS + défaut SQL posé par la migration) garantit désormais que
   // TOUTE organisation naît avec un essai borné, quel que soit le chemin de
   // création — y compris un INSERT hors ORM.
+  //
+  // Une seule voie l'écrase volontairement par NULL : l'inscription publique,
+  // dont l'essai ne démarre qu'à la validation (auth.service.js#register).
+  // L'organisation y est inutilisable jusque-là, personne ne pouvant s'y
+  // connecter — le défaut n'a donc rien à protéger dans ce cas précis.
   // `allowNull` reste à true : la colonne existante contient des NULL tant que
   // la migration 20260814000002 n'est pas passée, et un NOT NULL posé par
   // sync({ alter: true }) échouerait au démarrage en dev.
   trial_ends_at: {
     type: DataTypes.DATE,
     allowNull: true,
-    defaultValue: () => new Date(Date.now() + TRIAL_JOURS * 24 * 60 * 60 * 1000),
+    defaultValue: () => finEssai(),
   },
   // Abonnement actif (paiement Stripe validé)
   is_subscribed: {
