@@ -801,6 +801,13 @@ class ReserveService {
         { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
         { model: Partenaire, as: 'partenaire', attributes: ['id', 'nom', 'type'], required: false },
         { model: Utilisateur, as: 'assigne', attributes: ['id', 'nom', 'prenom', 'photoProfil'] },
+        // L'AUTEUR du constat. `listReserves` le joignait, pas celle-ci — et
+        // les deux alimentent le MÊME rendu de carte, qui affiche « qui a
+        // relevé ça, et quand ». La ligne perdait donc son auteur sur l'onglet
+        // « Réserves » et sur l'accueil, c'est-à-dire sur les deux listes les
+        // plus consultées. Trois colonnes, sur une jointure du même genre que
+        // celle d'`assigne` juste au-dessus.
+        { model: Utilisateur, as: 'createur', attributes: ['id', 'nom', 'prenom'] },
         // Même parti pris que `listReserves` : une seule vignette, pas la
         // galerie (voir le commentaire `separate: true` plus haut).
         { model: Media, as: 'medias', attributes: ['id', 'type', 'url', 'thumbnail_url'], separate: true, limit: 1, order: [['createdAt', 'ASC']] },
