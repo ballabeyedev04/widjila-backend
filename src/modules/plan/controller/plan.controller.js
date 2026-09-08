@@ -31,6 +31,26 @@ exports.listerPlans = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: 'Plans récupérés', data: { plans: result.plans } });
 });
 
+exports.listerPlansRacines = asyncHandler(async (req, res) => {
+  const organisationId = await organisationCible(req, { chantierId: req.params.chantierId });
+  const result = await PlanService.listPlansRacines(organisationId, req.params.chantierId);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: 'Plans globaux récupérés', data: { plans: result.plans } });
+});
+
+exports.listerSousPlans = asyncHandler(async (req, res) => {
+  // L'organisation vient du PLAN appelé, pas d'un paramètre : c'est le service
+  // qui remonte au chantier et vérifie l'appartenance.
+  const organisationId = await organisationCible(req, { planId: req.params.id });
+  const result = await PlanService.listSousPlans(organisationId, req.params.id);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({
+    success: true,
+    message: 'Sous-plans récupérés',
+    data: { sousPlans: result.sousPlans },
+  });
+});
+
 exports.listerTousPlans = asyncHandler(async (req, res) => {
   // Liste transversale : aucune ressource ne désigne l'organisation. Le
   // super-admin voit donc TOUTES les organisations (filtre facultatif
@@ -44,6 +64,69 @@ exports.listerTousPlans = asyncHandler(async (req, res) => {
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: 'Plans récupérés', data: { plans: result.plans } });
+});
+
+/**
+ * `POST /plans/:id/versions` — cahier technique § 11 et § 15.
+ *
+ * Déposer une NOUVELLE VERSION d'un plan existant. Le nom, le chantier et le
+ * rattachement sont repris du plan appelé : c'est la définition même d'une
+ * version — le même plan, un fichier plus récent.
+ *
+ * ── Pourquoi une route dédiée alors que l'upload versionne déjà ───────────
+ *
+ * `POST /chantiers/:id/plans` crée bien la version suivante quand le NOM
+ * coïncide. Mais cela suppose que l'appelant connaisse et réécrive exactement
+ * le nom, à la casse et à l'espace près : une faute de frappe ne produit pas
+ * une erreur, elle crée un SECOND plan qui ressemble au premier. Personne ne
+ * s'en aperçoit avant que la liste n'affiche deux entrées presque identiques.
+ *
+ * En désignant le plan par son identifiant, l'ambiguïté disparaît.
+ *
+ * La discipline et la date, elles, peuvent changer d'une version à l'autre :
+ * elles restent acceptées dans le corps.
+ */
+exports.deposerVersion = asyncHandler(async (req, res) => {
+  const organisationId = await organisationCible(req, { planId: req.params.id });
+
+  const precedent = await PlanService.getPlanPourVersion(organisationId, req.params.id);
+  if (!precedent.success) throw new NotFoundError(precedent.message);
+
+  const plan = precedent.plan;
+  const result = await PlanService.upload(
+    organisationId,
+    plan.chantierId,
+    {
+      // Le NOM fait la version : il est repris du plan désigné, jamais du
+      // corps de la requête.
+      nom: plan.nom,
+      batimentId: plan.batimentId,
+      etageId: plan.etageId,
+      zoneId: plan.zoneId,
+      parentId: plan.parentId,
+      // Ceux-ci peuvent évoluer : un plan d'architecture peut être redéposé
+      // avec une date plus récente, voire une discipline corrigée.
+      format: req.body.format,
+      type_plan: req.body.type_plan !== undefined ? req.body.type_plan : plan.type_plan,
+      date_plan: req.body.date_plan,
+      uploaderId: req.user.id,
+    },
+    req.file,
+    req.user,
+  );
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(201).json({ success: true, message: result.message, data: { plan: result.plan } });
+});
+
+exports.listerReservesDuPlan = asyncHandler(async (req, res) => {
+  const organisationId = await organisationCible(req, { planId: req.params.id });
+  const result = await PlanService.listReservesDuPlan(organisationId, req.params.id);
+  if (!result.success) throw new NotFoundError(result.message);
+  res.status(200).json({
+    success: true,
+    message: 'Réserves du plan récupérées',
+    data: { reserves: result.reserves },
+  });
 });
 
 exports.detailPlan = asyncHandler(async (req, res) => {

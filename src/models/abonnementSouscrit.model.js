@@ -112,6 +112,17 @@ const AbonnementSouscrit = sequelize.define('AbonnementSouscrit', {
     type: DataTypes.UUID,
     allowNull: true
   },
+  // Reçu de paiement archivé — URL rendue par `storage.service.js` (R2 quand
+  // il est configuré, disque sinon).
+  //
+  // Conservée pour que l'historique des paiements puisse proposer le
+  // justificatif des mois plus tard, sans le régénérer — et pour qu'un renvoi
+  // de courriel joigne EXACTEMENT le document déjà remis, pas une nouvelle
+  // version qui pourrait différer.
+  recu_url: {
+    type: DataTypes.STRING(500),
+    allowNull: true,
+  },
   note: {
     type: DataTypes.TEXT,
     allowNull: true

@@ -104,6 +104,19 @@ Lot.belongsTo(Chantier, { foreignKey: 'chantierId', as: 'chantier' });
 Chantier.hasMany(Plan, { foreignKey: 'chantierId', as: 'plans', onDelete: 'CASCADE' });
 Plan.belongsTo(Chantier, { foreignKey: 'chantierId', as: 'chantier' });
 
+// ── Plans de DÉTAIL — un plan dans un plan ──────────────────────────────────
+//
+// Relation récursive : elle donne une profondeur quelconque sous le dernier
+// niveau de structure (le plan d'une pièce dans un appartement) sans ajouter
+// une table par niveau.
+//
+// `SET NULL` et non `CASCADE` : le modèle est `paranoid`, donc ce comportement
+// ne joue qu'en cas de suppression PHYSIQUE. Un plan de détail qui perd son
+// parent redevient alors un plan ordinaire rattaché à son niveau de structure,
+// au lieu de disparaître avec toutes les réserves relevées dessus.
+Plan.hasMany(Plan, { foreignKey: 'parentId', as: 'sousPlans', onDelete: 'SET NULL' });
+Plan.belongsTo(Plan, { foreignKey: 'parentId', as: 'parent' });
+
 Zone.hasMany(Plan, { foreignKey: 'zoneId', as: 'plans' });
 Plan.belongsTo(Zone, { foreignKey: 'zoneId', as: 'zone' });
 
@@ -200,6 +213,9 @@ Reserve.hasMany(ReserveAffectation, { foreignKey: 'reserveId', as: 'affectations
 ReserveAffectation.belongsTo(Reserve, { foreignKey: 'reserveId', as: 'reserve' });
 ReserveAffectation.belongsTo(Utilisateur, { foreignKey: 'utilisateurId', as: 'utilisateur' });
 ReserveAffectation.belongsTo(Organisation, { foreignKey: 'entrepriseId', as: 'entreprise' });
+// L'annuaire du chantier — le destinataire le plus fréquent d'une affectation :
+// la plupart des entreprises d'un chantier n'ont pas de compte sur la plateforme.
+ReserveAffectation.belongsTo(Partenaire, { foreignKey: 'partenaireId', as: 'partenaire' });
 
 // Position / médias / commentaires / historique
 Reserve.hasOne(ReservePosition, { foreignKey: 'reserveId', as: 'position', onDelete: 'CASCADE' });

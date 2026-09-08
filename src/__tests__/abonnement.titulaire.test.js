@@ -104,15 +104,31 @@ describe('cloisonnement', () => {
   it("l'organisation vient du JETON, jamais du corps ni de la requête", () => {
     // C'est ce qui rend l'élargissement sans danger : un compte 'Entreprise'
     // n'atteint que SA facturation, quoi qu'il envoie.
-    const lignes = sourceControleur
-      .split('\n')
-      .filter((l) => /SubscriptionService\.(getHistorique|creerPaymentIntent|changerPlan|annulerAbonnement|getStatus|getPlanDetails)\(/.test(l));
+    // On lit l'APPEL ENTIER, pas la ligne : un appel réparti sur plusieurs
+    // lignes — ce qu'impose un argument de plus — laisserait sinon passer
+    // n'importe quoi, et le test se croirait vert. Sans expression
+    // rationnelle : une découpe simple se relit sans effort.
+    const methodes = [
+      'getHistorique', 'creerPaymentIntent', 'changerPlan',
+      'annulerAbonnement', 'getStatus', 'getPlanDetails',
+    ];
 
-    expect(lignes.length).toBeGreaterThanOrEqual(5);
-    for (const ligne of lignes) {
-      expect(ligne).toContain('req.user.organisationId');
-      expect(ligne).not.toContain('req.body.organisationId');
-      expect(ligne).not.toContain('req.query.organisationId');
+    const appels = [];
+    for (const methode of methodes) {
+      const ancre = `SubscriptionService.${methode}(`;
+      let i = sourceControleur.indexOf(ancre);
+      while (i !== -1) {
+        const fin = sourceControleur.indexOf(');', i);
+        appels.push(sourceControleur.slice(i + ancre.length, fin));
+        i = sourceControleur.indexOf(ancre, fin);
+      }
+    }
+
+    expect(appels.length).toBeGreaterThanOrEqual(5);
+    for (const appel of appels) {
+      expect(appel).toContain('req.user.organisationId');
+      expect(appel).not.toContain('req.body.organisationId');
+      expect(appel).not.toContain('req.query.organisationId');
     }
   });
 });

@@ -10,8 +10,51 @@ const uploadPlanSchema = Joi.object({
   batimentId: uuid.optional().allow(null, ''),
   etageId: uuid.optional().allow(null, ''),
   zoneId: uuid.optional().allow(null, ''),
+  // Plan PARENT — le plan dont celui-ci est le détail (une pièce dans un
+  // appartement, une façade dans un bâtiment).
+  //
+  // Prioritaire sur les trois précédents : un plan de détail hérite de la
+  // place de son parent, et le rattachement envoyé à côté est ignoré (voir
+  // plan.service.js#_resoudreRattachement). Deux places contradictoires pour
+  // un même plan seraient impossibles à arbitrer plus tard.
+  parentId: uuid.optional().allow(null, ''),
   nom: Joi.string().trim().min(2).max(200).required(),
   format: Joi.string().valid('pdf', 'dwg', 'ifc').optional(),
+  /**
+   * Discipline du plan — « Architecture », « Électricité », « Plomberie »…
+   * (cahier technique § 4, champ « Type »).
+   *
+   * Libre, parce que le document dit « etc. » : une liste fermée obligerait à
+   * livrer une nouvelle version du serveur pour accepter « Désenfumage ».
+   * Borné à 80 caractères, comme la colonne.
+   */
+  type_plan: Joi.string().trim().max(80).optional().allow(null, ''),
+  /**
+   * Date DU PLAN, distincte de la date de dépôt (cahier technique § 4).
+   *
+   * Bornée au futur proche : un plan daté de 2040 est une faute de frappe, pas
+   * une prévision. On tolère un an d'avance — les plans d'exécution d'un
+   * chantier long peuvent être datés en amont.
+   */
+  date_plan: Joi.date().iso().max(new Date(Date.now() + 365 * 24 * 3600 * 1000))
+    .optional().allow(null, ''),
+});
+
+/**
+ * Déposer une nouvelle version d'un plan — cahier technique § 11.
+ *
+ * Ni `nom` ni rattachement : ils sont REPRIS du plan désigné par l'URL. Les
+ * accepter permettrait de renommer ou de déplacer un plan sous couvert d'en
+ * verser une version, et l'historique cesserait de décrire le même document.
+ *
+ * Seuls la discipline et la date peuvent légitimement changer d'une version à
+ * l'autre — un plan corrigé porte une date plus récente.
+ */
+const deposerVersionSchema = Joi.object({
+  format: Joi.string().valid('pdf', 'dwg', 'ifc').optional(),
+  type_plan: Joi.string().trim().max(80).optional().allow(null, ''),
+  date_plan: Joi.date().iso().max(new Date(Date.now() + 365 * 24 * 3600 * 1000))
+    .optional().allow(null, ''),
 });
 
 /**
@@ -111,4 +154,4 @@ const modifierHotspotSchema = Joi.object({
   page: Joi.number().integer().min(1).max(10000).optional(),
 }).min(1);
 
-module.exports = { uploadPlanSchema, creerAnnotationSchema, modifierAnnotationSchema, creerHotspotSchema, modifierHotspotSchema };
+module.exports = { uploadPlanSchema, deposerVersionSchema, creerAnnotationSchema, modifierAnnotationSchema, creerHotspotSchema, modifierHotspotSchema };

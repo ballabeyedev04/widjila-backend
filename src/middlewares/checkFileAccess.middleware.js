@@ -137,6 +137,10 @@ function cheminRelatifSur(cheminBrut) {
 }
 
 // ── Résolution du propriétaire ──────────────────────────────────────────────
+/** Premiers segments qui désignent un média — voir `resoudreProprietaire`. */
+const EST_MEDIA = new Set(['photos', 'videos', 'audios']);
+
+
 
 /** Organisation propriétaire d'un chantier. */
 async function organisationDuChantier(chantierId) {
@@ -206,9 +210,33 @@ async function resoudreProprietaire(sousDossier, urls) {
   // Le test est un `startsWith` : `media.service.js` produit aujourd'hui un
   // sous-dossier corrompu pour les vidéos (échappement `\v` — voir rapport),
   // le premier segment n'est donc pas toujours exactement 'medias'.
-  if (sousDossier.startsWith('medias')) {
+  //
+  // TROIS familles de préfixes, et il en fallait trois :
+  //   - `medias/...`  — l'ancien dossier à plat, encore porté par tous les
+  //     fichiers déjà en ligne ;
+  //   - `photos/`, `videos/`, `audios/` — le rangement par projet et par
+  //     réserve demandé par le cahier technique § 5.
+  //
+  // Sans les seconds, chaque photo déposée après la mise en service aurait
+  // répondu « Fichier introuvable » : le sous-dossier serait tombé hors de la
+  // liste blanche, et le refus par défaut se serait appliqué.
+  if (EST_MEDIA.has(sousDossier) || sousDossier.startsWith('medias')) {
+    // `url` OU `thumbnail_url` — et c'est le second qui manquait.
+    //
+    // `media.service.js` stocke DEUX fichiers pour une photo : l'original et
+    // sa vignette, chacun avec sa propre URL. Or toutes les listes servent la
+    // VIGNETTE (`_apercu` côté mobile, `attributes: ['thumbnail_url']` côté
+    // serveur) : la liste des réserves, les repères d'un plan, le tableau de
+    // bord.
+    //
+    // En ne cherchant que `url`, ce middleware ne trouvait aucun propriétaire
+    // pour une vignette et répondait « Fichier introuvable » (404). Toutes les
+    // photos de réserve étaient donc absentes des listes — et le refus était
+    // même mis en cache une minute, ce qui le faisait persister après un
+    // simple rafraîchissement.
     const media = await Media.findOne({
-      where: { url: where }, attributes: ['id', 'reserveId', 'inspectionId'],
+      where: { [Op.or]: [{ url: where }, { thumbnail_url: where }] },
+      attributes: ['id', 'reserveId', 'inspectionId'],
     });
     if (!media) return null;
     const organisationId = media.reserveId

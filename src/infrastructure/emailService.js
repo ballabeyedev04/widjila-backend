@@ -113,6 +113,26 @@ async function sendInscriptionRejeteeEmail({ to, nom, prenom, motif, organisatio
 }
 
 /**
+ * Email — reçu de paiement, avec le PDF en pièce jointe.
+ *
+ * Le justificatif VOYAGE avec le message : demander au client d'aller le
+ * chercher dans l'application pour l'envoyer à sa comptabilité ajouterait une
+ * étape à chaque paiement. Il reste également archivé et consultable depuis
+ * l'historique.
+ */
+async function sendRecuPaiementEmail({
+  to, prenom, organisationNom, planNom, montant, numero, pdf,
+}) {
+  const template = require('../templates/mail/recuPaiement.template.js');
+  return sendEmail({
+    to,
+    subject: `Votre reçu de paiement — ${planNom}`,
+    html: template({ prenom, organisationNom, planNom, montant, numero }),
+    attachments: [{ filename: `recu-${numero}.pdf`, content: pdf }],
+  });
+}
+
+/**
  * Emails du circuit de validation des chantiers.
  *
  * Les trois messages partagent un gabarit — voir
@@ -226,6 +246,7 @@ module.exports = {
   sendInscriptionValideeEmail,
   sendInscriptionRejeteeEmail,
   sendChantierValidationEmail,
+  sendRecuPaiementEmail,
   sendNouveauMembreEmail,
   sendDemandeSuppressionEmail,
 };

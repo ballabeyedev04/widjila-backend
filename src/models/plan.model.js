@@ -37,6 +37,24 @@ const Plan = sequelize.define('Plan', {
     type: DataTypes.UUID,
     allowNull: true
   },
+  // Plan PARENT — un plan de détail à l'intérieur d'un autre plan.
+  //
+  // Nul pour l'immense majorité des plans : leur place vient alors de leurs
+  // liens de structure (`batimentId`, `etageId`, `zoneId`), qui restent la
+  // source de vérité pour « dans quel bâtiment, à quel étage ».
+  //
+  // Renseigné, il ouvre une profondeur quelconque SOUS le dernier niveau de
+  // structure — le plan d'une pièce dans un appartement, celui d'une façade
+  // dans un bâtiment. Le plan de détail hérite alors des liens de structure de
+  // son parent (plan.service.js#upload) : une réserve posée dessus reste
+  // localisée dans la bonne zone, ce dont dépendent les rapports et les
+  // filtres.
+  //
+  // Voir la migration 20260907000001 pour le raisonnement complet.
+  parentId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
   zoneId: {
     type: DataTypes.UUID,
     allowNull: true
@@ -49,6 +67,52 @@ const Plan = sequelize.define('Plan', {
     type: DataTypes.INTEGER,
     allowNull: false,
     defaultValue: 1
+  },
+  /**
+   * Version COURANTE du plan — cahier technique § 10 et § 15.
+   *
+   * « La version courante est identifiée par is_current = true ».
+   *
+   * Le code la déduisait du plus grand numéro de version. C'était équivalent
+   * tant qu'on ne voulait rien d'autre, mais le § 15 demande de pouvoir
+   * « afficher clairement la version active » sans déplacer automatiquement
+   * les réserves — donc de désigner la version courante, et pas seulement de
+   * la calculer.
+   *
+   * Une seule version d'un plan est courante à la fois : le dépôt bascule la
+   * précédente à `false` dans la même transaction.
+   */
+  is_current: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true
+  },
+  /**
+   * Discipline du plan — « Architecture », « Électricité », « Plomberie »…
+   * (cahier technique § 4, champ « Type »).
+   *
+   * Texte libre borné et NON un ENUM : le document dit « etc. ». Un ENUM
+   * imposerait une migration à chaque discipline nouvelle — désenfumage,
+   * courants faibles, VRD — pour une donnée qui n'entre dans aucune règle
+   * métier et ne sert qu'à ranger et à filtrer.
+   *
+   * À ne pas confondre avec `format` juste en dessous, qui décrit le FICHIER
+   * (pdf, dwg, ifc) et non son contenu.
+   */
+  type_plan: {
+    type: DataTypes.STRING(80),
+    allowNull: true
+  },
+  /**
+   * Date DU PLAN (cahier technique § 4), distincte de `createdAt` qui est la
+   * date de DÉPÔT.
+   *
+   * Un plan daté du 3 mars peut être versé en septembre : confondre les deux
+   * ferait croire que le chantier travaille sur un document récent.
+   */
+  date_plan: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
   },
   fichier_url: {
     type: DataTypes.TEXT,
@@ -99,6 +163,7 @@ const Plan = sequelize.define('Plan', {
     { fields: ['zone_id'] },
     { fields: ['batiment_id'] },
     { fields: ['etage_id'] },
+    { fields: ['chantier_id', 'type_plan'] },
     // Une version d'un plan est unique DANS son chantier (audit § 6).
     // Sans cette contrainte, deux uploads simultanés du même plan créaient
     // silencieusement deux « version 3 », et la suppression de la dernière

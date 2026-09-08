@@ -6,6 +6,7 @@ const {
   Organisation, PlanAbonnement, AbonnementSouscrit, EvenementPaiement,
 } = require('../../../models/index.js');
 const logger = require('../../../utils/logger.js');
+const RecuPaiementService = require('./recuPaiement.service.js');
 const DroitsService = require('./droits.service.js');
 
 /**
@@ -261,7 +262,7 @@ class SubscriptionService {
    * Les données de carte ne transitent jamais par le backend (PCI-DSS) :
    * Stripe les collecte directement depuis le client via le `clientSecret`.
    */
-  static async creerPaymentIntent(organisationId, planId) {
+  static async creerPaymentIntent(organisationId, planId, utilisateurId = null) {
     // On accepte l'identifiant OU le code : le mobile et le web manipulent
     // naturellement `essentiel`/`pro`, l'administration des UUID.
     const plan = await PlanAbonnement.findOne({
@@ -330,6 +331,11 @@ class SubscriptionService {
       fournisseur: 'stripe',
       reference_paiement: paymentIntent.id,
       stripe_customer_id: customerId,
+      // Qui engage la dépense : c'est à LUI que partira le reçu, pas à une
+      // adresse générique. Sans cette trace, le justificatif ne pouvait aller
+      // qu'à l'adresse de l'organisation — souvent une boîte que personne ne
+      // relève.
+      activee_par: utilisateurId || null,
     });
 
     return {
@@ -552,6 +558,11 @@ class SubscriptionService {
 
     await SubscriptionService._synchroniserOrganisation(souscription);
     logger.info(`[paiement] Abonnement ${souscription.plan_code} activé pour ${souscription.organisationId}`);
+
+    // Le reçu part EN DERNIER, et sans jamais pouvoir faire échouer ce qui
+    // précède : l'abonnement est payé et actif, un PDF manquant se rattrape,
+    // une activation perdue non. `emettre` avale ses propres erreurs.
+    await RecuPaiementService.emettre(souscription);
   }
 
   static async _marquerEchec(referencePaiement) {

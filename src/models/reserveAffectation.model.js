@@ -22,7 +22,31 @@ const ReserveAffectation = sequelize.define('ReserveAffectation', {
     type: DataTypes.UUID,
     allowNull: true
   },
+  /**
+   * Entreprise UTILISATRICE de la plateforme (table `organisations`).
+   *
+   * Ne convient qu'aux entreprises qui ont leur propre compte : c'est ce champ
+   * qui fait apparaître la réserve dans LEUR espace. La plupart des entreprises
+   * d'un chantier n'en ont pas — voir `partenaireId` juste en dessous.
+   */
   entrepriseId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  /**
+   * Entreprise de l'ANNUAIRE du chantier (table `partenaires`).
+   *
+   * C'est le cas COURANT, et il manquait. L'écran « Choisir qui affecter » du
+   * mobile propose l'annuaire dans son onglet « Intervenant », mais envoyait
+   * l'identifiant retenu dans `entrepriseId` : le serveur cherchait alors une
+   * organisation portant un identifiant de partenaire, n'en trouvait aucune, et
+   * répondait « Entreprise introuvable » pour une entreprise qui existait.
+   *
+   * Même division du travail que sur la réserve elle-même
+   * (`reserve.model.js`) : `partenaireId` dit QUI est responsable,
+   * `entrepriseId` dit à quel espace client l'affectation doit apparaître.
+   */
+  partenaireId: {
     type: DataTypes.UUID,
     allowNull: true
   },
@@ -38,7 +62,8 @@ const ReserveAffectation = sequelize.define('ReserveAffectation', {
   indexes: [
     { fields: ['reserve_id'] },
     { fields: ['utilisateur_id'] },
-    { fields: ['entreprise_id'] }
+    { fields: ['entreprise_id'] },
+    { fields: ['partenaire_id'] }
   ]
 });
 

@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const QRCode = require('qrcode');
 const {
   Reserve, Chantier, PieceJointe, ReserveAffectation, Utilisateur, Organisation,
-  Signature, ReserveHistorique,
+  Partenaire, Signature, ReserveHistorique,
 } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
@@ -15,6 +15,22 @@ const ReserveService = require('./reserve.service.js');
  * Réserves — extensions module 5 : pièces jointes, affectations multiples,
  * signatures et QR code de traçabilité.
  */
+/**
+ * Les TROIS destinataires possibles d'une affectation, joints.
+ *
+ * Écrit une fois : la création et la lecture rendent ainsi exactement la même
+ * forme, et l'une ne peut pas se mettre à renvoyer un nom que l'autre omet.
+ *
+ * `required: false` partout — une affectation ne porte qu'UN destinataire, les
+ * deux autres jointures sont vides par construction. En `required: true`, la
+ * ligne ne remonterait jamais.
+ */
+const AFFECTATION_DESTINATAIRES = [
+  { model: Utilisateur, as: 'utilisateur', attributes: ['id', 'nom', 'prenom', 'photoProfil'], required: false },
+  { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'], required: false },
+  { model: Partenaire, as: 'partenaire', attributes: ['id', 'nom', 'type'], required: false },
+];
+
 class ReserveExtraService {
 
   // -------------------- PIÈCES JOINTES --------------------
@@ -144,7 +160,13 @@ class ReserveExtraService {
    *        Paramètre optionnel ajouté en fin de signature pour ne casser aucun
    *        appelant existant ; le contrôleur doit lui passer `req.user.id`.
    */
-  static async affecter(organisationId, reserveId, { utilisateurId, entrepriseId }, dateAffectation = null, acteurId = null) {
+  static async affecter(
+    organisationId,
+    reserveId,
+    { utilisateurId, entrepriseId, partenaireId },
+    dateAffectation = null,
+    acteurId = null,
+  ) {
     const reserve = await ReserveExtraService._verifierReserve(organisationId, reserveId);
     if (!reserve) return { success: false, message: 'Réserve introuvable dans cette organisation' };
 
@@ -161,6 +183,14 @@ class ReserveExtraService {
       const erreur = await ReserveService._verifierEntreprise(organisationId, entrepriseId);
       if (erreur) return { success: false, message: erreur };
     }
+    // L'ANNUAIRE du chantier — le destinataire le plus fréquent. Contrôlé par
+    // la même règle que `reserves.partenaireId` : la fiche doit appartenir à
+    // l'annuaire de CETTE organisation, sinon un identifiant deviné désignerait
+    // l'entreprise d'un autre client.
+    if (partenaireId) {
+      const erreur = await ReserveService._verifierPartenaire(organisationId, partenaireId);
+      if (erreur) return { success: false, message: erreur };
+    }
 
     // CORRECTIF (audit § 3 / § 8) — une affectation est une modification de la
     // réserve : la règle « toute modification est historisée » l'impose, et
@@ -173,6 +203,7 @@ class ReserveExtraService {
         reserveId,
         utilisateurId: utilisateurId || null,
         entrepriseId: entrepriseId || null,
+        partenaireId: partenaireId || null,
         date_affectation: dateAffectation ? new Date(dateAffectation) : new Date(),
       }, { transaction: t });
 
@@ -184,6 +215,7 @@ class ReserveExtraService {
           affectationId: affectation.id,
           utilisateurId: utilisateurId || null,
           entrepriseId: entrepriseId || null,
+          partenaireId: partenaireId || null,
         },
       }, { transaction: t });
 
@@ -193,7 +225,25 @@ class ReserveExtraService {
       throw err;
     }
 
-    return { success: true, message: 'Intervenant affecté à la réserve', affectation };
+    // Rechargée AVEC ses associations avant de répondre.
+    //
+    // `create` rend la ligne BRUTE : trois clés étrangères, aucun nom. Le
+    // client l'insérait telle quelle en tête de sa liste et affichait « — » à
+    // la place du destinataire, jusqu'au prochain rechargement complet — juste
+    // après le geste où l'on veut précisément vérifier qu'on a désigné la
+    // bonne personne.
+    //
+    // Le POST rend donc désormais exactement la même forme que le GET : le
+    // client n'a qu'un seul format à savoir lire.
+    const complete = await ReserveAffectation.findByPk(affectation.id, {
+      include: AFFECTATION_DESTINATAIRES,
+    });
+
+    return {
+      success: true,
+      message: 'Intervenant affecté à la réserve',
+      affectation: complete || affectation,
+    };
   }
 
   static async listAffectations(organisationId, reserveId) {
@@ -202,10 +252,7 @@ class ReserveExtraService {
 
     const affectations = await ReserveAffectation.findAll({
       where: { reserveId },
-      include: [
-        { model: Utilisateur, as: 'utilisateur', attributes: ['id', 'nom', 'prenom', 'photoProfil'] },
-        { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
-      ],
+      include: AFFECTATION_DESTINATAIRES,
       order: [['date_affectation', 'DESC']],
     });
     return { success: true, affectations };
@@ -227,6 +274,7 @@ class ReserveExtraService {
         action: 'desaffectation',
         anciennes_valeurs: {
           affectationId: affectation.id,
+          partenaireId: affectation.partenaireId || null,
           utilisateurId: affectation.utilisateurId || null,
           entrepriseId: affectation.entrepriseId || null,
         },

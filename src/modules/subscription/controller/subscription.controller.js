@@ -26,7 +26,11 @@ exports.creerPaymentIntent = asyncHandler(async (req, res) => {
   const { planId } = req.body;
   if (!planId) throw new BadRequestError('Plan requis');
 
-  const result = await SubscriptionService.creerPaymentIntent(req.user.organisationId, planId);
+  // `req.user.id` : le reçu ira à celui qui paie, pas à une adresse
+  // générique. Il vient du JETON, jamais du corps de la requête.
+  const result = await SubscriptionService.creerPaymentIntent(
+    req.user.organisationId, planId, req.user.id
+  );
   if (!result.success) throw new BadRequestError(result.message);
 
   res.status(200).json({

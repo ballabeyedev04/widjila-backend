@@ -18,6 +18,7 @@ const validate = require('../../../middlewares/validate.middleware.js');
 const {
   creerReserveSchema, modifierReserveSchema, changerStatutReserveSchema, ajouterCommentaireSchema,
   creerSerieReservesSchema, signerReserveSchema, affecterReserveSchema,
+  creerReserveSurPlanSchema,
 } = require('../validation/reserve.validation.js');
 
 // Le chantierId est porté par l'URL → injecté dans le body avant validation Joi
@@ -43,6 +44,24 @@ router.post(
   reserveController.creerReserve
 );
 
+// Créer une réserve DEPUIS UN PLAN — cahier technique § 11 et § 12.
+//
+// Le chantier est déduit du plan (voir `creerReserveSurPlan`) : le corps de la
+// requête n'a donc pas à le porter. `injectPlanId` le pose avant la validation
+// Joi, qui exige toujours `chantierId` — c'est le contrôleur qui le complète.
+//
+// Mêmes rôles que la création par chantier : relever une réserve est le même
+// geste, quel que soit le chemin par lequel on y arrive.
+router.post(
+  '/plans/:id/reserves',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...RESERVE_INTERVENANTS),
+  validate(creerReserveSurPlanSchema),
+  reserveController.creerReserveSurPlan
+);
+
 // Liste TRANSVERSALE (tous chantiers de l'organisation) — écran « Réserves »
 // de premier niveau côté mobile. Déclarée avant `/reserves/:id` par lisibilité :
 // les deux motifs ne se recouvrent pas (`:id` exige un segment), l'ordre n'est
@@ -52,6 +71,22 @@ router.get('/reserves', auth, checkActiveUser, checkSubscription, paginate(), re
 router.get('/reserves/:id', auth, checkActiveUser, checkSubscription, reserveController.detailReserve);
 
 router.put(
+  '/reserves/:id',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...OPERATIONNEL_CONTROLE),
+  validate(modifierReserveSchema),
+  reserveController.modifierReserve
+);
+
+// `PATCH /reserves/:id` — cahier technique § 11.
+//
+// Alias exact de `PUT` juste au-dessus : mêmes gardes, même schéma, même
+// contrôleur. Le document liste `PATCH`, et c'est le verbe juste — le schéma
+// n'exige aucun champ, toute modification est donc partielle par nature.
+// `PUT` reste servi : les clients en production l'utilisent.
+router.patch(
   '/reserves/:id',
   auth,
   checkActiveUser,
@@ -226,6 +261,23 @@ router.post(
 );
 
 router.get('/reserves/:id/medias', auth, checkActiveUser, checkSubscription, paginate(), mediaController.listerMedias);
+
+// `POST /reserves/:id/photos` — cahier technique § 11.
+//
+// Alias de `/medias` juste au-dessus. Le document ne parle que de photos
+// (`RESERVE_PHOTO` dans son § 10) ; l'application accepte aussi vidéos et
+// mémos vocaux sur la même route, le `type` du corps les distingue. Un second
+// chemin coûte deux lignes et évite au client de deviner le nôtre.
+router.post(
+  '/reserves/:id/photos',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...RESERVE_INTERVENANTS, ...SOUS_TRAITANT),
+  upload.media.single('fichier'),
+  upload.validateMagicBytes,
+  mediaController.ajouterMedia
+);
 
 router.delete(
   '/medias/:mediaId',

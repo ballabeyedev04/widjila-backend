@@ -12,6 +12,64 @@ const logger = require('../../../utils/logger.js');
  * ressource cible (réserve ou inspection) appartient à l'organisation
  * de l'utilisateur connecté (cf. audit sécurité — failles corrigées).
  */
+/**
+ * Dossier de stockage d'un média — cahier technique § 5.
+ *
+ * ```
+ * photos/projet_{chantierId}/reserves/reserve_{reserveId}/
+ * ```
+ *
+ * ── Pourquoi le chantier dans le chemin ───────────────────────────────────
+ *
+ * C'est l'unité d'exploitation : on archive un chantier, on restaure un
+ * chantier, on exporte les photos d'un chantier. Sans lui, ces trois
+ * opérations demandent de lire la base pour savoir quel fichier appartient à
+ * quoi — et deviennent impraticables à la main.
+ *
+ * ── Les cas hors réserve ──────────────────────────────────────────────────
+ *
+ * Une INSPECTION porte aussi des médias. Elle appartient elle aussi à un
+ * chantier : elle est rangée sous le même projet, dans `inspections/` plutôt
+ * que `reserves/`. Un média sans parent — cas qui ne devrait pas se produire —
+ * retombe sur l'ancien dossier plutôt que d'échouer : perdre un cliché parce
+ * qu'on ne sait pas où le classer serait le pire des deux résultats.
+ *
+ * ── Vidéos et sons ────────────────────────────────────────────────────────
+ *
+ * Le document ne parle que de `photos/`, mais l'application accepte aussi des
+ * vidéos et des mémos vocaux sur une réserve. Ils suivent la même
+ * arborescence sous leur propre racine : les ranger ailleurs casserait
+ * justement le rangement par chantier que le § 5 demande.
+ */
+async function _dossierDuMedia(type, reserveId, inspectionId) {
+  const racine = type === 'video' ? 'videos' : type === 'audio' ? 'audios' : 'photos';
+
+  if (reserveId) {
+    const reserve = await Reserve.findByPk(reserveId, {
+      attributes: ['id', 'chantierId'],
+      paranoid: false,
+    });
+    if (reserve) {
+      return `${racine}/projet_${reserve.chantierId}/reserves/reserve_${reserveId}`;
+    }
+  }
+
+  if (inspectionId) {
+    const inspection = await Inspection.findByPk(inspectionId, {
+      attributes: ['id', 'chantierId'],
+      paranoid: false,
+    });
+    if (inspection) {
+      return `${racine}/projet_${inspection.chantierId}/inspections/inspection_${inspectionId}`;
+    }
+  }
+
+  // Repli : l'ancien dossier à plat. Le contrôle d'accès aux fichiers
+  // (`checkFileAccess`) reconnaît les deux formes, les médias déjà en ligne
+  // restent donc lisibles sans migration de données.
+  return type === 'video' ? 'medias/videos' : type === 'audio' ? 'medias/audios' : 'medias/photos';
+}
+
 class MediaService {
 
   // -------------------- VÉRIFICATIONS D'APPARTENANCE --------------------
@@ -107,13 +165,22 @@ class MediaService {
       }
     }
 
-    const sousDossier = type === 'video' ? 'medias/videos' : type === 'audio' ? 'medias/audios' : 'medias/photos';
+    // Rangé sous son projet et sa réserve (cahier § 5) plutôt que dans un
+    // dossier unique où plus rien ne se retrouve à la main.
+    const sousDossier = await _dossierDuMedia(type, reserveId, inspectionId);
     const url = await storeFile(fichier.buffer, fichier.originalname, sousDossier);
 
     // Uniquement pour les images : `sharp` lèverait sur une vidéo ou un son,
     // et `_vignette` renverrait `null` de toute façon — autant ne pas payer
     // la tentative.
-    const thumbnailUrl = sousDossier === 'medias/photos'
+    //
+    // La condition porte sur le TYPE, et non plus sur le nom du dossier. Elle
+    // comparait `sousDossier === 'medias/photos'`, ce qui a cessé d'être vrai
+    // le jour où les fichiers ont été rangés par projet (cahier § 5) :
+    // AUCUNE vignette n'aurait plus été produite, et toutes les listes seraient
+    // reparties chercher l'original de plusieurs mégaoctets. Le type, lui, ne
+    // dépend pas du rangement.
+    const thumbnailUrl = type === 'photo'
       ? await MediaService._vignette(fichier.buffer, fichier.originalname, sousDossier)
       : null;
 

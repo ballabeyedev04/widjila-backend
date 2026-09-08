@@ -4,6 +4,9 @@ const ReserveService = require('../service/reserve.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { BadRequestError, NotFoundError } = require('../../../errors/AppError.js');
 const { organisationCible, estSuperAdmin } = require('../../../utils/organisationRequete.js');
+// Le plan sert à DÉDUIRE le chantier d'une réserve créée depuis lui
+// (`creerReserveSurPlan`) ; le chantier porte le cloisonnement multi-tenant.
+const { Plan, Chantier } = require('../../../models/index.js');
 
 /**
  * Une réserve n'a pas d'`organisationId` : elle la tient de son chantier —
@@ -27,6 +30,41 @@ exports.listerReserves = asyncHandler(async (req, res) => {
     message: 'Réserves récupérées',
     data: { reserves: result.reserves, total: result.total },
   });
+});
+
+/**
+ * `POST /plans/:id/reserves` — cahier technique § 11 et § 12.
+ *
+ * Le document décrit la création d'une réserve DEPUIS UN PLAN, avec un corps
+ * qui ne porte que l'observation, l'entreprise, la gravité, l'échéance et les
+ * coordonnées — pas de `chantierId`. C'est cohérent : quand on relève un
+ * défaut, on est sur un plan, et le plan sait à quel chantier il appartient.
+ *
+ * Le chantier est donc DÉDUIT du plan, jamais lu dans le corps de la requête.
+ * Un `chantierId` envoyé à côté serait au mieux redondant, au pire
+ * contradictoire — et arbitrer entre les deux plus tard serait impossible.
+ *
+ * Le reste — validation, contrôles d'appartenance, numérotation, position,
+ * historique — passe par le MÊME service que `POST /chantiers/:id/reserves`.
+ * Deux chemins d'écriture pour un même objet finiraient par diverger.
+ */
+exports.creerReserveSurPlan = asyncHandler(async (req, res) => {
+  const organisationId = await organisationCible(req, { planId: req.params.id });
+
+  const plan = await Plan.findOne({
+    where: { id: req.params.id },
+    attributes: ['id', 'chantierId'],
+    include: [{ model: Chantier, as: 'chantier', attributes: ['id'], where: { organisationId }, required: true }],
+  });
+  if (!plan) throw new NotFoundError('Plan introuvable dans cette organisation');
+
+  const result = await ReserveService.creerReserve(
+    organisationId,
+    { ...req.body, chantierId: plan.chantierId, planId: plan.id },
+    req.user.id,
+  );
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(201).json({ success: true, message: result.message, data: { reserve: result.reserve } });
 });
 
 exports.listerToutesReserves = asyncHandler(async (req, res) => {

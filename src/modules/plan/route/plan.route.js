@@ -16,7 +16,7 @@ const { OPERATIONNEL, OPERATIONNEL_CONTROLE, DEPOSANT } = require('../../../conf
 const validate = require('../../../middlewares/validate.middleware.js');
 const {
   uploadPlanSchema, creerAnnotationSchema, modifierAnnotationSchema,
-  creerHotspotSchema, modifierHotspotSchema,
+  creerHotspotSchema, modifierHotspotSchema, deposerVersionSchema,
 } = require('../validation/plan.validation.js');
 
 // Le chantierId est porté par l'URL → injecté dans le body avant validation Joi
@@ -46,6 +46,23 @@ router.post(
   planController.uploaderPlan
 );
 
+// Plans GLOBAUX du chantier — le point d'entrée de la navigation par niveau.
+//
+// Déclarée AVANT `/chantiers/:chantierId/plans` : les deux motifs ne se
+// recouvrent pas (Express compare le chemin complet), mais l'ordre suit celui
+// du parcours — on entre par les plans globaux, puis on descend par
+// `/plans/:id/sous-plans`.
+//
+// Lecture seule, mêmes droits que la liste complète : consulter la racine de
+// l'arborescence ne demande pas plus que consulter les plans du chantier.
+router.get(
+  '/chantiers/:chantierId/plans/racines',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  planController.listerPlansRacines
+);
+
 // paginate() : plafonne page/limit avant que la query n'atteigne le service
 // (voir pagination.middleware.js — `?limit=500000` chargeait tout le chantier).
 router.get('/chantiers/:chantierId/plans', auth, checkActiveUser, checkSubscription, paginate(), planController.listerPlans);
@@ -55,8 +72,41 @@ router.get('/plans', auth, checkActiveUser, checkSubscription, planController.li
 
 router.get('/plans/:id', auth, checkActiveUser, checkSubscription, planController.detailPlan);
 
+// Sous-plans DIRECTS d'un plan — la descente d'un cran dans l'arborescence.
+//
+// Déclarée après `/plans/:id` sans ambiguïté : les deux motifs ne se
+// recouvrent pas. Lecture seule, ouverte aux mêmes comptes que le détail :
+// consulter un plan de détail ne demande pas plus de droits que consulter le
+// plan dont il dépend.
+router.get('/plans/:id/sous-plans', auth, checkActiveUser, checkSubscription, planController.listerSousPlans);
+
+// Réserves posées sur un plan — cahier technique § 11.
+//
+// Le détail du plan les porte déjà ; cette route sert à les RAFRAÎCHIR seules,
+// après une création, sans re-télécharger la fiche du plan. Mêmes droits que le
+// détail : consulter les repères d'un plan ne demande pas plus que consulter le
+// plan.
+router.get('/plans/:id/reserves', auth, checkActiveUser, checkSubscription, planController.listerReservesDuPlan);
+
 // ── Comparaison des versions d'un plan (module 4) ────────────────────────────
 router.get('/plans/:id/versions', auth, checkActiveUser, checkSubscription, paginate(), annotationController.listerVersionsPlan);
+
+// Déposer une NOUVELLE VERSION d'un plan — cahier technique § 11 et § 15.
+//
+// Mêmes rôles et mêmes contrôles que le dépôt initial : c'est le même geste,
+// désigné autrement. `upload.single` puis `validateMagicBytes` : un PDF
+// renommé en .png est rejeté ici comme ailleurs.
+router.post(
+  '/plans/:id/versions',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...DEPOSANT),
+  upload.single('fichier'),
+  upload.validateMagicBytes,
+  validate(deposerVersionSchema),
+  planController.deposerVersion
+);
 
 // ── Annotations sur un plan (module 4) ───────────────────────────────────────
 router.get('/plans/:id/annotations', auth, checkActiveUser, checkSubscription, paginate(), annotationController.listerAnnotations);

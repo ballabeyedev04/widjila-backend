@@ -37,8 +37,11 @@
 
 jest.mock('../models/index.js', () => ({
   Media: { create: jest.fn(), findOne: jest.fn(), findAll: jest.fn(), destroy: jest.fn() },
-  Reserve: { findOne: jest.fn() },
-  Inspection: { findOne: jest.fn() },
+  // `findByPk` en plus de `findOne` : le service remonte désormais au CHANTIER
+  // pour ranger le fichier sous `photos/projet_{id}/reserves/reserve_{id}/`
+  // (cahier technique § 5).
+  Reserve: { findOne: jest.fn(), findByPk: jest.fn() },
+  Inspection: { findOne: jest.fn(), findByPk: jest.fn() },
   Chantier: {},
 }));
 
@@ -54,7 +57,7 @@ jest.mock('sharp', () => jest.fn(() => ({
   toBuffer: jest.fn().mockResolvedValue(Buffer.from('vignette')),
 })));
 
-const { Media } = require('../models/index.js');
+const { Media, Reserve, Inspection } = require('../models/index.js');
 const { storeFile, deleteFile } = require('../infrastructure/storage.service.js');
 const MediaService = require('../modules/media/service/media.service.js');
 
@@ -70,6 +73,9 @@ const fichier = (contenu = 'octets-de-la-photo') => ({
 beforeEach(() => {
   jest.clearAllMocks();
   Media.findOne.mockResolvedValue(null);
+  // Le parent du média — il donne le chantier sous lequel le fichier est rangé.
+  Reserve.findByPk.mockResolvedValue({ id: 'reserve-1', chantierId: 'chantier-1' });
+  Inspection.findByPk.mockResolvedValue({ id: 'inspection-1', chantierId: 'chantier-1' });
   Media.create.mockImplementation(async (v) => ({ id: 'media-neuf', ...v }));
   storeFile.mockResolvedValue('https://stockage.test/photos/fissure.jpg');
   deleteFile.mockResolvedValue(undefined);

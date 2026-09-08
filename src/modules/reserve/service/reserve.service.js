@@ -197,6 +197,52 @@ class ReserveService {
     return null;
   }
 
+  // -------------------- LOCALISATION HÉRITÉE DU PLAN --------------------
+  /**
+   * Complète la localisation d'une réserve À PARTIR DU PLAN sur lequel elle a
+   * été posée.
+   *
+   * ── Pourquoi ────────────────────────────────────────────────────────────
+   *
+   * La localisation d'une réserve ne se saisit plus : on ouvre un plan, on
+   * appuie à l'endroit du défaut, et c'est fini. Le couple
+   * (`planId`, `position`) dit tout — le plan désigne le lieu, le point y
+   * désigne l'endroit exact. L'ancienne cascade « bâtiment → étage → zone »
+   * demandait la même information une seconde fois, à la main, et pouvait donc
+   * la contredire.
+   *
+   * Mais RIEN dans l'application n'a été réécrit pour se passer de ces trois
+   * champs : les rapports, les filtres, l'export Excel et le tableau de bord
+   * regroupent tous par bâtiment et par étage. Les laisser vides viderait ces
+   * écrans pour toute réserve créée depuis le nouveau parcours.
+   *
+   * ── La règle ────────────────────────────────────────────────────────────
+   *
+   * Un plan PORTE déjà sa place dans la structure (`plan.service.js`
+   * #_resoudreRattachement, qui la fait même hériter au plan de détail). On la
+   * recopie donc sur la réserve, et on n'écrase JAMAIS ce que le client a
+   * envoyé : un appelant qui précise encore l'étage garde le sien, et les
+   * intégrations existantes ne changent pas de comportement.
+   *
+   * Silencieux quand le plan n'a aucun rattachement (plan global d'un chantier
+   * sans structure saisie) : la réserve reste alors localisée par son plan et
+   * son point, ce qui est exactement l'intention.
+   */
+  static async _heriterLocalisationDuPlan(data) {
+    if (!data.planId) return data;
+    if (data.batimentId || data.etageId || data.zoneId) return data;
+
+    const plan = await Plan.findByPk(data.planId, {
+      attributes: ['id', 'batimentId', 'etageId', 'zoneId'],
+    });
+    if (!plan) return data;
+
+    data.batimentId = plan.batimentId || null;
+    data.etageId = plan.etageId || null;
+    data.zoneId = plan.zoneId || null;
+    return data;
+  }
+
   /** Vérifie qu'une entreprise est rattachée à l'organisation (même org, filiale ou agence). */
   static async _verifierEntreprise(organisationId, entrepriseId) {
     const entreprise = await Organisation.findByPk(entrepriseId);
@@ -360,6 +406,11 @@ class ReserveService {
     const erreurLoc = await ReserveService._verifierLocalisation(data.chantierId, data);
     if (erreurLoc) return { success: false, message: erreurLoc };
 
+    // Le plan devient la source de la localisation : bâtiment, étage et zone
+    // en sont DÉDUITS quand le client ne les a pas envoyés. Voir
+    // `_heriterLocalisationDuPlan`.
+    await ReserveService._heriterLocalisationDuPlan(data);
+
     // CORRECTIF (audit § 2) — atomicité. Réserve + position + historique
     // formaient trois écritures indépendantes : un échec sur la 2ᵉ laissait une
     // réserve sans position ni trace d'historique, en violation de la règle
@@ -470,6 +521,10 @@ class ReserveService {
 
     const erreurLoc = await ReserveService._verifierLocalisation(data.chantierId, data);
     if (erreurLoc) return { success: false, message: erreurLoc };
+
+    // Même règle qu'à la création unitaire : toute la série partage le plan, et
+    // en hérite donc la localisation.
+    await ReserveService._heriterLocalisationDuPlan(data);
 
     // CORRECTIF (audit § 1 / § 2) — un seul calcul de numéros pour toute la
     // série (l'ancien code rechargeait TOUTES les réserves du chantier à chaque
@@ -773,6 +828,14 @@ class ReserveService {
         { model: Etage, as: 'etage', attributes: ['id', 'nom'] },
         { model: Zone, as: 'zone', attributes: ['id', 'nom'] },
         { model: Lot, as: 'lot', attributes: ['id', 'nom'] },
+        // LE PLAN — il manquait, et c'est pourtant la localisation principale
+        // d'une réserve depuis que le relevé se fait en appuyant sur un plan.
+        // Le détail affichait bâtiment, étage et zone (déduits du plan par
+        // `_heriterLocalisationDuPlan`) mais jamais le plan lui-même : on ne
+        // pouvait pas savoir SUR QUEL document la réserve avait été posée, ni
+        // y revenir. `required: false` — une réserve relevée avant le dépôt
+        // des plans n'en a pas.
+        { model: Plan, as: 'plan', attributes: ['id', 'nom', 'version', 'fichier_url', 'format'], required: false },
         { model: CorpsEtat, as: 'corpsEtat', attributes: ['id', 'nom', 'code'], required: false },
         { model: Phase, as: 'phase', attributes: ['id', 'nom', 'ordre'], required: false },
         { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
@@ -782,7 +845,23 @@ class ReserveService {
         { model: Utilisateur, as: 'validateur', attributes: ['id', 'nom', 'prenom'] },
         // Extensions module 5
         { model: PieceJointe, as: 'piecesJointes' },
-        { model: ReserveAffectation, as: 'affectations' },
+        // Les affectations avec LEUR DESTINATAIRE.
+        //
+        // Elles remontaient nues — trois clés étrangères, aucun nom — et le
+        // client affichait « — » à la place de l'intervenant. La liste dédiée
+        // (`/reserves/:id/affectations`) joignait déjà ces trois modèles ; le
+        // détail, lui, ne le faisait pas, et les deux écrans ne montraient donc
+        // pas la même chose pour la même donnée.
+        {
+          model: ReserveAffectation,
+          as: 'affectations',
+          required: false,
+          include: [
+            { model: Utilisateur, as: 'utilisateur', attributes: ['id', 'nom', 'prenom', 'photoProfil'], required: false },
+            { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'], required: false },
+            { model: Partenaire, as: 'partenaire', attributes: ['id', 'nom', 'type'], required: false },
+          ],
+        },
       ],
       // CORRECTIF (audit § 9) — un `order` PLACÉ DANS un include est ignoré par
       // Sequelize : l'historique était rendu dans l'ordre arbitraire du plan
