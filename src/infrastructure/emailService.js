@@ -25,10 +25,11 @@ function getResend() {
 
 /**
  * Envoi générique — utilisé par tous les autres helpers.
- * @param {{ to: string, subject: string, html: string, attachments?: Array }} opts
+ * @param {{ to: string|string[], cc?: string|string[], replyTo?: string,
+ *           subject: string, html: string, attachments?: Array }} opts
  * @returns {Promise<object|null>}
  */
-async function sendEmail({ to, subject, html, attachments = [] }) {
+async function sendEmail({ to, cc, replyTo, subject, html, attachments = [] }) {
   const client = getResend();
   if (!client) return null; // clé API absente — best-effort, pas d'erreur
 
@@ -42,6 +43,14 @@ async function sendEmail({ to, subject, html, attachments = [] }) {
     to,
     subject,
     html,
+    // COPIE — les clients d'un chantier reçoivent le rapport envoyé à
+    // l'entreprise. En `cc` et non en `to` : le rapport s'adresse à
+    // l'entreprise qui doit lever les réserves, les clients en sont témoins.
+    ...(cc && cc.length ? { cc } : {}),
+    // Les réponses reviennent à l'expéditeur réel, pas à l'adresse technique
+    // de la plateforme : une entreprise qui répond « c'est corrigé » doit
+    // atteindre quelqu'un.
+    ...(replyTo ? { replyTo } : {}),
     ...(formattedAttachments.length > 0 && { attachments: formattedAttachments }),
   };
 

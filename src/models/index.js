@@ -30,6 +30,7 @@ const PlanHotspot        = require('./planHotspot.model.js');
 const CorpsEtat          = require('./corpsEtat.model.js');
 const TypeDocument       = require('./typeDocument.model.js');
 const CodeNiveau         = require('./codeNiveau.model.js');
+const CodeAppartement    = require('./codeAppartement.model.js');
 const TypePartenaire     = require('./typePartenaire.model.js');
 const TypeInspection     = require('./typeInspection.model.js');
 const PlanAbonnement     = require('./planAbonnement.model.js');
@@ -177,7 +178,7 @@ CorpsEtat.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisat
 // Pas de clé étrangère vers les données : la colonne métier (`documents.type`)
 // stocke le CODE, pas l'identifiant — voir referentielType.model.js. Seule la
 // portée par organisation est déclarée ici.
-for (const Type of [TypeDocument, TypePartenaire, TypeInspection, CodeNiveau]) {
+for (const Type of [TypeDocument, TypePartenaire, TypeInspection, CodeNiveau, CodeAppartement]) {
   Organisation.hasMany(Type, { foreignKey: 'organisationId', onDelete: 'CASCADE' });
   Type.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisation' });
 }
@@ -339,6 +340,7 @@ module.exports = {
   TypePartenaire,
   TypeInspection,
   CodeNiveau,
+  CodeAppartement,
   PlanAbonnement,
   AbonnementSouscrit,
   EvenementPaiement,

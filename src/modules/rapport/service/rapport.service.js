@@ -88,6 +88,60 @@ async function chargerPhotos(reserves) {
   return chargees;
 }
 
+/**
+ * Exécute une ÉTAPE de la génération en la nommant.
+ *
+ * Sans cela, les quatre étapes — lecture des données, photos, composition du
+ * PDF, écriture du fichier — partagent le même « Erreur interne du serveur ».
+ * L'utilisateur ne sait pas quoi corriger, et le journal ne dit pas où
+ * chercher.
+ *
+ * L'erreur technique part au JOURNAL avec son contexte ; l'utilisateur reçoit
+ * une phrase qui décrit ce qui a échoué et ce qu'il peut faire. Les deux sont
+ * nécessaires : le message d'exception d'une bibliothèque PDF ne veut rien
+ * dire pour un conducteur de travaux, et « réessayez » ne veut rien dire pour
+ * un développeur.
+ *
+ * @param {string} etape       — nom technique, pour le journal
+ * @param {string} messageClair — ce que l'utilisateur lira
+ * @param {object} contexte    — chantier, type, volumes… pour le diagnostic
+ * @param {Function} action    — le travail à exécuter
+ */
+/**
+ * Un schéma de base EN RETARD sur le code — table ou colonne absente.
+ *
+ * Ce cas mérite son propre message. Il ne vient pas des données du chantier
+ * mais d'une migration non appliquée, et « vérifiez le chantier et réessayez »
+ * enverrait l'utilisateur chercher un problème qui n'est pas de son côté :
+ * aucun rapport ne sortira tant que `npm run migrate` n'aura pas tourné.
+ *
+ * On reconnaît le cas au code SQLSTATE remonté par PostgreSQL — 42P01 (table
+ * inconnue) et 42703 (colonne inconnue) — plutôt qu'au texte du message, qui
+ * change avec la langue du serveur.
+ */
+function schemaEnRetard(err) {
+  const code = err?.parent?.code || err?.original?.code || err?.code;
+  return code === '42P01' || code === '42703';
+}
+
+async function etapeGeneration(etape, messageClair, contexte, action) {
+  try {
+    return await action();
+  } catch (err) {
+    logger.error(
+      `[rapport] Échec à l'étape « ${etape} » — ${JSON.stringify(contexte)} : ${err.message}`,
+      { stack: err.stack },
+    );
+    const echec = new Error(
+      schemaEnRetard(err)
+        ? 'La base de données n’est pas à jour : une migration reste à appliquer sur le serveur. Contactez le support.'
+        : messageClair,
+    );
+    echec.etapeRapport = etape;
+    throw echec;
+  }
+}
+
 /** Libellé d'un utilisateur : « Prénom Nom », ou son email à défaut. */
 function nomUtilisateur(u) {
   if (!u) return 'Non renseigné';
@@ -151,7 +205,11 @@ class RapportService {
     if (params.phaseId) ou.phaseId = params.phaseId;
     if (params.corpsEtatId) ou.corpsEtatId = params.corpsEtatId;
 
-    const [reserves, inspections, membres, partenaires, lots, auteur] = await Promise.all([
+    const [reserves, inspections, membres, partenaires, lots, auteur] = await etapeGeneration(
+      'lecture-donnees',
+      'Impossible de lire les données du chantier. Vérifiez le chantier et réessayez.',
+      { chantierId, type },
+      () => Promise.all([
       Reserve.findAll({
         where: ou,
         include: [
@@ -181,7 +239,8 @@ class RapportService {
       generePar
         ? Utilisateur.findByPk(generePar, { attributes: ['id', 'nom', 'prenom', 'email'] })
         : Promise.resolve(null),
-    ]);
+      ]),
+    );
 
     // Présence : renseignée seulement quand le rapport cible une inspection.
     // Hors de ce cas, la colonne reste vide — l'inventer serait affirmer une
@@ -192,7 +251,20 @@ class RapportService {
       presences = new Map(convocations.map((c) => [c.utilisateurId, c.statut]));
     }
 
-    const nbPhotos = await chargerPhotos(reserves);
+    // Les photos ne bloquent JAMAIS un rapport : `chargerPhotos` ignore déjà
+    // celle qui ne s'ouvre pas. Cette enveloppe couvre l'échec global — un
+    // stockage injoignable, par exemple — et laisse le rapport se produire
+    // sans images plutôt que de ne rien produire du tout.
+    let nbPhotos = 0;
+    try {
+      nbPhotos = await chargerPhotos(reserves);
+    } catch (err) {
+      logger.error(
+        `[rapport] Photos indisponibles (chantier ${chantierId}) : ${err.message}`,
+        { stack: err.stack },
+      );
+      for (const r of reserves) r.photosBuffers = r.photosBuffers || [];
+    }
 
     // ── Mise en forme ────────────────────────────────────────────────────
     const participants = membres.map((m) => ({
@@ -355,7 +427,11 @@ class RapportService {
       (params.partenaireId || params.entrepriseId) ? 'entreprise filtrée' : null,
     ].filter(Boolean).join(', ') || 'Toutes les réserves du chantier';
 
-    const buffer = await pdf.construireRapport({
+    const buffer = await etapeGeneration(
+      'composition-pdf',
+      'Le rapport n’a pas pu être composé. Signalez-le au support avec le nom du chantier.',
+      { chantierId, type, reserves: reserves.length, photos: nbPhotos },
+      () => pdf.construireRapport({
       titre: `Rapport de chantier — ${val(chantier.nom)}`,
       typeLibelle: val(type),
       reference: val(chantier.code, String(chantier.id).slice(0, 8)),
@@ -373,22 +449,38 @@ class RapportService {
       remarques,
       pointsAVerifier,
       nbPhotos,
-    });
-
-    // ── Stockage + historique ────────────────────────────────────────────
-    const fichier_url = await storeFile(
-      buffer,
-      `rapport-${type}-${chantier.code || chantier.id}.pdf`,
-      'rapports'
+      }),
     );
 
-    const rapport = await Rapport.create({
-      chantierId,
-      type,
-      fichier_url,
-      generePar,
-      parametres: params,
-    });
+    // ── Stockage + historique ────────────────────────────────────────────
+    const fichier_url = await etapeGeneration(
+      'stockage',
+      'Le rapport a été composé mais n’a pas pu être enregistré. Réessayez ; si cela persiste, l’espace de stockage est peut-être saturé.',
+      { chantierId, type, taille: buffer.length },
+      () => storeFile(
+        buffer,
+        `rapport-${type}-${chantier.code || chantier.id}.pdf`,
+        'rapports',
+      ),
+    );
+
+    const rapport = await etapeGeneration(
+      'enregistrement',
+      'Le rapport a été produit mais n’a pas pu être enregistré dans l’historique.',
+      { chantierId, type },
+      () => Rapport.create({
+        chantierId,
+        type,
+        fichier_url,
+        generePar,
+        parametres: params,
+      }),
+    );
+
+    logger.info(
+      `[rapport] Généré — chantier ${chantierId}, type ${type}, `
+      + `${reserves.length} réserve(s), ${nbPhotos} photo(s), ${buffer.length} octets`,
+    );
 
     return { success: true, message: 'Rapport généré avec succès', rapport };
   }

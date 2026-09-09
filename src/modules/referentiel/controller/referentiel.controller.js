@@ -4,6 +4,7 @@ const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { VUE_PUBLIQUE } = require('../../../config/enums.js');
 const { VUE_PUBLIQUE: PAYS } = require('../../../config/pays.js');
 const CodeNiveauService = require('../service/codeNiveau.service.js');
+const CodeAppartementService = require('../service/codeAppartement.service.js');
 const { BadRequestError } = require('../../../errors/AppError.js');
 
 /**
@@ -82,6 +83,38 @@ exports.creerCodeNiveau = asyncHandler(async (req, res) => {
 
 exports.desactiverCodeNiveau = asyncHandler(async (req, res) => {
   const result = await CodeNiveauService.desactiver(req.user.organisationId, req.params.id);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: result.message });
+});
+
+// ── Codes d'APPARTEMENT ─────────────────────────────────────────────────────
+//
+// Même contrat que les codes de niveau : le client a demandé la même mécanique
+// — une liste servie par le serveur, et un « + » qui ajoute pour toute
+// l'organisation.
+
+exports.listerCodesAppartement = asyncHandler(async (req, res) => {
+  const result = await CodeAppartementService.lister(req.user.organisationId);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({
+    success: true,
+    message: 'Codes d\u2019appartement r\u00e9cup\u00e9r\u00e9s',
+    data: { codes: result.codes },
+  });
+});
+
+exports.creerCodeAppartement = asyncHandler(async (req, res) => {
+  const result = await CodeAppartementService.creer(req.user.organisationId, req.body);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(201).json({
+    success: true,
+    message: result.message,
+    data: { code: result.code },
+  });
+});
+
+exports.desactiverCodeAppartement = asyncHandler(async (req, res) => {
+  const result = await CodeAppartementService.desactiver(req.user.organisationId, req.params.id);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message });
 });

@@ -9,6 +9,7 @@ const validate = require('../../../middlewares/validate.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const { GESTION } = require('../../../config/roles.js');
 const { creerCodeNiveauSchema } = require('../validation/codeNiveau.validation.js');
+const { creerCodeAppartementSchema } = require('../validation/codeAppartement.validation.js');
 
 /**
  * Référentiels techniques — énumérations métier.
@@ -46,5 +47,18 @@ router.post('/codes-niveau', auth, checkActiveUser, validate(creerCodeNiveauSche
 
 // La DÉSACTIVATION, elle, reste un geste d'administration du référentiel.
 router.delete('/codes-niveau/:id', auth, checkActiveUser, requireRole(...GESTION), referentielController.desactiverCodeNiveau);
+
+// ── Codes d'APPARTEMENT ─────────────────────────────────────────────────────
+//
+// Mêmes gardes que les codes de niveau, pour la même raison : c'est
+// l'entreprise qui dépose ses plans qui saisit les appartements, et elle est
+// exclue de tous les groupes de gestion. La garde qui compte est dans le
+// service — le code créé appartient à l'organisation de l'appelant, jamais au
+// catalogue standard.
+router.get('/codes-appartement', auth, checkActiveUser, referentielController.listerCodesAppartement);
+router.post('/codes-appartement', auth, checkActiveUser, validate(creerCodeAppartementSchema), referentielController.creerCodeAppartement);
+
+// La DÉSACTIVATION, elle, reste un geste d'administration du référentiel.
+router.delete('/codes-appartement/:id', auth, checkActiveUser, requireRole(...GESTION), referentielController.desactiverCodeAppartement);
 
 module.exports = router;

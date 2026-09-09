@@ -27,4 +27,16 @@ const genererRapportSchema = Joi.object({
   inspectionId: uuid.optional().allow(null),
 });
 
-module.exports = { genererRapportSchema };
+/**
+ * Confirmation d'envoi.
+ *
+ * `exclure` ne porte QUE des retraits : la liste des destinataires est
+ * recalculée côté serveur, l'appelant peut en enlever, jamais en ajouter.
+ * Accepter des adresses libres ferait de cette route un relais de courriel
+ * ouvert, capable d'expédier un document interne n'importe où.
+ */
+const envoyerRapportSchema = Joi.object({
+  exclure: Joi.array().items(Joi.string().trim().email()).max(50).optional(),
+});
+
+module.exports = { genererRapportSchema, envoyerRapportSchema };

@@ -11,7 +11,7 @@ const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const { OPERATIONNEL, PILOTAGE } = require('../../../config/roles.js');
 const validate = require('../../../middlewares/validate.middleware.js');
-const { genererRapportSchema } = require('../validation/rapport.validation.js');
+const { genererRapportSchema, envoyerRapportSchema } = require('../validation/rapport.validation.js');
 
 // Le chantierId est porté par l'URL → injecté dans le body avant validation Joi
 const injectChantierId = (req, res, next) => {
@@ -40,6 +40,32 @@ router.post(
 router.get('/chantiers/:chantierId/rapports', auth, checkActiveUser, checkSubscription, paginate(), rapportController.listerRapports);
 
 router.get('/rapports/:id', auth, checkActiveUser, checkSubscription, rapportController.detailRapport);
+
+// ── Envoi aux entreprises ───────────────────────────────────────────────────
+//
+// `PILOTAGE` comme la génération : diffuser un rapport de réserves à des tiers
+// engage l'organisation, ce n'est pas un geste de consultation.
+//
+// La PRÉPARATION ne fait qu'afficher ce qui partirait — mêmes droits malgré
+// tout : elle expose les adresses des entreprises et des clients du chantier.
+router.get(
+  '/rapports/:id/envoi',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...PILOTAGE),
+  rapportController.preparerEnvoi,
+);
+
+router.post(
+  '/rapports/:id/envoi',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole(...PILOTAGE),
+  validate(envoyerRapportSchema),
+  rapportController.envoyerRapport,
+);
 
 router.delete(
   '/rapports/:id',
