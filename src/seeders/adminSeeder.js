@@ -1,4 +1,4 @@
-const bcrypt = require('bcryptjs');
+const bcrypt = require('../utils/motDePasse.js');
 const Utilisateur = require('../models/utilisateur.model.js');
 const { bcryptConfig } = require('../config/security.js');
 const logger = require('../utils/logger.js');

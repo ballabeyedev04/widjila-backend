@@ -38,8 +38,14 @@ jest.mock('../infrastructure/emailService.js', () => ({
 
 jest.mock('../infrastructure/storage.service.js', () => ({ storeFile: jest.fn() }));
 
+jest.mock('../modules/subscription/service/droits.service.js', () => ({
+  verifierLimite: jest.fn(),
+}));
+
 const { Utilisateur, Organisation } = require('../models/index.js');
 const { sendNouveauMembreEmail } = require('../infrastructure/emailService.js');
+const DroitsService = require('../modules/subscription/service/droits.service.js');
+const sequelize = require('../config/db.js');
 const OrganisationService = require('../modules/organisation/service/organisation.service.js');
 
 const ORG = 'org-1';
@@ -70,6 +76,40 @@ beforeEach(() => {
   Utilisateur.create.mockResolvedValue(membreCree());
   Organisation.findByPk.mockResolvedValue({ nom: 'Widjila BTP' });
   sendNouveauMembreEmail.mockResolvedValue({ id: 'msg-1' });
+  DroitsService.verifierLimite.mockResolvedValue({ autorise: true });
+  // Création sous verrou de sièges : transaction + verrou consultatif.
+  jest.spyOn(sequelize, 'transaction').mockImplementation(async (fn) => fn({}));
+  jest.spyOn(sequelize, 'query').mockResolvedValue([]);
+});
+
+afterEach(() => {
+  jest.clearAllMocks();
+  jest.restoreAllMocks();
+});
+
+describe('ajouterMembre — plafond de sièges revérifié SOUS VERROU', () => {
+  it('le verrou de l’organisation est pris AVANT le recomptage et la création', async () => {
+    await OrganisationService.ajouterMembre(ORG, { ...DONNEES }, AUTEUR);
+
+    const [sql, { replacements }] = sequelize.query.mock.calls[0];
+    expect(sql).toMatch(/pg_advisory_xact_lock/);
+    expect(replacements.cle).toBe(`organisation:sieges:${ORG}`);
+    expect(sequelize.query.mock.invocationCallOrder[0])
+      .toBeLessThan(DroitsService.verifierLimite.mock.invocationCallOrder[0]);
+    expect(DroitsService.verifierLimite.mock.invocationCallOrder[0])
+      .toBeLessThan(Utilisateur.create.mock.invocationCallOrder[0]);
+  });
+
+  it('plafond atteint entre le contrôle de route et la création : refus, aucun compte, aucun courriel', async () => {
+    DroitsService.verifierLimite.mockResolvedValue({ autorise: false });
+
+    const result = await OrganisationService.ajouterMembre(ORG, { ...DONNEES }, AUTEUR);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/plafond/);
+    expect(Utilisateur.create).not.toHaveBeenCalled();
+    expect(sendNouveauMembreEmail).not.toHaveBeenCalled();
+  });
 });
 
 describe('ajouterMembre — courriel d’invitation', () => {

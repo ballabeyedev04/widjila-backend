@@ -262,17 +262,43 @@ async function _compterEnfants(plans) {
  * Suppose la liste déjà triée par (nom ASC, version DESC) — c'est l'ordre de
  * toutes les requêtes de ce service.
  */
-function _derniereVersion(plans) {
-  const courants = plans.filter((p) => p.is_current === true);
-  const source = courants.length > 0 ? courants : plans;
+/**
+ * LIGNÉE d'un plan : les versions successives d'un même document.
+ *
+ * Le nom seul ne suffit pas. « Plan niveau » sous le bâtiment A et « Plan
+ * niveau » sous le bâtiment B sont deux documents ; « Cuisine » sous deux
+ * appartements aussi. La clé (chantier, nom) en faisait une seule lignée : le
+ * dépôt sous B devenait la « v2 » de celui de A, lui retirait le drapeau
+ * courant, et le plan de A DISPARAISSAIT de la navigation.
+ */
+function cleLignee(p) {
+  return [p.chantierId, p.nom, p.parentId || '', p.batimentId || '', p.etageId || '', p.zoneId || ''].join(':');
+}
 
-  const vus = new Set();
-  return source.filter((p) => {
-    const cle = `${p.chantierId}:${p.nom}`;
-    if (vus.has(cle)) return false;
-    vus.add(cle);
-    return true;
-  });
+/** Clause `where` d'une lignée (mêmes colonnes que `cleLignee`). */
+function whereLignee(chantierId, nom, r = {}) {
+  return {
+    chantierId,
+    nom,
+    parentId: r.parentId || null,
+    batimentId: r.batimentId || null,
+    etageId: r.etageId || null,
+    zoneId: r.zoneId || null,
+  };
+}
+
+function _derniereVersion(plans) {
+  // Par LIGNÉE : la version désignée courante, sinon la plus récente (la
+  // liste est triée version décroissante). Le repli est calculé lignée par
+  // lignée — un drapeau posé ailleurs ne doit pas masquer une lignée entière.
+  const choisis = new Map();
+  for (const p of plans) {
+    const cle = cleLignee(p);
+    const deja = choisis.get(cle);
+    if (!deja || (p.is_current === true && deja.is_current !== true)) choisis.set(cle, p);
+  }
+  const retenus = new Set(choisis.values());
+  return plans.filter((p) => retenus.has(p));
 }
 
 /** Zones cliquables du plan — voir planHotspot.model.js. */
@@ -421,6 +447,13 @@ class PlanService {
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
+    // Un chantier clôturé ou archivé n'accepte plus de nouveau document de
+    // travail : un plan déposé après la clôture appellerait des réserves sur
+    // un chantier soldé.
+    if (['cloture', 'archive'].includes(chantier.statut)) {
+      return { success: false, message: 'Ce chantier est clôturé ou archivé : aucun plan ne peut y être déposé.' };
+    }
+
     const refus = PlanService._refusDepot(chantier, auteur);
     if (refus) return { success: false, message: refus };
 
@@ -482,23 +515,41 @@ class PlanService {
             is_current: true,
           }, { transaction: t });
 
-          // ...et les précédentes cessent de l'être.
+          // ...et les précédentes DE LA MÊME LIGNÉE cessent de l'être.
           //
           // DANS LA MÊME TRANSACTION que la création : deux versions courantes
           // simultanées feraient apparaître le même plan deux fois dans chaque
           // liste, sans que rien ne dise laquelle est la bonne. Le verrou pris
           // plus haut sérialise déjà les dépôts d'un même plan.
+          //
+          // Limité à la lignée (même emplacement) : un homonyme rangé ailleurs
+          // n'est PAS une version précédente — voir `cleLignee`.
+          const lignee = whereLignee(chantierId, data.nom, rattachement);
           await Plan.update(
             { is_current: false },
-            {
-              where: {
-                chantierId,
-                nom: data.nom,
-                id: { [Op.ne]: cree.id },
-              },
-              transaction: t,
-            },
+            { where: { ...lignee, id: { [Op.ne]: cree.id } }, transaction: t },
           );
+
+          // Les SOUS-PLANS suivent la nouvelle version de leur parent. Ils
+          // pointaient l'identifiant de la version précédente : dès le dépôt
+          // d'une v2, la navigation (qui part de la version courante) ne les
+          // trouvait plus — plans de détail et réserves devenaient
+          // inaccessibles. Versions supprimées comprises : leurs enfants
+          // redeviennent atteignables.
+          if (version > 1) {
+            const precedentes = await Plan.findAll({
+              where: { ...lignee, id: { [Op.ne]: cree.id } },
+              attributes: ['id'],
+              paranoid: false,
+              transaction: t,
+            });
+            if (precedentes.length) {
+              await Plan.update(
+                { parentId: cree.id },
+                { where: { parentId: { [Op.in]: precedentes.map((p) => p.id) } }, transaction: t },
+              );
+            }
+          }
 
           await t.commit();
           return cree;
@@ -651,15 +702,7 @@ class PlanService {
       order: [['nom', 'ASC'], ['version', 'DESC']],
     });
 
-    const vus = new Set();
-    const derniereVersion = plans.filter((p) => {
-      const cle = `${p.chantierId}:${p.nom}`;
-      if (vus.has(cle)) return false;
-      vus.add(cle);
-      return true;
-    });
-
-    return { success: true, plans: derniereVersion };
+    return { success: true, plans: _derniereVersion(plans) };
   }
 
   // -------------------- LISTER LES VERSIONS D'UN PLAN --------------------
@@ -673,8 +716,10 @@ class PlanService {
     });
     if (!plan) return { success: false, message: 'Plan introuvable dans cette organisation' };
 
+    // Les versions de CE document : même lignée (nom ET emplacement). Un
+    // homonyme d'un autre bâtiment n'est pas une version de celui-ci.
     const versions = await Plan.findAll({
-      where: { chantierId: plan.chantierId, nom: plan.nom },
+      where: whereLignee(plan.chantierId, plan.nom, plan),
       order: [['version', 'ASC']],
     });
     return { success: true, plan, versions };
@@ -840,6 +885,21 @@ class PlanService {
     });
     if (!plan) return { success: false, message: 'Plan introuvable dans cette organisation' };
 
+    // Un plan PORTEUR ne se supprime pas :
+    //  - ses réserves y sont positionnées — elles garderaient un `planId`
+    //    vers une ligne supprimée, invisibles depuis la navigation ;
+    //  - ses sous-plans perdraient leur parent : ni racines, ni atteignables.
+    const [nbReserves, nbSousPlans] = await Promise.all([
+      Reserve.count({ where: { planId } }),
+      Plan.count({ where: { parentId: planId } }),
+    ]);
+    if (nbReserves > 0) {
+      return { success: false, message: `${nbReserves} réserve(s) sont posées sur ce plan : déplacez-les ou supprimez-les avant.` };
+    }
+    if (nbSousPlans > 0) {
+      return { success: false, message: `Ce plan porte ${nbSousPlans} sous-plan(s) : supprimez-les avant.` };
+    }
+
     const urlFichier = plan.fichier_url;
 
     const t = await sequelize.transaction();
@@ -848,6 +908,18 @@ class PlanService {
       // ne se déclenche pas sur un soft delete (audit § 4).
       await Annotation.destroy({ where: { planId }, force: definitif, transaction: t });
       await plan.destroy({ force: definitif, transaction: t });
+
+      // La version COURANTE supprimée, la lignée n'en avait plus aucune : le
+      // plan disparaissait des listes. La version précédente la plus récente
+      // reprend le drapeau.
+      if (plan.is_current) {
+        const precedente = await Plan.findOne({
+          where: whereLignee(plan.chantierId, plan.nom, plan),
+          order: [['version', 'DESC']],
+          transaction: t,
+        });
+        if (precedente) await precedente.update({ is_current: true }, { transaction: t });
+      }
       await t.commit();
     } catch (err) {
       await t.rollback();

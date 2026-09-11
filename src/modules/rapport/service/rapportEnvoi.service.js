@@ -235,7 +235,12 @@ class RapportEnvoiService {
         chantierNom,
         rapportNom: rapport.nom || null,
         statut: rapport.statut,
-        genere: Boolean(rapport.fichier_url),
+        // Même règle que `envoyer` ci-dessous : un fichier ne suffit pas, il
+        // doit être celui de la configuration COURANTE. Un rapport modifié
+        // après génération repasse en brouillon en gardant son ancien PDF —
+        // l'annoncer « généré » faisait remplir destinataires et message pour
+        // un envoi refusé au dernier moment.
+        genere: Boolean(rapport.fichier_url) && [R.ETATS.GENERE, R.ETATS.ENVOYE].includes(rapport.statut),
         // Objet exactement au format demandé par le client.
         objet: `Rapport de chantier – ${chantierNom} – ${date}`,
         message: [
@@ -351,6 +356,23 @@ class RapportEnvoiService {
 
     if (!rapport.fichier_url) {
       return { success: false, message: 'Générez le rapport avant de l’envoyer.' };
+    }
+    // Le fichier doit être CELUI de la configuration courante :
+    //  - « generation » : une régénération en cours allait supprimer ce PDF
+    //    juste après l'envoi (l'historique aurait dit « envoyé », le fichier
+    //    aurait disparu) ;
+    //  - « echec » / « brouillon » : le fichier est celui d'une génération
+    //    précédente, périmé ;
+    //  - « archive » : version remplacée ; l'envoyer la réactivait.
+    if (![R.ETATS.GENERE, R.ETATS.ENVOYE].includes(rapport.statut)) {
+      return {
+        success: false,
+        message: rapport.statut === R.ETATS.GENERATION
+          ? 'Le rapport est en cours de génération : attendez la fin pour l’envoyer.'
+          : rapport.statut === R.ETATS.ARCHIVE
+            ? 'Ce rapport est archivé : envoyez sa version la plus récente.'
+            : 'Le rapport doit être (re)généré avant d’être envoyé.',
+      };
     }
 
     const retires = new Set(exclure.map((e) => String(e).toLowerCase()));
@@ -476,7 +498,14 @@ class RapportEnvoiService {
 
     // L'état passe à ENVOYÉ (§ 19) : c'est ce qui protège désormais le
     // document contre une réécriture silencieuse (§ 18).
-    await rapport.update({ statut: R.ETATS.ENVOYE }).catch(() => {});
+    // Les courriels SONT partis. Si l'état ne s'écrit pas, l'écran affiche un
+    // rapport non envoyé : l'utilisateur le renverra, et les destinataires le
+    // recevront deux fois. L'échec était avalé sans trace.
+    await rapport.update({ statut: R.ETATS.ENVOYE }).catch((errMaj) => {
+      logger.error(`[rapport] Rapport ${rapportId} envoyé mais état « envoyé » non enregistré — risque de renvoi en double`, {
+        rapportId, error: errMaj.message,
+      });
+    });
     await RapportsService._journaliser(rapportId, R.ACTIONS_HISTORIQUE.ENVOYE, utilisateurId, {
       to, cc, mode, objet: sujet, lien: lien ? true : false,
       // Clé d'idempotence (audit synchronisation) : c'est cette trace qu'un

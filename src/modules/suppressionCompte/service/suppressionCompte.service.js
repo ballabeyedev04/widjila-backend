@@ -103,7 +103,9 @@ class SuppressionCompteService {
       attributes: SuppressionCompteService.ATTRIBUTS,
       // Les plus anciennes d'abord : le délai RGPD de 30 jours court depuis la
       // réception, c'est donc la plus ancienne qui est la plus urgente.
-      order: [['createdAt', 'ASC']],
+      // `id` départage les demandes du même instant : sans lui, l'ordre entre
+      // deux pages n'est pas garanti (doublons ou lignes sautées).
+      order: [['createdAt', 'ASC'], ['id', 'ASC']],
       limit,
       offset: (page - 1) * limit,
     });
@@ -130,12 +132,19 @@ class SuppressionCompteService {
     const demande = await DemandeSuppression.findByPk(id);
     if (!demande) return { success: false, message: 'Demande introuvable' };
 
-    await demande.update({
+    // Une décision est une TRACE : elle ne se réécrit pas. Deux admins sur la
+    // même demande (ou un double clic) écrasaient l'auteur, la date et la note
+    // de la première décision. La mise à jour est conditionnelle au statut
+    // « en_attente », tel que la base le voit au moment de l'écriture.
+    const decision = {
       statut,
       note_admin: note_admin ? String(note_admin).trim() : null,
       traite_par: admin?.id ?? null,
       traite_le: new Date(),
-    });
+    };
+    const [n] = await DemandeSuppression.update(decision, { where: { id, statut: 'en_attente' } });
+    if (!n) return { success: false, message: 'Cette demande a déjà été traitée.' };
+    Object.assign(demande, decision);
 
     return { success: true, message: 'Demande mise à jour', demande };
   }

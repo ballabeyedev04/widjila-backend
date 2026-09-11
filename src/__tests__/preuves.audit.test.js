@@ -30,8 +30,14 @@ jest.mock('../infrastructure/storage.service.js', () => ({
   deleteFile: jest.fn(async () => {}),
 }));
 jest.mock('../config/db.js', () => ({
-  transaction: jest.fn(async () => ({ commit: jest.fn(), rollback: jest.fn() })),
-  query: jest.fn(),
+  // Deux formes, comme Sequelize : sans argument, une transaction à piloter ;
+  // avec un travail (transaction « gérée » — le verrou de `_enregistrer`), le
+  // travail est exécuté.
+  transaction: jest.fn(async (travail) => {
+    const t = { commit: jest.fn(), rollback: jest.fn() };
+    return typeof travail === 'function' ? travail(t) : t;
+  }),
+  query: jest.fn(async () => [{}]),
   define: jest.fn(),
 }));
 // Le service des réserves tire une longue chaîne de dépendances inutile ici.

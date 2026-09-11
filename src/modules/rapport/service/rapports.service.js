@@ -366,11 +366,14 @@ class RapportsService {
     // entreprise doit rester exactement ce qu'elle a reçu (§ 18). La suite
     // passe par une nouvelle version ou par une duplication, deux gestes
     // explicites qui laissent une trace.
-    if (rapport.statut === R.ETATS.ENVOYE) {
+    if (rapport.statut === R.ETATS.ENVOYE || rapport.statut === R.ETATS.ARCHIVE) {
       return {
         success: false,
         message: 'Ce rapport a déjà été diffusé : dupliquez-le ou générez une nouvelle version pour le modifier.',
       };
+    }
+    if (rapport.statut === R.ETATS.GENERATION) {
+      return { success: false, message: 'Ce rapport est en cours de génération : attendez la fin pour le modifier.' };
     }
 
     const modeleDef = patch.modele ? R.modele(patch.modele) : R.modele(rapport.modele) || R.MODELES.GLOBAL;
@@ -408,6 +411,13 @@ class RapportsService {
       }
       misAJour.filtres = filtres;
       misAJour.partenaireId = filtres.entreprises.length === 1 ? filtres.entreprises[0] : null;
+    }
+
+    // Le fichier produit ne correspond plus à la configuration : le rapport
+    // redevient un BROUILLON. Il restait « généré », et l'envoi comme le
+    // partage servaient un PDF périmé sans que rien ne le signale.
+    if (Object.keys(misAJour).length && rapport.statut === R.ETATS.GENERE) {
+      misAJour.statut = R.ETATS.BROUILLON;
     }
 
     await rapport.update(misAJour);
@@ -574,12 +584,24 @@ class RapportsService {
     const rapport = await RapportsService._charger(rapportId, organisationId);
     if (!rapport) return { success: false, message: 'Rapport introuvable dans cette organisation' };
 
-    // § 18 — un rapport déjà diffusé n'est jamais réécrit : on produit une
+    // Un rapport ARCHIVÉ est terminal : c'est une version remplacée, ou un
+    // document retiré. Le régénérer sur place détruisait le PDF d'une version
+    // déjà reçue par une entreprise.
+    if (rapport.statut === R.ETATS.ARCHIVE) {
+      return { success: false, message: 'Ce rapport est archivé : dupliquez-le pour produire un nouveau document.' };
+    }
+
+    // § 18 — un rapport déjà DIFFUSÉ n'est jamais réécrit : on produit une
     // nouvelle version, et l'ancienne reste telle qu'elle a été envoyée.
+    // « Diffusé » : envoyé par courriel, OU exposé par un lien de partage
+    // encore valable — le destinataire du lien détient l'URL tout autant.
     let cible = rapport;
     let nouvelleVersion = false;
-    if (rapport.statut === R.ETATS.ENVOYE) {
+    if (rapport.statut === R.ETATS.ENVOYE || await RapportsService._aUnLienActif(rapport.id)) {
       cible = await RapportsService._creerVersionSuivante(rapport, utilisateur);
+      if (!cible) {
+        return { success: false, message: 'Une nouvelle version de ce rapport est déjà en cours de création.' };
+      }
       nouvelleVersion = true;
     }
 
@@ -588,7 +610,26 @@ class RapportsService {
     const ancienPdf = cible.fichier_url;
     const ancienXlsx = cible.fichier_xlsx_url;
 
-    await cible.update({ statut: R.ETATS.GENERATION, erreur: null });
+    // UNE génération à la fois. Deux clics produisaient deux compositions,
+    // deux fichiers (l'un orphelin) et deux lignes d'historique. La
+    // réclamation est conditionnelle ; une génération restée « en cours »
+    // plus de 15 minutes (process tué) peut être reprise.
+    const [reclamees] = await Rapport.update(
+      { statut: R.ETATS.GENERATION, erreur: null },
+      {
+        where: {
+          id: cible.id,
+          [Op.or]: [
+            { statut: { [Op.ne]: R.ETATS.GENERATION } },
+            { updatedAt: { [Op.lt]: new Date(Date.now() - 15 * 60 * 1000) } },
+          ],
+        },
+      }
+    );
+    if (!reclamees) {
+      return { success: false, message: 'Ce rapport est déjà en cours de génération.' };
+    }
+    cible.statut = R.ETATS.GENERATION;
 
     try {
       const vue = await etapeGeneration(
@@ -658,7 +699,14 @@ class RapportsService {
     } catch (err) {
       // L'ÉCHEC EST UN ÉTAT (§ 19), pas un silence : le rapport reste dans la
       // liste, avec son motif, et peut être relancé.
-      await cible.update({ statut: R.ETATS.ECHEC, erreur: err.message }).catch(() => {});
+      // Si l'état « échec » ne peut pas être écrit (base tombée), le rapport
+      // RESTE affiché en cours de génération, sans motif ni bouton de reprise.
+      // Ce n'était pas journalisé : plus aucune trace de ce qui s'était passé.
+      await cible.update({ statut: R.ETATS.ECHEC, erreur: err.message }).catch((errMaj) => {
+        logger.error(`[rapport] État « échec » non enregistré — rapport ${cible.id} bloqué dans son état précédent`, {
+          rapportId: cible.id, error: errMaj.message, causeInitiale: err.message,
+        });
+      });
       await RapportsService._journaliser(cible.id, R.ACTIONS_HISTORIQUE.ECHEC, utilisateur?.id, {
         etape: err.etapeRapport || null, message: err.message,
       });
@@ -666,8 +714,32 @@ class RapportsService {
     }
   }
 
-  /** Duplique la configuration dans une NOUVELLE version (§ 18). */
+  /** Vrai si un lien de partage non révoqué et non expiré expose ce rapport. */
+  static async _aUnLienActif(rapportId) {
+    const actifs = await RapportPartage.count({
+      where: {
+        rapportId,
+        revoque_le: null,
+        [Op.or]: [{ expire_le: null }, { expire_le: { [Op.gt]: new Date() } }],
+      },
+    });
+    return actifs > 0;
+  }
+
+  /**
+   * Duplique la configuration dans une NOUVELLE version (§ 18).
+   *
+   * Le parent est archivé EN PREMIER, par une mise à jour conditionnelle : deux
+   * demandes simultanées créaient deux « v+1 » sous le même parent. La
+   * perdante reçoit `null`.
+   */
   static async _creerVersionSuivante(rapport, utilisateur) {
+    const [archive] = await Rapport.update(
+      { statut: R.ETATS.ARCHIVE },
+      { where: { id: rapport.id, statut: { [Op.ne]: R.ETATS.ARCHIVE } } }
+    );
+    if (!archive) return null;
+
     const suivant = await Rapport.create({
       chantierId: rapport.chantierId,
       type: rapport.type,
@@ -686,8 +758,8 @@ class RapportsService {
     });
 
     // L'ancienne version reste lisible, avec son fichier : c'est le document
-    // que l'entreprise a reçu.
-    await rapport.update({ statut: R.ETATS.ARCHIVE });
+    // que l'entreprise a reçu. (Archivée plus haut, de façon conditionnelle.)
+    rapport.statut = R.ETATS.ARCHIVE;
     await RapportsService._journaliser(rapport.id, R.ACTIONS_HISTORIQUE.ARCHIVE, utilisateur?.id, {
       remplacePar: suivant.id, version: suivant.version,
     });
@@ -919,7 +991,9 @@ class RapportsService {
       }, {
         model: Partenaire, as: 'entrepriseCible', required: false, attributes: ['id', 'nom'],
       }],
-      order: [['createdAt', 'DESC']],
+      // `id` départage les rapports du même instant (générations par lot) :
+      // sans lui, l'ordre entre deux pages n'est pas garanti.
+      order: [['createdAt', 'DESC'], ['id', 'DESC']],
       limit,
       offset,
       distinct: true,

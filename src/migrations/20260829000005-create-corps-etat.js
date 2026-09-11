@@ -118,8 +118,15 @@ module.exports = {
       await queryInterface.addIndex('corps_etat', ['organisation_id'], { name: 'corps_etat_organisation_id' });
       await queryInterface.addIndex('corps_etat', ['actif'], { name: 'corps_etat_actif' });
       await queryInterface.addIndex('corps_etat', ['code'], { name: 'corps_etat_code' });
+    }
 
-      // ── Unicité du nom ────────────────────────────────────────────────────
+    // ── Unicité du nom ────────────────────────────────────────────────────
+    //
+    // HORS du `if (!existe)` : sur une base vierge, la table existe déjà
+    // (créée d'après le modèle par 20260809000000), et ces index — que le
+    // modèle ne déclare pas — n'étaient alors JAMAIS posés. `IF NOT EXISTS`
+    // les rend sûrs à poser dans les deux cas.
+    {
       //
       // DEUX index PARTIELS et non un seul index composite : en SQL, deux NULL
       // ne sont pas égaux. Un `UNIQUE (organisation_id, nom)` laisserait donc
@@ -134,12 +141,12 @@ module.exports = {
       // corps d'état supprimé continuerait d'interdire la création d'un
       // homonyme, sans que rien à l'écran ne l'explique.
       await queryInterface.sequelize.query(`
-      CREATE UNIQUE INDEX corps_etat_nom_standard_unique
+      CREATE UNIQUE INDEX IF NOT EXISTS corps_etat_nom_standard_unique
         ON corps_etat (lower(nom))
         WHERE organisation_id IS NULL AND deleted_at IS NULL;
       `);
       await queryInterface.sequelize.query(`
-      CREATE UNIQUE INDEX corps_etat_nom_organisation_unique
+      CREATE UNIQUE INDEX IF NOT EXISTS corps_etat_nom_organisation_unique
         ON corps_etat (organisation_id, lower(nom))
         WHERE organisation_id IS NOT NULL AND deleted_at IS NULL;
       `);

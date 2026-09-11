@@ -8,6 +8,9 @@ const { startCleanupExpiredTokensJob } = require('./jobs/cleanupExpiredTokens.jo
 const { startEnRetardJob } = require('./jobs/markReservesEnRetard.job.js');
 const { startRemindersJob } = require('./jobs/reminders.job.js');
 const { startPurgeDonneesPersonnellesJob } = require('./jobs/purgeDonneesPersonnelles.job.js');
+const { reprendreApresDemarrage, annulerReprises } = require('./utils/executerJob.js');
+const etatApplication = require('./utils/etatApplication.js');
+const metrics = require('./utils/metrics.js');
 const logger = require('./utils/logger.js');
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -34,17 +37,56 @@ const isLeader = instanceId === undefined || instanceId === '' || instanceId ===
 let tachesPlanifiees = [];
 
 // ── Handlers process non capturées ────────────────────────────────────────────
+// CORRECTIFS :
+//   - `unhandledRejection` journalisait `String(reason)` : « Error: … » sans la
+//     PILE — impossible de retrouver la promesse orpheline fautive ;
+//   - les deux handlers faisaient `process.exit(1)` IMMÉDIAT : toutes les
+//     requêtes en cours sur ce worker (celles des autres utilisateurs)
+//     étaient coupées net, et la dernière ligne de journal pouvait ne jamais
+//     atteindre le fichier.
+// Le process s'arrête toujours (son état n'est plus garanti), mais par l'arrêt
+// propre : plus de nouvelles requêtes, drainage des requêtes en cours (10 s
+// au plus), code de sortie 1 — PM2 / Docker le relancent.
 process.on('uncaughtException', (err) => {
-  logger.error('uncaughtException', { message: err.message, stack: err.stack });
-  process.exit(1);
+  metrics.incrementer('process.uncaught_exception');
+  logger.error(`uncaughtException — arrêt du worker : ${err.message}`, { error: err.message, stack: err.stack });
+  arretPropre('uncaughtException', 1);
 });
 
 process.on('unhandledRejection', (reason) => {
-  logger.error('unhandledRejection', { reason: String(reason) });
-  process.exit(1);
+  const err = reason instanceof Error ? reason : null;
+  metrics.incrementer('process.unhandled_rejection');
+  logger.error(`unhandledRejection — arrêt du worker : ${err ? err.message : String(reason)}`, {
+    error: err ? err.message : String(reason),
+    stack: err?.stack,
+  });
+  arretPropre('unhandledRejection', 1);
 });
 
 let server = null;
+
+/**
+ * Délais HTTP du serveur Node — CORRECTIF (audit performance).
+ *
+ * Aucun n'était posé : Node gardait ses valeurs par défaut, dont un
+ * keep-alive de 5 s PLUS COURT que celui de nginx en amont (60 s,
+ * `keepalive 32`). nginx réutilisait alors une connexion que Node venait de
+ * fermer : 502 sporadiques, plus fréquents sous charge, quand le pool de
+ * connexions amont tourne le plus.
+ *   - keepAliveTimeout > délai de nginx (65 s > 60 s) ;
+ *   - headersTimeout > keepAliveTimeout, comme l'exige Node ;
+ *   - requestTimeout : aucune requête ne reste ouverte plus de 2 min, même
+ *     si un client lent n'envoie son corps qu'au compte-gouttes.
+ */
+const DELAIS_HTTP = Object.freeze({
+  keepAliveTimeout: 65_000,
+  headersTimeout: 66_000,
+  requestTimeout: 120_000,
+});
+
+function appliquerDelaisHttp(serveur) {
+  Object.assign(serveur, DELAIS_HTTP);
+}
 
 async function demarrer() {
   try {
@@ -81,9 +123,17 @@ async function demarrer() {
       // Admin par défaut (idempotent, mais pas concurrent-safe : leader seul)
       await seedAdmin();
 
+      // Exécutions interrompues par l'arrêt précédent → « interrompu » ;
+      // passages manqués des jobs de maintenance → rattrapés. Non attendu :
+      // le démarrage HTTP n'a pas à patienter derrière un rattrapage.
+      reprendreApresDemarrage().catch((err) => {
+        logger.warn('[job] Reprise au démarrage impossible', { error: err.message });
+      });
+
       // ── Tâches planifiées ──────────────────────────────────────────────────
       // Leader seul : sinon chaque tick de cron serait exécuté une fois par
-      // worker (N notifications identiques par réserve).
+      // worker (N notifications identiques par réserve). Le verrou PostgreSQL
+      // de utils/executerJob.js couvre en plus le cas de plusieurs hôtes.
       tachesPlanifiees = [
         startCleanupExpiredTokensJob(),
         startEnRetardJob(),
@@ -105,6 +155,7 @@ async function demarrer() {
     server = app.listen(PORT, HOST, () => {
       logger.info(`Serveur lancé sur ${HOST}:${PORT} [${process.env.NODE_ENV || 'development'}]`);
     });
+    appliquerDelaisHttp(server);
   } catch (err) {
     logger.error('Erreur fatale au démarrage', { error: err.message, stack: err.stack });
     process.exit(1);
@@ -124,22 +175,27 @@ async function demarrer() {
 // tâches AVANT de fermer la connexion base.
 let arretEnCours = false;
 
-async function arretPropre(signal) {
+async function arretPropre(signal, codeSortie = 0) {
   // Garde d'idempotence : les signaux suivants sont simplement journalisés.
   if (arretEnCours) {
     logger.info(`${signal} reçu — arrêt déjà en cours, ignoré`);
     return;
   }
   arretEnCours = true;
+  // La sonde /health/ready répond 503 dès maintenant : le répartiteur retire
+  // l'instance pendant qu'elle finit ses requêtes.
+  etatApplication.signalerArret();
   logger.info(`${signal} reçu — arrêt propre`);
 
   // Filet de sécurité : forcer la sortie après 10 s quoi qu'il arrive.
-  const filet = setTimeout(() => process.exit(0), 10_000);
+  const filet = setTimeout(() => process.exit(codeSortie), 10_000);
   filet.unref();
 
   try {
-    // 1. Ne plus déclencher de nouveaux traitements planifiés.
+    // 1. Ne plus déclencher de nouveaux traitements planifiés — ni les
+    //    reprises de jobs programmées après une erreur passagère.
     //    node-cron 4.x : ScheduledTask.stop() est void | Promise<void>.
+    annulerReprises();
     await Promise.all(
       tachesPlanifiees.map(async (tache) => {
         try {
@@ -153,16 +209,21 @@ async function arretPropre(signal) {
 
     // 2. Cesser d'accepter de nouvelles connexions HTTP et drainer les en-cours.
     if (server && server.listening) {
-      await new Promise((resolve) => server.close(() => resolve()));
+      const fermeture = new Promise((resolve) => server.close(() => resolve()));
+      // Connexions keep-alive INACTIVES (nginx en garde un lot ouvert) :
+      // `close()` attendait leur expiration (65 s), le filet de 10 s coupait
+      // alors la sortie AVANT la fermeture de la base.
+      server.closeIdleConnections?.();
+      await fermeture;
     }
 
     // 3. Fermer le pool PostgreSQL une fois plus personne ne l'utilise.
     await sequelize.close();
   } catch (err) {
-    logger.error('Erreur pendant l’arrêt propre', { error: err.message });
+    logger.error('Erreur pendant l’arrêt propre', { error: err.message, stack: err.stack });
   } finally {
     clearTimeout(filet);
-    process.exit(0);
+    process.exit(codeSortie);
   }
 }
 

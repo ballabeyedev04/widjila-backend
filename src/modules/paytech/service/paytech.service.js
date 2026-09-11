@@ -211,13 +211,18 @@ class PayTechService {
         throw new Error(message || 'Échec de la création du paiement PayTech');
       }
 
-      logger.info(`[paytech] Paiement initié: ${refCommand} -> token: ${token}`);
+      // Le jeton de paiement ouvre la page de paiement et sert à en lire le
+      // statut : il n'a rien à faire en clair dans un journal. Son début suffit
+      // à recouper avec la console PayTech.
+      logger.info(`[paytech] Paiement initié: ${refCommand} -> token: ${String(token || '').slice(0, 6)}…`);
       return { success: true, token, redirectUrl: redirect_url };
     } catch (err) {
-      logger.error(`[paytech] Erreur requestPayment: ${err.message}`);
-      if (err.response?.data) {
-        logger.error(`[paytech] Réponse erreur:`, err.response.data);
-      }
+      logger.error(`[paytech] Erreur requestPayment: ${err.message}`, {
+        dependance: 'paytech',
+        statutHttp: err.response?.status,
+        code: err.code,
+        reponse: err.response?.data,
+      });
       throw new Error(`Erreur PayTech: ${err.response?.data?.message || err.message}`);
     }
   }

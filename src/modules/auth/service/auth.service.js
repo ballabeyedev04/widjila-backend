@@ -2,7 +2,8 @@
 
 const crypto = require('crypto');
 const hashToken = require('../../../utils/hashToken.js');
-const bcrypt = require('bcryptjs');
+// bcrypt NATIF (hors boucle d'événements) — voir utils/motDePasse.js.
+const bcrypt = require('../../../utils/motDePasse.js');
 const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
 const { Utilisateur, Organisation, RefreshToken, MfaChallenge } = require('../../../models/index.js');
@@ -68,6 +69,45 @@ function _generateMfaToken(utilisateur) {
     { id: utilisateur.id, type: 'mfa', jti: crypto.randomUUID() },
     jwtConfig.secret,
     { expiresIn: `${MFA_CHALLENGE_MINUTES}m` }
+  );
+}
+
+// ─── Transfert de session mobile → navigateur ─────────────────────────────────
+//
+// Le mobile n'encaisse rien : « Choisir cette formule » ouvre la page
+// d'abonnement du web dans le navigateur du téléphone. Ce navigateur n'a
+// aucune session — il n'a jamais vu l'utilisateur se connecter — et la page
+// tombait sur des 401 en série (`/abonnement/status`, puis `/auth/refresh`
+// sans cookie) avant de renvoyer vers l'écran de connexion.
+//
+// Le mobile demande donc un CODE DE TRANSFERT, qu'il glisse dans l'adresse ;
+// la page l'échange contre une session ordinaire (jeton d'accès + cookie
+// httpOnly). Le code, et jamais le jeton d'accès ni le refresh token :
+//   - il est À USAGE UNIQUE — son empreinte est rangée dans `refresh_tokens`
+//     et supprimée à l'échange, par une suppression conditionnelle qui sert
+//     d'arbitre si deux échanges se croisent ;
+//   - il vit DEUX MINUTES — le temps d'ouvrir le navigateur, pas davantage :
+//     une adresse retrouvée dans l'historique ne rouvre plus rien ;
+//   - il est signé avec le secret des refresh tokens et porte son propre
+//     `type` : il ne vaut ni jeton d'accès (`auth.middleware` vérifie un
+//     autre secret et refuse tout `type`), ni refresh token (`refresh()`
+//     exige `type: 'refresh'`).
+const TRANSFERT_WEB_SECONDES = 120;
+const TRANSFERT_WEB_TYPE = 'transfert_web';
+const TRANSFERT_WEB_INVALIDE = "Ce lien de connexion a expiré ou a déjà servi. Connectez-vous pour continuer.";
+
+function _generateTransfertWeb(utilisateur) {
+  return jwt.sign(
+    {
+      id: utilisateur.id,
+      type: TRANSFERT_WEB_TYPE,
+      // Version des jetons à l'émission : un mot de passe changé entre
+      // l'émission et l'échange périme le code, comme il périme les sessions.
+      tv: utilisateur.token_version || 0,
+      jti: crypto.randomUUID(),
+    },
+    jwtConfig.refreshSecret,
+    { expiresIn: TRANSFERT_WEB_SECONDES }
   );
 }
 
@@ -554,6 +594,77 @@ class AuthService {
       await t.rollback();
       throw err;
     }
+  }
+
+  // -------------------- TRANSFERT MOBILE → NAVIGATEUR --------------------
+  /**
+   * Émet un code de transfert pour l'utilisateur connecté sur le mobile.
+   * Voir `_generateTransfertWeb` pour le raisonnement.
+   *
+   * `utilisateur` vient de `auth` + `checkActiveUser` : session valide et
+   * compte actif sont déjà vérifiés.
+   *
+   * Le code est rangé par un simple `create`, et non par `_storeRefreshToken` :
+   * ce dernier plafonne le nombre de sessions en supprimant la plus ancienne —
+   * un code de deux minutes ne doit pas déconnecter un autre appareil.
+   */
+  static async creerTransfertWeb(utilisateur) {
+    const code = _generateTransfertWeb(utilisateur);
+    await RefreshToken.create({
+      tokenHash: _hashToken(code),
+      utilisateurId: utilisateur.id,
+      expiresAt: new Date(jwt.decode(code).exp * 1000),
+    });
+    return { success: true, code, expiresIn: TRANSFERT_WEB_SECONDES };
+  }
+
+  /**
+   * Échange un code de transfert contre une session web complète.
+   *
+   * Tous les refus portent le MÊME message : dire lequel des contrôles a
+   * échoué renseignerait celui qui essaie des codes, sans aider l'utilisateur,
+   * dont le seul recours est le même dans tous les cas — se connecter.
+   */
+  static async echangerTransfertWeb({ code }, meta = {}) {
+    const refus = { success: false, message: TRANSFERT_WEB_INVALIDE };
+    if (!code) return refus;
+
+    let decoded;
+    try {
+      decoded = jwt.verify(code, jwtConfig.refreshSecret, { algorithms: ['HS256'] });
+    } catch {
+      return refus;
+    }
+    if (decoded.type !== TRANSFERT_WEB_TYPE) return refus;
+
+    // Usage unique : la suppression conditionnelle est l'arbitre. Deux
+    // échanges simultanés du même code — un double chargement de la page —
+    // ne peuvent pas ouvrir deux sessions : le second ne supprime rien.
+    const consommes = await RefreshToken.destroy({
+      where: {
+        tokenHash: _hashToken(code),
+        utilisateurId: decoded.id,
+        revoked: false,
+        expiresAt: { [Op.gt]: new Date() },
+      },
+    });
+    if (consommes === 0) return refus;
+
+    const utilisateur = await Utilisateur.findByPk(decoded.id);
+    // Même règle que `refresh()` : seul un compte actif reçoit une session.
+    if (!utilisateur || utilisateur.statut !== 'actif') return refus;
+    if ((decoded.tv ?? 0) !== (utilisateur.token_version ?? 0)) return refus;
+
+    const { accessToken, refreshToken } = await AuthService.emettreTokens(utilisateur);
+    // `type: 'refresh'` : la colonne est une énumération, et c'est bien une
+    // session DÉRIVÉE d'une session existante — pas une saisie de mot de
+    // passe. L'origine précise est gardée dans `donnees`.
+    await journaliserConnexion({
+      utilisateurId: utilisateur.id, email: utilisateur.email, succes: true, type: 'refresh', meta,
+      donnees: { origine: 'transfert_mobile_web' },
+    });
+
+    return { success: true, token: accessToken, refreshToken, utilisateur };
   }
 
   // -------------------- DÉCONNEXION --------------------

@@ -4,36 +4,36 @@ const cron = require('node-cron');
 const { Op } = require('sequelize');
 const { RefreshToken, UserOtp } = require('../models/index.js');
 const logger = require('../utils/logger.js');
+const { envelopperJob } = require('../utils/executerJob.js');
 
 /**
  * Purge des RefreshToken expirés/révoqués et des UserOtp expirés.
  * Ces tables grossissent à chaque login / demande OTP sans purge — elles
  * n'ont aucune autre mécanique de nettoyage dans le code.
+ *
+ * L'échec éventuel est journalisé et compté par `envelopperJob`.
  */
 async function cleanupExpiredTokens() {
-  try {
-    const now = new Date();
+  const now = new Date();
 
-    const deletedRefreshTokens = await RefreshToken.destroy({
-      where: {
-        [Op.or]: [
-          { expiresAt: { [Op.lt]: now } },
-          { revoked: true },
-        ],
-      },
-    });
+  const deletedRefreshTokens = await RefreshToken.destroy({
+    where: {
+      [Op.or]: [
+        { expiresAt: { [Op.lt]: now } },
+        { revoked: true },
+      ],
+    },
+  });
 
-    const deletedOtps = await UserOtp.destroy({
-      where: { expiresAt: { [Op.lt]: now } },
-    });
+  const deletedOtps = await UserOtp.destroy({
+    where: { expiresAt: { [Op.lt]: now } },
+  });
 
-    logger.info('[job] Nettoyage tokens expirés', {
-      refreshTokensSupprimés: deletedRefreshTokens,
-      otpsSupprimés: deletedOtps,
-    });
-  } catch (err) {
-    logger.error('[job] Échec nettoyage tokens expirés', { error: err.message, stack: err.stack });
-  }
+  logger.info('[job] Nettoyage tokens expirés', {
+    refreshTokensSupprimés: deletedRefreshTokens,
+    otpsSupprimés: deletedOtps,
+  });
+  return { refreshTokens: deletedRefreshTokens, otps: deletedOtps };
 }
 
 // CORRECTIF (fuseau horaire des crons non fixé) : sans option `timezone`,
@@ -45,13 +45,20 @@ async function cleanupExpiredTokens() {
 // l'objet ScheduledTask retourné expose stop()/destroy().
 const CRON_TZ = process.env.CRON_TZ || 'Europe/Paris';
 
+const UNE_SEMAINE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const executerNettoyage = envelopperJob('nettoyage-jetons', cleanupExpiredTokens, {
+  periodeMs: UNE_SEMAINE_MS,
+  rattrapage: true,
+});
+
 /**
  * Démarre le job — chaque lundi à 00h00 (fuseau CRON_TZ).
  * @returns {import('node-cron').ScheduledTask} tâche planifiée, à conserver
  *   pour pouvoir l'arrêter lors de l'arrêt propre du serveur (voir server.js).
  */
 function startCleanupExpiredTokensJob() {
-  const task = cron.schedule('0 0 * * 1', cleanupExpiredTokens, { timezone: CRON_TZ });
+  const task = cron.schedule('0 0 * * 1', executerNettoyage, { timezone: CRON_TZ });
   logger.info(`[job] Nettoyage tokens expirés planifié (chaque lundi 00h00 ${CRON_TZ})`);
   return task;
 }

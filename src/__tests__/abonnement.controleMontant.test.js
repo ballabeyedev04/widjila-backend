@@ -18,7 +18,7 @@
  */
 
 jest.mock('../models/index.js', () => ({
-  AbonnementSouscrit: { findOne: jest.fn(), update: jest.fn().mockResolvedValue([0]) },
+  AbonnementSouscrit: { findOne: jest.fn(), findByPk: jest.fn(), update: jest.fn().mockResolvedValue([0]) },
   PlanAbonnement: { findOne: jest.fn(), findAll: jest.fn() },
   Organisation: { findByPk: jest.fn(), update: jest.fn() },
   EvenementPaiement: { create: jest.fn() },
@@ -44,8 +44,26 @@ const enAttente = (surcharges = {}) => ({
   ...surcharges,
 });
 
+const sequelizeReel = require('../config/db.js');
+
 describe('_activerDepuisPaiement — contrôle du montant', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Transaction jouée sans base ; la relecture sous verrou rend la même ligne.
+    jest.spyOn(sequelizeReel, 'transaction').mockImplementation(async (fn) => fn({ LOCK: { UPDATE: 'UPDATE' } }));
+    AbonnementSouscrit.findByPk.mockImplementation((...args) => AbonnementSouscrit.findOne(...args));
+  });
+
+  it('une devise SANS décimale (XOF) se compare en unités, pas en centimes', async () => {
+    // 32 800 XOF encaissés valent 32 800, pas 3 280 000 : le ×100 aurait fait
+    // facturer cent fois le prix — et valider l'écart.
+    const souscription = enAttente({ prix_paye: '32800', devise: 'XOF' });
+    AbonnementSouscrit.findOne.mockResolvedValue(souscription);
+
+    await SubscriptionService._activerDepuisPaiement(REFERENCE, 'cus_1', { montantRecu: 32800, devise: 'xof' });
+
+    expect(souscription.update).toHaveBeenCalledTimes(1);
+  });
 
   it('active quand le montant encaissé correspond au prix de la formule', async () => {
     const souscription = enAttente();

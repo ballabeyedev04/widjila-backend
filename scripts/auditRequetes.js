@@ -57,7 +57,7 @@ const HORS_SEQUELIZE = new Set([
   'getDataValue', 'setDataValue', 'getTableName', 'getAttributes', 'getAssociations', 'getQueryInterface',
   'getTime', 'getFullYear', 'getMonth', 'getDate', 'getDay', 'getHours', 'getMinutes', 'getSeconds',
   'getMilliseconds', 'getTimezoneOffset', 'getUTCFullYear', 'getUTCMonth', 'getUTCDate', 'getUTCDay',
-  'getUTCHours', 'getUTCMinutes', 'getUTCSeconds', 'setHours', 'setDate', 'setMonth', 'setFullYear',
+  'getUTCHours', 'getUTCMinutes', 'getUTCSeconds', 'getUTCMilliseconds', 'setHours', 'setDate', 'setMonth', 'setFullYear',
   'setMinutes', 'setSeconds', 'setMilliseconds', 'setUTCHours', 'setUTCDate', 'setTime',
   'hasOwnProperty', 'getOwnPropertyNames', 'getItem', 'setItem', 'setTimeout', 'setInterval',
   'setHeader', 'getHeader', 'hasHeader', 'removeHeader', 'removeListener', 'removeAllListeners',
@@ -70,6 +70,9 @@ const HORS_SEQUELIZE = new Set([
   'getCell', 'getColumn', 'addImage', 'addTable', 'addPage',
   // pdf-lib — incrustation des plans dans les rapports (rapportPlans.js)
   'getPage', 'getPages', 'getPageCount', 'getSize', 'getRotation', 'setRotation',
+  // Node AsyncLocalStorage (requestContext.js), gestionnaire de connexions
+  // Sequelize (verrou des jobs, executerJob.js), QueryInterface (migrations)
+  'getStore', 'getConnection', 'createTable', 'addColumn', 'addIndex', 'removeColumn', 'removeIndex',
 ]);
 
 const rel = (f) => path.relative(RACINE, f).replace(/\\/g, '/');

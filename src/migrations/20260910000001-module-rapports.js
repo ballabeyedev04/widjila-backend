@@ -31,6 +31,8 @@
  * indiscernable un rapport non généré d'un rapport dont le fichier a disparu.
  */
 
+const { idempotent } = require('../utils/migrationIdempotente.js');
+
 /** UUID portable — `gen_random_uuid()` n'existe qu'à partir de PostgreSQL 13. */
 const UUID_SQL = "uuid_in(md5(random()::text || clock_timestamp()::text)::cstring)";
 
@@ -46,6 +48,9 @@ const MODELE_PAR_TYPE = {
 
 module.exports = {
   async up(queryInterface, Sequelize) {
+    // Base vierge : tables rapport_* déjà créées d'après les modèles par
+    // 20260809000000 — voir utils/migrationIdempotente.js.
+    queryInterface = idempotent(queryInterface);
     const t = await queryInterface.sequelize.transaction();
     try {
       const table = await queryInterface.describeTable('rapports');

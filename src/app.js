@@ -20,6 +20,12 @@ const auditTrail = require('./middlewares/auditTrail.middleware.js');
 const { captureRawBody } = require('./middlewares/rawBody.middleware.js');
 const { ensureUploadDir, ouvrirFichier } = require('./infrastructure/storage.service.js');
 const r2 = require('./infrastructure/r2.service.js');
+const crypto = require('node:crypto');
+const redisClient = require('./config/redis.js');
+const requestId = require('./middlewares/requestId.middleware.js');
+const metrics = require('./utils/metrics.js');
+const etatApplication = require('./utils/etatApplication.js');
+const { avecDelai } = require('./utils/circuitBreaker.js');
 
 // Créer le dossier des uploads au démarrage (si absent)
 ensureUploadDir();
@@ -30,6 +36,27 @@ const isProd = process.env.NODE_ENV === 'production';
 // Nginx tourne sur le même serveur → 1 seul proxy de confiance (loopback)
 // Nécessaire pour que express-rate-limit lise X-Forwarded-For correctement
 app.set('trust proxy', 1);
+
+// ── Corrélation et mesure — EN PREMIER ─────────────────────────────────────
+// Toute réponse, y compris un refus de CORS ou de limiteur, porte ainsi un
+// `X-Request-Id` et entre dans les métriques (voir requestId.middleware.js
+// et utils/metrics.js). Deux middlewares synchrones, sans accès réseau.
+app.use(requestId);
+app.use(metrics.mesurerRequetes);
+
+// Sonde du pool PostgreSQL pour /metrics : connexions utilisées, libres, et
+// requêtes en ATTENTE d'une connexion — le signal d'un pool épuisé.
+metrics.enregistrerSonde('pool_db', () => {
+  const pool = sequelize.connectionManager?.pool;
+  if (!pool || typeof pool.size !== 'number') return null;
+  return {
+    taille: pool.size,
+    disponibles: pool.available,
+    utilisees: pool.using,
+    enAttente: pool.waiting,
+    max: pool.maxSize ?? null,
+  };
+});
 
 // ── Sécurité & headers ─────────────────────────────────────────────────────
 // helmet avec directives explicites (audit M10) : CSP stricte, Permissions-Policy
@@ -72,9 +99,17 @@ app.use(cookieParser());
 const masquerUrl = require('./utils/masquerUrl.js');
 morgan.token('url-masquee', (req) => masquerUrl(req.originalUrl || req.url));
 morgan.token('referent-masque', (req) => masquerUrl(req.headers.referer || req.headers.referrer || ''));
+// Identifiant de requête et utilisateur : sans eux, la ligne d'accès ne se
+// reliait ni à la ligne d'erreur du même appel, ni à la personne concernée.
+// L'utilisateur est lu à la FIN de la requête (morgan écrit à la réponse),
+// donc après `auth`. Identifiant interne (UUID), jamais l'e-mail.
+morgan.token('request-id', (req) => req.id || '-');
+morgan.token('utilisateur', (req) => req.user?.id || '-');
+// `:response-time` manquait au format de production : impossible de
+// retrouver les appels lents dans les journaux.
 const FORMAT_JOURNAL = isProd
-  ? ':remote-addr - :remote-user [:date[clf]] ":method :url-masquee HTTP/:http-version" :status :res[content-length] ":referent-masque" ":user-agent"'
-  : ':method :url-masquee :status :response-time ms - :res[content-length]';
+  ? ':remote-addr - :utilisateur [:date[clf]] ":method :url-masquee HTTP/:http-version" :status :res[content-length] :response-time ms ":referent-masque" ":user-agent" rid=:request-id'
+  : ':method :url-masquee :status :response-time ms - :res[content-length] rid=:request-id';
 app.use(morgan(FORMAT_JOURNAL, {
   stream: { write: (msg) => logger.info(msg.trim()) }
 }));
@@ -149,39 +184,123 @@ const servirUploads = [auth, checkActiveUser, checkFileAccess, relayerFichier];
 app.use('/uploads', ...servirUploads);
 app.use('/api/v1/uploads', ...servirUploads);
 
-// ── Health check (hors versioning — utilisé par Docker / load balancer) ───
-// Correctif (audit — Charge à 10 000 utilisateurs §4) : ne vérifiait QUE la
-// base de données. Derrière un load-balancer multi-instances, une panne du
-// stockage R2 (tous les plans/documents/photos) restait invisible de la
-// supervision — l'instance continuait de recevoir du trafic alors qu'une
-// part significative de l'application était dégradée.
+// ── Sondes de santé (hors versioning — Docker, load balancer, mobile) ─────
 //
-// La sonde R2 est bornée à 3s (Promise.race) pour ne jamais faire dépendre
-// la latence du health check d'un fournisseur externe lent à répondre.
-app.get('/health', async (req, res) => {
+// DEUX questions distinctes, qu'une seule route mélangeait :
+//
+//   GET /health/live   — le process répond-il ? Aucune dépendance consultée :
+//                        c'est la sonde de redémarrage. Une base en panne ne
+//                        doit PAS faire redémarrer en boucle des workers sains.
+//
+//   GET /health/ready  — l'instance peut-elle servir ? Base, Redis, stockage.
+//   GET /health          (alias, conservé : Dockerfile, deploy.yml, nginx et le
+//                        détecteur de connexion du mobile l'appellent)
+//                        503 si la base est injoignable OU si l'arrêt propre
+//                        a commencé — le répartiteur retire l'instance avant
+//                        que son port se ferme.
+//
+// Correctifs sur la sonde de disponibilité :
+//   - la base n'avait AUCUN délai : pool épuisé, `authenticate()` attendait
+//     l'acquisition d'une connexion (30 s) — bien au-delà des 10 s du
+//     HEALTHCHECK Docker, qui concluait à un conteneur mort ;
+//   - un stockage R2 qui ne répondait pas dans les 3 s était compté comme
+//     SAIN (le délai rendait `joignable: null`, pris pour « pas en panne ») ;
+//   - chaque appel refaisait une requête SQL et un appel R2. Le mobile
+//     interroge cette route toutes les 20 s quand il se croit hors ligne :
+//     pendant une panne, des milliers d'appareils la martelaient. Le bilan
+//     est désormais mis en cache 5 s, et un seul calcul court à la fois.
+const DELAI_SONDE_MS = 3000;
+const DUREE_CACHE_SANTE_MS = 5000;
+let bilanSante = null;
+let bilanSanteLe = 0;
+let bilanSanteEnCours = null;
+
+async function evaluerSante() {
   const [dbCheck, storageCheck] = await Promise.allSettled([
-    sequelize.authenticate().then(() => 'connected'),
-    Promise.race([
-      r2.ping(),
-      new Promise((resolve) => setTimeout(() => resolve({ configure: null, joignable: null, delai_depasse: true }), 3000)),
-    ]),
+    avecDelai(sequelize.authenticate(), DELAI_SONDE_MS, 'de base de données'),
+    avecDelai(r2.ping(), DELAI_SONDE_MS, 'de stockage'),
   ]);
 
   const dbOk = dbCheck.status === 'fulfilled';
-  const storage = storageCheck.status === 'fulfilled' ? storageCheck.value : { configure: null, joignable: false };
+  const storage = storageCheck.status === 'fulfilled'
+    ? storageCheck.value
+    : { configure: null, joignable: false, delai_depasse: true };
   // R2 non configuré (repli disque local, cf. storage.service.js) n'est pas
   // une panne en développement — seule une config présente mais injoignable
   // dégrade le statut global.
   const storageOk = storage.joignable !== false;
+  // Redis est un accélérateur (limiteurs, cache) : son absence dégrade, elle
+  // ne rend pas l'instance inapte.
+  const redis = redisClient ? (redisClient.status === 'ready' ? 'connected' : `disconnected (${redisClient.status})`) : 'non configuré';
+  const redisOk = !redisClient || redisClient.status === 'ready';
 
-  const body = {
-    status: dbOk && storageOk ? 'ok' : 'degraded',
-    db: dbOk ? 'connected' : 'disconnected',
-    storage: storage.configure === false ? 'disque local (R2 non configuré)' : (storage.joignable ? 'connected' : 'disconnected'),
-    uptime: process.uptime(),
-    timestamp: Date.now(),
+  return {
+    dbOk,
+    corps: {
+      status: dbOk && storageOk && redisOk ? 'ok' : 'degraded',
+      db: dbOk ? 'connected' : 'disconnected',
+      storage: storage.configure === false ? 'disque local (R2 non configuré)' : (storage.joignable ? 'connected' : 'disconnected'),
+      redis,
+      uptime: process.uptime(),
+      timestamp: Date.now(),
+    },
   };
-  res.status(dbOk ? 200 : 503).json(body);
+}
+
+function santeEnCache() {
+  if (bilanSante && Date.now() - bilanSanteLe < DUREE_CACHE_SANTE_MS) return Promise.resolve(bilanSante);
+  if (!bilanSanteEnCours) {
+    bilanSanteEnCours = evaluerSante()
+      .then((bilan) => {
+        bilanSante = bilan;
+        bilanSanteLe = Date.now();
+        return bilan;
+      })
+      .finally(() => { bilanSanteEnCours = null; });
+  }
+  return bilanSanteEnCours;
+}
+
+app.get('/health/live', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime(), timestamp: Date.now() });
+});
+
+const sondeDisponibilite = async (req, res) => {
+  const { dbOk, corps } = await santeEnCache();
+  const enArret = etatApplication.estEnArret();
+  const reponse = enArret ? { ...corps, status: 'arret en cours' } : corps;
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(dbOk && !enArret ? 200 : 503).json(reponse);
+};
+app.get('/health', sondeDisponibilite);
+app.get('/health/ready', sondeDisponibilite);
+
+// ── Métriques (voir utils/metrics.js) ──────────────────────────────────────
+// En production, uniquement avec `Authorization: Bearer <METRICS_TOKEN>` ;
+// sans jeton configuré, la route n'existe pas. Elle révèle les routes, les
+// volumes et les pannes des dépendances : rien à exposer publiquement.
+app.get('/metrics', (req, res) => {
+  const jeton = process.env.METRICS_TOKEN;
+  if (!jeton && isProd) {
+    return res.status(404).json({ success: false, message: 'Ressource introuvable', requestId: req.id });
+  }
+  if (jeton) {
+    const fourni = Buffer.from(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+    const attendu = Buffer.from(jeton);
+    if (fourni.length !== attendu.length || !crypto.timingSafeEqual(fourni, attendu)) {
+      return res.status(401).json({
+        success: false,
+        message: 'Non authentifié',
+        error: { code: 'NON_AUTHENTIFIE', message: 'Non authentifié' },
+        requestId: req.id,
+      });
+    }
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.query.format === 'prometheus') {
+    return res.type('text/plain; version=0.0.4').send(metrics.formatPrometheus());
+  }
+  return res.json(metrics.instantane());
 });
 
 // ── Routes ─────────────────────────────────────────────────────────────────
@@ -316,8 +435,15 @@ app.use('/api/v1/admin/demandes-inscription', adminDemandeRoutes);
 app.use('/api/v1/admin/demandes-suppression', adminSuppressionRoutes);
 
 // ── 404 — route inconnue ───────────────────────────────────────────────────
+// Même enveloppe que le gestionnaire d'erreurs : `error.code` distingue une
+// ROUTE inconnue (faute du client) d'une ressource absente (404 métier).
 app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Ressource introuvable' });
+  res.status(404).json({
+    success: false,
+    message: 'Ressource introuvable',
+    error: { code: 'ROUTE_INTROUVABLE', message: 'Ressource introuvable' },
+    requestId: req.id,
+  });
 });
 
 // ── Gestionnaire d'erreurs centralisé (doit être en dernier) ──────────────

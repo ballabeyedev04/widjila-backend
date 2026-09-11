@@ -191,6 +191,12 @@ const modifierReserveSchema = Joi.object({
   positionY: COORDONNEE_PLAN.optional(),
   positionZoom: Joi.number().greater(0).max(100).optional(),
   positionPage: Joi.number().integer().min(1).max(2000).optional(),
+  // Valeurs que le client avait SOUS LES YEUX avant sa modification — le
+  // service s'en sert pour détecter qu'un autre a modifié le même champ
+  // entre-temps (A2-13, `ReserveService._conflitsModification`). Sans cette
+  // déclaration, `stripUnknown` la retirait : le mobile l'envoyait, le serveur
+  // ne la voyait jamais, et la seconde modification écrasait la première.
+  valeursInitiales: Joi.object().pattern(Joi.string().max(50), Joi.any()).max(20).optional(),
 }).custom(APLATIR_POSITION);
 
 const changerStatutReserveSchema = Joi.object({

@@ -78,6 +78,21 @@ function getClient() {
       accessKeyId: process.env.R2_ACCESS_KEY_ID,
       secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
     },
+    // DÉLAIS. Le client n'en avait aucun : une connexion R2 qui ne s'établit
+    // pas, ou une réponse qui ne vient pas, retenait indéfiniment la requête
+    // de l'utilisateur (plan, photo, rapport). Attention : sans
+    // `throwOnRequestTimeout`, le SDK se contente d'un AVERTISSEMENT en
+    // console quand `requestTimeout` est dépassé — la requête continue.
+    // Le délai de requête court jusqu'aux EN-TÊTES de la réponse, pas jusqu'à
+    // la fin du flux : un gros fichier relayé vers le client n'est pas coupé.
+    requestHandler: {
+      connectionTimeout: parseInt(process.env.R2_CONNECT_TIMEOUT_MS || '5000', 10),
+      requestTimeout: parseInt(process.env.R2_REQUEST_TIMEOUT_MS || '120000', 10),
+      throwOnRequestTimeout: true,
+    },
+    // Reprises du SDK (délai exponentiel avec part aléatoire), limitées aux
+    // erreurs réseau et 5xx/429 — les 4xx ne sont jamais rejouées.
+    maxAttempts: 3,
   });
   return client;
 }

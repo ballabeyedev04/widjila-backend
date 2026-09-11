@@ -99,18 +99,24 @@ module.exports = {
 
         await queryInterface.addIndex(table, ['organisation_id'], { name: `${table}_organisation` });
         await queryInterface.addIndex(table, ['actif'], { name: `${table}_actif` });
+      }
 
+      // HORS du `if` de création : sur une base vierge, la table existe déjà
+      // (créée d'après le modèle par 20260809000000) et ces index uniques —
+      // absents du modèle — n'étaient jamais posés. `IF NOT EXISTS` couvre
+      // les deux cas.
+      {
         // Unicité du CODE, séparément pour le standard et pour chaque
         // organisation : deux clients peuvent définir un « ppsps » chacun,
         // mais pas deux fois dans le même catalogue. Index PARTIELS —
         // `deleted_at IS NULL` pour qu'une suppression douce libère le code.
         await queryInterface.sequelize.query(`
-          CREATE UNIQUE INDEX ${table}_code_standard_unique
+          CREATE UNIQUE INDEX IF NOT EXISTS ${table}_code_standard_unique
             ON ${table} (lower(code))
             WHERE organisation_id IS NULL AND deleted_at IS NULL;
         `);
         await queryInterface.sequelize.query(`
-          CREATE UNIQUE INDEX ${table}_code_organisation_unique
+          CREATE UNIQUE INDEX IF NOT EXISTS ${table}_code_organisation_unique
             ON ${table} (organisation_id, lower(code))
             WHERE organisation_id IS NOT NULL AND deleted_at IS NULL;
         `);

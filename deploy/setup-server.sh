@@ -65,6 +65,16 @@ echo "==> [5/10] Création de l'utilisateur applicatif '${APP_USER}'"
 id "${APP_USER}" &>/dev/null || useradd -m -s /bin/bash "${APP_USER}"
 usermod -aG docker "${APP_USER}"
 
+# Rotation des journaux PM2. PM2 écrit la sortie du process (logs/pm2-*.log)
+# SANS limite de taille : sans ce module, le disque finit par se remplir et
+# l'API s'arrête d'écrire (journaux, uploads, base locale). Installé pour
+# l'utilisateur qui fait tourner PM2 — chaque utilisateur a son propre démon.
+echo "==> [5b/10] Rotation des journaux PM2 (pm2-logrotate) pour '${APP_USER}'"
+su - "${APP_USER}" -c "pm2 install pm2-logrotate \
+  && pm2 set pm2-logrotate:max_size 20M \
+  && pm2 set pm2-logrotate:retain 10 \
+  && pm2 set pm2-logrotate:compress true"
+
 echo "==> [6/10] Création de l'arborescence de l'application"
 mkdir -p "${APP_DIR}"
 mkdir -p "${APP_DIR}/logs"

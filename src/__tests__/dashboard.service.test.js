@@ -46,6 +46,9 @@ jest.mock('../utils/cache.js', () => ({
   lire: jest.fn(),
   ecrire: jest.fn(),
   invalider: jest.fn(),
+  // Vol unique : appelle simplement le calcul (voir dashboard.perf.test.js
+  // pour le partage réel entre appels simultanés).
+  volUnique: jest.fn((cle, calcul) => calcul()),
 }));
 
 const { Op } = require('sequelize');

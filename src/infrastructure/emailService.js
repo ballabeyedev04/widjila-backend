@@ -2,6 +2,7 @@
 
 const { Resend } = require('resend');
 const logger = require('../utils/logger.js');
+const { Disjoncteur } = require('../utils/circuitBreaker.js');
 
 const FROM = process.env.MAIL_FROM || 'SuivieChantier <onboarding@resend.dev>';
 const isProd = process.env.NODE_ENV === 'production';
@@ -22,6 +23,46 @@ function getResend() {
   resend = new Resend(process.env.RESEND_API_KEY);
   return resend;
 }
+
+/**
+ * Délai maximal d'un envoi.
+ *
+ * CORRECTIF : le SDK Resend appelle `fetch` sans signal d'abandon — un
+ * fournisseur qui accepte la connexion puis ne répond plus retenait la
+ * requête de l'utilisateur (envoi de rapport, code de réinitialisation)
+ * sans limite.
+ */
+const DELAI_ENVOI_MS = parseInt(process.env.EMAIL_TIMEOUT_MS || '15000', 10);
+
+/**
+ * Disjoncteur : pendant une panne de Resend, les envois échouent aussitôt au
+ * lieu d'accrocher chacun une requête HTTP jusqu'au délai (voir
+ * utils/circuitBreaker.js). Une adresse refusée (4xx hors 429) est une faute
+ * de la requête, pas une panne : elle ne compte pas.
+ */
+const disjoncteurEmail = new Disjoncteur('email', {
+  libelle: 'd’envoi d’e-mails',
+  delaiAppelMs: DELAI_ENVOI_MS,
+  seuilEchecs: 5,
+  dureeOuvertureMs: 60_000,
+  estEchecDependance: (err) => !(err.statutHttp >= 400 && err.statutHttp < 500 && err.statutHttp !== 429),
+});
+
+/** Erreur Resend (réponse `{ error }`, pas une exception) convertie en Error porteuse du statut. */
+function erreurResend(error) {
+  const err = new Error(error?.message || 'Erreur Resend');
+  err.name = 'ResendError';
+  err.statutHttp = error?.statusCode ?? null;
+  err.codeFournisseur = error?.name ?? null;
+  return err;
+}
+
+/**
+ * Adresses e-mail réduites à leur domaine. L'objet d'un courriel en contient
+ * parfois (« Demande de suppression de compte — jean@… ») et il était écrit
+ * tel quel dans le journal à chaque envoi.
+ */
+const masquerEmails = (texte) => String(texte || '').replace(/[^\s@<>"'(),;:]+@([^\s@<>"'(),;:]+)/g, '*@$1');
 
 /**
  * Envoi générique — utilisé par tous les autres helpers.
@@ -54,16 +95,31 @@ async function sendEmail({ to, cc, replyTo, subject, html, attachments = [] }) {
     ...(formattedAttachments.length > 0 && { attachments: formattedAttachments }),
   };
 
-  const { data, error } = await client.emails.send(payload);
+  // Ne JAMAIS journaliser l'adresse email complète (PII) — uniquement le domaine
+  const domaine = String((Array.isArray(to) ? to[0] : to) || '').split('@')[1] ?? '?';
 
-  if (error) {
-    logger.error('Resend — erreur envoi email :', error);
-    throw new Error(error.message);
+  let data;
+  try {
+    data = await disjoncteurEmail.executer(async () => {
+      const { data: reponse, error } = await client.emails.send(payload);
+      if (error) throw erreurResend(error);
+      return reponse;
+    });
+  } catch (err) {
+    // L'ancien `logger.error('…', error)` fusionnait l'objet Resend dans la
+    // ligne ; ici : statut, code, état du disjoncteur — de quoi dire si c'est
+    // l'adresse, le quota ou le fournisseur.
+    logger.error(`[email] Échec d’envoi à *@${domaine} — ${err.message}`, {
+      dependance: 'email',
+      statutHttp: err.statutHttp ?? err.statusCode,
+      code: err.code || err.codeFournisseur,
+      circuit: disjoncteurEmail.etatCourant().etat,
+      sujet: masquerEmails(subject),
+    });
+    throw err;
   }
 
-  // Ne JAMAIS journaliser l'adresse email complète (PII) — uniquement le domaine
-  const domaine = (Array.isArray(to) ? to[0] : to).split('@')[1] ?? '?';
-  logger.info(`[resend] Email envoyé à *@${domaine} — ${subject}${isProd ? '' : ` (id: ${data?.id})`}`);
+  logger.info(`[resend] Email envoyé à *@${domaine} — ${masquerEmails(subject)}${isProd ? '' : ` (id: ${data?.id})`}`);
 
   return data;
 }
@@ -258,4 +314,6 @@ module.exports = {
   sendRecuPaiementEmail,
   sendNouveauMembreEmail,
   sendDemandeSuppressionEmail,
+  disjoncteurEmail,
+  masquerEmails,
 };

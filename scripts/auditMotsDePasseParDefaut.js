@@ -24,7 +24,7 @@
  */
 
 const crypto = require('crypto');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('../src/utils/motDePasse.js');
 const { Utilisateur, RefreshToken } = require('../src/models/index');
 const { bcryptConfig } = require('../src/config/security.js');
 

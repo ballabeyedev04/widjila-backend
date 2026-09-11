@@ -23,11 +23,13 @@ exports.marquerLues = asyncHandler(async (req, res) => {
 });
 
 exports.compterNonLues = asyncHandler(async (req, res) => {
-  const result = await NotificationService.listNotifications(req.user.id, { nonLues: true, limit: 1 });
+  // Une seule requête COUNT (voir NotificationService.compterNonLues) — la
+  // liste complète n'était lue que pour en extraire ce nombre.
+  const nonLuesCount = await NotificationService.compterNonLues(req.user.id);
   res.status(200).json({
     success: true,
     message: 'Compteur récupéré',
-    data: { nonLuesCount: result.nonLuesCount },
+    data: { nonLuesCount },
   });
 });
 

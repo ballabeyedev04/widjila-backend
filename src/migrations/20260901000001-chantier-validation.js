@@ -27,10 +27,15 @@
  * statut de demandes en cours.
  */
 
+const { idempotent } = require('../utils/migrationIdempotente.js');
+
 const ENUM_ORIGINE = ['en_preparation', 'en_cours', 'en_pause', 'archive', 'cloture'];
 
 module.exports = {
   async up(queryInterface, Sequelize) {
+    // Base vierge : les colonnes existent déjà (créées d'après le modèle par
+    // 20260809000000) — voir utils/migrationIdempotente.js.
+    queryInterface = idempotent(queryInterface);
     const t = await queryInterface.sequelize.transaction();
     try {
       await queryInterface.sequelize.query(

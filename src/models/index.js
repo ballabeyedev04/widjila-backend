@@ -27,6 +27,8 @@ const RapportHistorique   = require('./rapportHistorique.model.js');
 const RapportPartage      = require('./rapportPartage.model.js');
 // ── Extensions modules 1-9 ─────────────────────────────────────────────
 const ConnexionLog       = require('./connexionLog.model.js');
+// Historique des tâches planifiées (utils/executerJob.js) — aucune association.
+const JobExecution       = require('./jobExecution.model.js');
 const ChantierMembre     = require('./chantierMembre.model.js');
 const Phase              = require('./phase.model.js');
 const Annotation         = require('./annotation.model.js');
@@ -387,5 +389,6 @@ module.exports = {
   ChecklistModele,
   Convocation,
   Partenaire,
-  MfaChallenge
+  MfaChallenge,
+  JobExecution,
 };

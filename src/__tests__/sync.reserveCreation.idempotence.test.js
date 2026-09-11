@@ -30,7 +30,10 @@ jest.mock('../config/db.js', () => ({
 }));
 
 jest.mock('../models/index.js', () => ({
-  Reserve: { findOne: jest.fn(), create: jest.fn() },
+  // `findByPk` : la création RELIT la réserve avec ses associations pour sa
+  // réponse (A2-03, `ReserveService._relire`). Sans relecture possible, le
+  // service renvoie la ligne écrite — le comportement que ce fichier vérifie.
+  Reserve: { findOne: jest.fn(), findByPk: jest.fn(), create: jest.fn() },
   ReservePosition: { create: jest.fn() },
   ReserveHistorique: { create: jest.fn() },
   Chantier: { findOne: jest.fn() },

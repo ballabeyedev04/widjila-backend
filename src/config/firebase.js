@@ -67,7 +67,7 @@ function getFirebaseApp() {
     app = initializeApp({ credential: cert(compte) });
     logger.info(`[push] Firebase Admin initialisé (projet ${compte.project_id})`);
   } catch (err) {
-    logger.error('[push] Initialisation Firebase impossible :', err.message);
+    logger.error('[push] Initialisation Firebase impossible — push désactivé', { error: err.message });
     app = null;
   }
   return app;

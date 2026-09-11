@@ -1,10 +1,11 @@
 'use strict';
 
 const Stripe = require('stripe');
-const { UniqueConstraintError } = require('sequelize');
+const { UniqueConstraintError, Op } = require('sequelize');
 const {
   Organisation, PlanAbonnement, AbonnementSouscrit, EvenementPaiement,
 } = require('../../../models/index.js');
+const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const RecuPaiementService = require('./recuPaiement.service.js');
 const DroitsService = require('./droits.service.js');
@@ -47,7 +48,10 @@ function getStripe() {
     logger.warn('[stripe] STRIPE_SECRET_KEY non définie — paiements par carte désactivés');
     return null;
   }
-  stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY);
+  // Délai de 80 s par défaut dans le SDK : un paiement bloqué retenait la
+  // requête plus longtemps que le proxy nginx ne l'attendait. Les reprises
+  // du SDK réutilisent la même clé d'idempotence : aucun double débit.
+  stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY, { timeout: 20000, maxNetworkRetries: 2 });
   return stripeClient;
 }
 
@@ -81,13 +85,61 @@ function vuePublique(plan) {
   };
 }
 
-/** Échéance d'une période, à partir de sa date de début. */
+/**
+ * Échéance d'une période, à partir de sa date de début.
+ *
+ * Bornée au DERNIER JOUR du mois visé, en UTC. `setMonth(+1)` débordait :
+ * un abonnement pris le 31 janvier finissait le 3 mars (2 en année
+ * bissextile), et les renouvellements, chaînés sur l'échéance précédente,
+ * gardaient ce décalage indéfiniment. Même chose pour un 29 février + 1 an.
+ */
 function calculerDateFin(debut, periode) {
-  const fin = new Date(debut);
-  if (periode === 'an') fin.setFullYear(fin.getFullYear() + 1);
-  else fin.setMonth(fin.getMonth() + 1);
-  return fin;
+  const d = new Date(debut);
+  const mois = periode === 'an' ? 12 : 1;
+  const cible = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + mois, 1,
+    d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()));
+  const dernierJour = new Date(Date.UTC(cible.getUTCFullYear(), cible.getUTCMonth() + 1, 0)).getUTCDate();
+  cible.setUTCDate(Math.min(d.getUTCDate(), dernierJour));
+  return cible;
 }
+
+/**
+ * Devises SANS subdivision chez Stripe : le montant se donne en unités, pas
+ * en centimes. Multiplier par 100 un tarif en francs CFA le facturait cent
+ * fois (et le contrôle d'encaissement, calculé de la même façon, validait
+ * l'erreur). Liste : documentation Stripe « zero-decimal currencies ».
+ */
+const DEVISES_SANS_DECIMALE = new Set([
+  'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF',
+  'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
+]);
+
+/** Montant dans la plus petite unité de la devise, tel que Stripe l'attend. */
+function montantStripe(prix, devise) {
+  const facteur = DEVISES_SANS_DECIMALE.has(String(devise || 'EUR').toUpperCase()) ? 1 : 100;
+  return Math.round(Number(prix) * facteur);
+}
+
+/**
+ * Début de la période d'une souscription qu'on active.
+ *
+ * Un paiement de la MÊME formule pendant qu'elle court encore est un
+ * renouvellement anticipé : la nouvelle période s'enchaîne à l'échéance en
+ * cours. Démarrer « maintenant » faisait perdre les jours déjà payés (et deux
+ * paiements lancés en parallèle en faisaient payer un pour rien). Un
+ * changement de formule, lui, s'applique tout de suite.
+ */
+function debutPeriode(courante, planCode) {
+  const maintenant = new Date();
+  if (courante && courante.plan_code === planCode && courante.date_fin
+      && new Date(courante.date_fin) > maintenant) {
+    return new Date(courante.date_fin);
+  }
+  return maintenant;
+}
+
+/** Délai au-delà duquel un traitement de webhook resté « en cours » est réputé mort. */
+const DELAI_TRAITEMENT_ABANDONNE_MS = 10 * 60 * 1000;
 
 class SubscriptionService {
 
@@ -300,7 +352,9 @@ class SubscriptionService {
     }
 
     const prix = Number(plan.prix);
-    const montant = Math.round(prix * 100); // Stripe facture en centimes
+    // Plus petite unité de la devise : centimes pour l'euro, unités pour le
+    // franc CFA (voir DEVISES_SANS_DECIMALE).
+    const montant = montantStripe(prix, plan.devise);
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: montant,
@@ -426,6 +480,12 @@ class SubscriptionService {
       // passage encore EN COURS n'a pas d'erreur — sa réémission concurrente
       // est donc un doublon, et non un second traitement qui expirerait la
       // souscription tout juste créée par le premier.
+      //
+      // Un traitement « en cours » depuis plus de DELAI_TRAITEMENT_ABANDONNE_MS
+      // est réputé mort (process tué, conteneur redémarré) : sans ce délai,
+      // ni `traite_le` ni `erreur` n'étaient jamais posés, et toutes les
+      // réémissions étaient ignorées — un paiement encaissé, jamais appliqué.
+      // `updated_at` est rafraîchi par chaque réclamation.
       const [reprises] = await EvenementPaiement.update(
         { erreur: null },
         {
@@ -433,7 +493,10 @@ class SubscriptionService {
             fournisseur,
             evenement_id: evenementId,
             traite_le: null,
-            erreur: { [require('sequelize').Op.ne]: null },
+            [Op.or]: [
+              { erreur: { [Op.ne]: null } },
+              { updatedAt: { [Op.lt]: new Date(Date.now() - DELAI_TRAITEMENT_ABANDONNE_MS) } },
+            ],
           },
         }
       );
@@ -523,8 +586,6 @@ class SubscriptionService {
       logger.warn(`[paiement] Aucune souscription pour la référence ${referencePaiement}`);
       return;
     }
-    if (souscription.statut === 'active') return; // déjà activée
-
     // ── Le montant encaissé doit correspondre à la formule activée ─────────
     //
     // La PaymentIntent est bien créée côté serveur à partir de
@@ -539,7 +600,7 @@ class SubscriptionService {
     // à ouvrir à la main qu'une formule accordée sans son prix.
     const { montantRecu, devise } = encaisse;
     if (montantRecu != null) {
-      const attendu = Math.round(Number(souscription.prix_paye) * 100);
+      const attendu = montantStripe(souscription.prix_paye, souscription.devise);
 
       if (!Number.isFinite(attendu) || attendu <= 0) {
         logger.error(
@@ -566,35 +627,85 @@ class SubscriptionService {
       }
     }
 
-    const debut = new Date();
-    await souscription.update({
-      statut: 'active',
-      date_debut: debut,
-      date_fin: calculerDateFin(debut, souscription.periode),
-      stripe_customer_id: stripeCustomerId || souscription.stripe_customer_id,
-    });
-
-    // Les souscriptions PRÉCÉDENTES cessent : sans cela, un changement de
-    // formule laisserait deux lignes actives et `souscriptionActive` en
-    // choisirait une au hasard.
-    await AbonnementSouscrit.update(
-      { statut: 'expiree' },
-      {
-        where: {
-          organisationId: souscription.organisationId,
-          statut: 'active',
-          id: { [require('sequelize').Op.ne]: souscription.id },
-        },
+    const activee = await SubscriptionService._activerSousVerrou(
+      souscription.organisationId,
+      async ({ t, courante }) => {
+        // Relue SOUS le verrou : deux réémissions du même webhook ne
+        // l'activent qu'une fois.
+        const fraiche = await AbonnementSouscrit.findByPk(souscription.id, { transaction: t });
+        if (fraiche.statut === 'active') {
+          // Déjà activée — mais une activation interrompue a pu laisser
+          // l'organisation désynchronisée : on répare, sans rien réactiver.
+          await SubscriptionService._synchroniserOrganisation(fraiche, t);
+          return null;
+        }
+        const debut = debutPeriode(courante, fraiche.plan_code);
+        return async () => {
+          await fraiche.update({
+            statut: 'active',
+            date_debut: debut,
+            date_fin: calculerDateFin(debut, fraiche.periode),
+            stripe_customer_id: stripeCustomerId || fraiche.stripe_customer_id,
+          }, { transaction: t });
+          return fraiche;
+        };
       }
     );
+    if (!activee) return;
 
-    await SubscriptionService._synchroniserOrganisation(souscription);
-    logger.info(`[paiement] Abonnement ${souscription.plan_code} activé pour ${souscription.organisationId}`);
+    logger.info(`[paiement] Abonnement ${activee.plan_code} activé pour ${activee.organisationId}`);
 
-    // Le reçu part EN DERNIER, et sans jamais pouvoir faire échouer ce qui
-    // précède : l'abonnement est payé et actif, un PDF manquant se rattrape,
-    // une activation perdue non. `emettre` avale ses propres erreurs.
-    await RecuPaiementService.emettre(souscription);
+    // Le reçu part APRÈS le commit, et sans jamais pouvoir faire échouer ce
+    // qui précède : l'abonnement est payé et actif, un PDF manquant se
+    // rattrape, une activation perdue non. `emettre` avale ses propres erreurs.
+    await RecuPaiementService.emettre(activee);
+  }
+
+  /**
+   * Active UNE souscription pour une organisation, tout ou rien.
+   *
+   * Trois écritures — expirer la souscription en cours, activer la nouvelle,
+   * recopier l'état sur l'organisation — s'enchaînaient sans transaction ni
+   * verrou. Deux activations simultanées (deux paiements, un webhook et une
+   * activation manuelle) expiraient chacune la ligne de l'autre : une
+   * organisation qui avait payé finissait sans aucune souscription active, et
+   * `checkSubscription` la bloquait. Un arrêt entre deux écritures laissait
+   * zéro ou deux souscriptions actives.
+   *
+   * Désormais : verrou de la ligne `organisations` (sérialise toutes les
+   * activations d'une même organisation), expiration AVANT activation (l'index
+   * unique partiel « une seule active par organisation » n'est jamais heurté),
+   * synchronisation dans la même transaction.
+   *
+   * @param {string} organisationId
+   * @param {(ctx: { t, courante }) => Promise<null | (() => Promise<AbonnementSouscrit>)>} preparer
+   *   Renvoie `null` quand il n'y a rien à activer, sinon la fonction qui
+   *   crée ou met à jour la souscription à l'état `active`.
+   * @returns {Promise<AbonnementSouscrit|null>} la souscription activée.
+   */
+  static async _activerSousVerrou(organisationId, preparer) {
+    let activee = null;
+    await sequelize.transaction(async (t) => {
+      await Organisation.findByPk(organisationId, {
+        attributes: ['id'], transaction: t, lock: t.LOCK.UPDATE,
+      });
+      const courante = await AbonnementSouscrit.findOne({
+        where: { organisationId, statut: 'active' },
+        order: [['date_fin', 'DESC']],
+        transaction: t,
+      });
+
+      const activer = await preparer({ t, courante });
+      if (!activer) return;
+
+      await AbonnementSouscrit.update(
+        { statut: 'expiree' },
+        { where: { organisationId, statut: 'active' }, transaction: t }
+      );
+      activee = await activer();
+      await SubscriptionService._synchroniserOrganisation(activee, t);
+    });
+    return activee;
   }
 
   static async _marquerEchec(referencePaiement) {
@@ -690,42 +801,47 @@ class SubscriptionService {
       return;
     }
 
-    // Rejeu : la référence est unique en base, on ne recrée pas.
-    if (reference) {
-      const dejaLa = await AbonnementSouscrit.findOne({ where: { reference_paiement: reference } });
-      if (dejaLa) return;
-    }
-
-    const debut = new Date();
     const prixCatalogue = plan.prix === null ? null : Number(plan.prix);
     const ecart = montantRecu !== undefined && montantRecu !== null
       && prixCatalogue !== null && Number(montantRecu) !== prixCatalogue;
 
-    await AbonnementSouscrit.update(
-      { statut: 'expiree' },
-      { where: { organisationId, statut: 'active' } }
-    );
-
-    const souscription = await AbonnementSouscrit.create({
+    const souscription = await SubscriptionService._activerSousVerrou(
       organisationId,
-      planAbonnementId: plan.id,
-      plan_code: plan.code,
-      plan_nom: plan.nom,
-      prix_paye: prixCatalogue,
-      devise: plan.devise,
-      periode: plan.periode,
-      statut: 'active',
-      date_debut: debut,
-      date_fin: calculerDateFin(debut, plan.periode),
-      fournisseur,
-      reference_paiement: reference || null,
-      note: ecart
-        ? `Montant annoncé par ${fournisseur} : ${montantRecu} — différent du tarif catalogue (${prixCatalogue}).`
-        : null,
-    });
+      async ({ t, courante }) => {
+        // Rejeu : la référence est unique en base, on ne recrée pas. Relu
+        // SOUS le verrou, deux notifications simultanées ne passent pas.
+        if (reference) {
+          const dejaLa = await AbonnementSouscrit.findOne({
+            where: { reference_paiement: reference }, transaction: t,
+          });
+          if (dejaLa) return null;
+        }
+        const debut = debutPeriode(courante, plan.code);
+        return async () => AbonnementSouscrit.create({
+          organisationId,
+          planAbonnementId: plan.id,
+          plan_code: plan.code,
+          plan_nom: plan.nom,
+          prix_paye: prixCatalogue,
+          devise: plan.devise,
+          periode: plan.periode,
+          statut: 'active',
+          date_debut: debut,
+          date_fin: calculerDateFin(debut, plan.periode),
+          fournisseur,
+          reference_paiement: reference || null,
+          note: ecart
+            ? `Montant annoncé par ${fournisseur} : ${montantRecu} — différent du tarif catalogue (${prixCatalogue}).`
+            : null,
+        }, { transaction: t });
+      }
+    );
+    if (!souscription) return;
 
-    await SubscriptionService._synchroniserOrganisation(souscription);
     logger.info(`[paiement] Abonnement ${plan.code} activé pour ${organisationId} via ${fournisseur}`);
+    // Un paiement Mobile Money a droit à son reçu, comme un paiement par
+    // carte (le reçu prévoit ce cas). `emettre` avale ses propres erreurs.
+    await RecuPaiementService.emettre(souscription);
   }
 
   /**
@@ -736,8 +852,8 @@ class SubscriptionService {
    * `abonnements_souscrits` ; ces colonnes n'en sont qu'un reflet, conservé
    * pour ne rien casser de l'existant.
    */
-  static async _synchroniserOrganisation(souscription) {
-    const org = await Organisation.findByPk(souscription.organisationId);
+  static async _synchroniserOrganisation(souscription, transaction = undefined) {
+    const org = await Organisation.findByPk(souscription.organisationId, { transaction });
     if (!org) return;
 
     await org.update({
@@ -745,7 +861,7 @@ class SubscriptionService {
       abonnement: souscription.plan_nom,
       stripe_customer_id: souscription.stripe_customer_id || org.stripe_customer_id,
       stripe_subscription_id: souscription.stripe_subscription_id || org.stripe_subscription_id,
-    });
+    }, { transaction });
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -793,30 +909,27 @@ class SubscriptionService {
     const debut = new Date();
     const periodeRetenue = periode || plan.periode;
 
-    // Les souscriptions actives précédentes cessent — même règle que pour un
-    // paiement, sinon deux lignes resteraient actives en parallèle.
-    await AbonnementSouscrit.update(
-      { statut: 'expiree' },
-      { where: { organisationId, statut: 'active' } }
+    // Les souscriptions actives précédentes cessent — même règle, et même
+    // transaction verrouillée, que pour un paiement (voir _activerSousVerrou).
+    const souscription = await SubscriptionService._activerSousVerrou(
+      organisationId,
+      async ({ t }) => async () => AbonnementSouscrit.create({
+        organisationId,
+        planAbonnementId: plan.id,
+        plan_code: plan.code,
+        plan_nom: plan.nom,
+        prix_paye: prix === undefined || prix === null ? plan.prix : prix,
+        devise: plan.devise,
+        periode: periodeRetenue,
+        statut: 'active',
+        date_debut: debut,
+        date_fin: dateFin ? new Date(dateFin) : calculerDateFin(debut, periodeRetenue),
+        fournisseur: 'manuel',
+        activee_par: adminId || null,
+        note: note || null,
+      }, { transaction: t })
     );
 
-    const souscription = await AbonnementSouscrit.create({
-      organisationId,
-      planAbonnementId: plan.id,
-      plan_code: plan.code,
-      plan_nom: plan.nom,
-      prix_paye: prix === undefined || prix === null ? plan.prix : prix,
-      devise: plan.devise,
-      periode: periodeRetenue,
-      statut: 'active',
-      date_debut: debut,
-      date_fin: dateFin ? new Date(dateFin) : calculerDateFin(debut, periodeRetenue),
-      fournisseur: 'manuel',
-      activee_par: adminId || null,
-      note: note || null,
-    });
-
-    await SubscriptionService._synchroniserOrganisation(souscription);
     logger.info(`[abonnement] Activation manuelle ${plan.code} pour ${organisationId} par ${adminId}`);
 
     return { success: true, message: 'Abonnement activé', souscription };
@@ -826,3 +939,5 @@ class SubscriptionService {
 module.exports = SubscriptionService;
 module.exports.vuePublique = vuePublique;
 module.exports.calculerDateFin = calculerDateFin;
+module.exports.montantStripe = montantStripe;
+module.exports.debutPeriode = debutPeriode;

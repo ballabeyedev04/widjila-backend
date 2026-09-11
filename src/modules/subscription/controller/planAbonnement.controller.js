@@ -81,7 +81,8 @@ exports.listerSouscriptions = asyncHandler(async (req, res) => {
       { model: Organisation, as: 'organisation', attributes: ['id', 'nom', 'email'], required: false },
       { model: PlanAbonnement, as: 'plan', attributes: ['id', 'code', 'nom'], required: false },
     ],
-    order: [['createdAt', 'DESC']],
+    // `id` départage les lignes du même instant — pagination stable.
+    order: [['createdAt', 'DESC'], ['id', 'DESC']],
     limit,
     offset: (page - 1) * limit,
   });

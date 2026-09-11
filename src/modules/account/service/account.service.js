@@ -1,6 +1,7 @@
 'use strict';
 
-const bcrypt = require('bcryptjs');
+// bcrypt NATIF (hors boucle d'événements) — voir utils/motDePasse.js.
+const bcrypt = require('../../../utils/motDePasse.js');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const sequelize = require('../../../config/db.js');
@@ -16,6 +17,10 @@ const { genererAccessToken } = require('../../auth/service/auth.service.js');
 const logger = require('../../../utils/logger.js');
 const { SAFE_USER_ATTRIBUTES } = require('../../../utils/formatUser.js');
 const hashToken = require('../../../utils/hashToken.js');
+const { GESTION } = require('../../../config/roles.js');
+
+/** Rôles qui gèrent l'organisation — GESTION sans le super-admin plateforme. */
+const ROLES_GESTIONNAIRES = GESTION.filter((r) => r !== 'Admin');
 
 // Hash constant pour égaliser le temps de réponse (anti énumération par timing)
 const DUMMY_HASH = '$2b$12$LmKBP5z6RvWnAnsFOVK9Qeq7C2JKvPAzTq/xz7rJa2Y5m.JnHkTFO';
@@ -389,6 +394,27 @@ class AccountService {
     if (!utilisateur) return { error: 'Utilisateur introuvable' };
     if (utilisateur.role === 'Admin') {
       return { error: 'Un compte Admin ne peut pas être supprimé via cette route.' };
+    }
+
+    // Le dernier gestionnaire actif ne s'efface pas d'une organisation qui
+    // compte encore des membres actifs : plus personne ne pourrait y gérer
+    // l'équipe, les droits ni l'abonnement. Même règle que la gestion des
+    // membres (organisation.service.js — supprimerMembre, modifierMembre),
+    // que ce chemin contournait. Seul dans son organisation, il reste libre
+    // de partir : il ne laisse personne sans gestion.
+    if (utilisateur.organisationId && utilisateur.statut === 'actif'
+      && ROLES_GESTIONNAIRES.includes(utilisateur.role)) {
+      const autres = { organisationId: utilisateur.organisationId, statut: 'actif', id: { [Op.ne]: utilisateur.id } };
+      const [gestionnaires, membres] = await Promise.all([
+        Utilisateur.count({ where: { ...autres, role: ROLES_GESTIONNAIRES } }),
+        Utilisateur.count({ where: autres }),
+      ]);
+      if (gestionnaires === 0 && membres > 0) {
+        return {
+          error: 'Vous êtes le dernier gestionnaire actif de votre organisation : '
+            + 'nommez un autre gestionnaire avant de supprimer votre compte.',
+        };
+      }
     }
 
     await AccountService.pseudonymiserEtSupprimer(utilisateur);

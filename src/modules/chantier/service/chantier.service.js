@@ -299,50 +299,52 @@ class ChantierService {
     const refus = ChantierService._refusVerdictSurSaDemande(chantier, valideur);
     if (refus) return { success: false, message: refus };
 
-    await chantier.update({
-      statut: 'en_preparation',
-      motifRejet: null,
-      valideParId: valideur.id,
-      valideLe: new Date(),
-    });
+    // ── Verdict, appartenance et plans : tout ou rien, sous verrou ────────
+    //
+    // Ces écritures s'enchaînaient sans transaction ni verrou :
+    //   - deux valideurs, l'un validant et l'autre refusant au même instant,
+    //     passaient tous deux le contrôle de statut ; l'état final était
+    //     « rejete » alors que les plans étaient déjà passés « actif », et le
+    //     demandeur recevait les deux courriels ;
+    //   - un échec entre la validation et la mise à jour des plans laissait
+    //     ceux-ci « en_attente_validation » POUR TOUJOURS (on ne peut plus
+    //     valider un chantier qui n'est plus en demande) : aucune réserve ne
+    //     pouvait y être posée.
+    // Le statut est RELU sous `SELECT … FOR UPDATE` ; le perdant de la course
+    // reçoit « n'est plus en attente ». Les courriels partent après le commit.
+    const dejaTranche = await sequelize.transaction(async (t) => {
+      const verrouille = await Chantier.findByPk(chantierId, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!verrouille || !STATUT_CHANTIER_EN_DEMANDE.includes(verrouille.statut)) return true;
 
-    // Le DEMANDEUR devient membre du chantier qu'il a obtenu.
-    //
-    // Le cloisonnement le laissait déjà passer par `demandeurId`, mais cette
-    // porte est une coïncidence de circuit, pas une appartenance : elle ne
-    // survivrait pas à un changement de propriétaire du chantier, et elle ne
-    // dit rien aux autres écrans. L'affectation, elle, est explicite et
-    // durable — c'est elle qui décrit l'équipe.
-    //
-    // `findOrCreate` sur l'index unique (chantier, utilisateur) : revalider un
-    // chantier rejeté puis corrigé ne crée pas de doublon.
-    //
-    // Un échec ici ne fait PAS échouer la validation : le chantier est ouvert,
-    // c'est l'essentiel, et le demandeur y accède de toute façon par
-    // `demandeurId`. Bloquer une validation pour une ligne de liaison serait
-    // disproportionné.
-    if (chantier.demandeurId) {
-      try {
-        await ChantierMembre.findOrCreate({
-          where: { chantierId: chantier.id, utilisateurId: chantier.demandeurId },
-          defaults: { roleChantier: 'demandeur' },
-        });
-      } catch (err) {
-        logger.warn(`[chantier] Affectation du demandeur impossible (${err.message})`);
+      const verdict = { statut: 'en_preparation', motifRejet: null, valideParId: valideur.id, valideLe: new Date() };
+      await verrouille.update(verdict, { transaction: t });
+
+      // Le DEMANDEUR devient membre du chantier obtenu (`findOrCreate` : une
+      // revalidation ne crée pas de doublon). Un échec ici ne bloque PAS la
+      // validation — le demandeur y accède déjà par `demandeurId` — mais il
+      // est isolé dans un SAVEPOINT : sans lui, l'erreur SQL avorterait la
+      // transaction entière et la mise à jour des plans échouerait derrière.
+      if (verrouille.demandeurId) {
+        try {
+          await sequelize.transaction({ transaction: t }, (sp) => ChantierMembre.findOrCreate({
+            where: { chantierId: verrouille.id, utilisateurId: verrouille.demandeurId },
+            defaults: { roleChantier: 'demandeur' },
+            transaction: sp,
+          }));
+        } catch (err) {
+          logger.warn(`[chantier] Affectation du demandeur impossible (${err.message})`);
+        }
       }
+      await Plan.update(
+        { statut: 'actif' },
+        { where: { chantierId: verrouille.id, statut: 'en_attente_validation' }, transaction: t }
+      );
+      Object.assign(chantier, verdict);
+      return false;
+    });
+    if (dejaTranche) {
+      return { success: false, message: 'Ce chantier n’est plus en attente de validation : un autre valideur l’a déjà tranché.' };
     }
-
-    // Les plans joints suivent le chantier : validés avec lui, ils deviennent
-    // exploitables au même instant. Sans cette cascade, le chantier serait
-    // ouvert mais ses plans resteraient invisibles — l'entreprise recevrait un
-    // courriel de validation pour un chantier vide.
-    //
-    // Ciblé sur les plans EN ATTENTE : un plan déjà actif (dépôt ultérieur sur
-    // un chantier revalidé) n'a pas à être retouché.
-    await Plan.update(
-      { statut: 'actif' },
-      { where: { chantierId: chantier.id, statut: 'en_attente_validation' } }
-    );
 
     if (chantier.demandeur && chantier.demandeur.email) {
       await _notifier({
@@ -381,12 +383,19 @@ class ChantierService {
     const refus = ChantierService._refusVerdictSurSaDemande(chantier, valideur);
     if (refus) return { success: false, message: refus };
 
-    await chantier.update({
-      statut: 'rejete',
-      motifRejet: motif,
-      valideParId: valideur.id,
-      valideLe: new Date(),
+    // Même arbitrage que la validation : statut relu SOUS VERROU, le perdant
+    // d'une course « valider / rejeter » ne réécrit pas le verdict de l'autre.
+    const dejaTranche = await sequelize.transaction(async (t) => {
+      const verrouille = await Chantier.findByPk(chantierId, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!verrouille || verrouille.statut !== 'en_attente_validation') return true;
+      const verdict = { statut: 'rejete', motifRejet: motif, valideParId: valideur.id, valideLe: new Date() };
+      await verrouille.update(verdict, { transaction: t });
+      Object.assign(chantier, verdict);
+      return false;
     });
+    if (dejaTranche) {
+      return { success: false, message: 'Ce chantier n’est plus en attente de validation : un autre valideur l’a déjà tranché.' };
+    }
 
     if (chantier.demandeur && chantier.demandeur.email) {
       await _notifier({
@@ -489,9 +498,16 @@ class ChantierService {
     const chantierIds = rows.map((c) => c.id);
     const [compteurs, plansParChantier] = chantierIds.length
       ? await Promise.all([
+          // GROUPÉ par (chantier, statut) — CORRECTIF (audit performance) :
+          // la requête ramenait UNE LIGNE PAR RÉSERVE de tous les chantiers
+          // de la page, comptées ensuite en JavaScript. 20 chantiers de 2 000
+          // réserves = 40 000 lignes transférées et parcourues à chaque
+          // affichage de la liste, pour produire 60 entiers. La base les
+          // compte elle-même : au plus une ligne par (chantier, statut).
           Reserve.findAll({
             where: { chantierId: chantierIds },
-            attributes: ['chantierId', 'statut'],
+            attributes: ['chantierId', 'statut', [fn('COUNT', col('id')), 'n']],
+            group: ['chantierId', 'statut'],
             raw: true,
           }),
           Plan.findAll({
@@ -509,10 +525,11 @@ class ChantierService {
 
     const statsMap = {};
     for (const c of compteurs) {
+      const n = Number(c.n) || 0;
       statsMap[c.chantierId] = statsMap[c.chantierId] || { total: 0, ouvertes: 0, validees: 0 };
-      statsMap[c.chantierId].total += 1;
-      if (['validee', 'cloturee'].includes(c.statut)) statsMap[c.chantierId].validees += 1;
-      else statsMap[c.chantierId].ouvertes += 1;
+      statsMap[c.chantierId].total += n;
+      if (['validee', 'cloturee'].includes(c.statut)) statsMap[c.chantierId].validees += n;
+      else statsMap[c.chantierId].ouvertes += n;
     }
 
     const chantiers = rows.map((c) => {
@@ -675,12 +692,28 @@ class ChantierService {
     // ferme tout autant le chantier (il sort des tableaux de bord actifs) :
     // il suffisait donc d'archiver au lieu de clôturer pour solder un chantier
     // avec des réserves non levées, exactement ce que la règle interdit.
-    if (STATUTS_FERMETURE.includes(statut)) {
+    if (!STATUTS_FERMETURE.includes(statut)) {
+      await chantier.update({ statut });
+      return { success: true, message: 'Statut du chantier mis à jour', chantier };
+    }
+
+    // Fermeture : compte des réserves ouvertes ET changement de statut sous le
+    // MÊME verrou. La création de réserve prend un verrou partagé sur la ligne
+    // du chantier et relit son statut (reserve.service.js#creerReserve) : une
+    // réserve ne peut donc plus naître entre le comptage et la clôture, ni
+    // après — un chantier clôturé avec une réserve ouverte était possible.
+    return sequelize.transaction(async (t) => {
+      const verrouille = await Chantier.findOne({
+        where: { id: chantierId, organisationId }, transaction: t, lock: t.LOCK.UPDATE,
+      });
+      if (!verrouille) return { success: false, message: 'Chantier introuvable' };
+      if (STATUT_CHANTIER_EN_DEMANDE.includes(verrouille.statut)) {
+        return { success: false, message: 'Ce chantier est une demande en cours : validez-la ou refusez-la.' };
+      }
+
       const ouvertes = await Reserve.count({
-        where: {
-          chantierId,
-          statut: { [Op.notIn]: RESERVE_SOLDEE },
-        },
+        where: { chantierId, statut: { [Op.notIn]: RESERVE_SOLDEE } },
+        transaction: t,
       });
       if (ouvertes > 0) {
         const action = statut === 'archive' ? 'd’archiver' : 'de clôturer';
@@ -689,10 +722,10 @@ class ChantierService {
           message: `Impossible ${action} le chantier : ${ouvertes} réserve(s) encore ouverte(s).`,
         };
       }
-    }
 
-    await chantier.update({ statut });
-    return { success: true, message: 'Statut du chantier mis à jour', chantier };
+      await verrouille.update({ statut }, { transaction: t });
+      return { success: true, message: 'Statut du chantier mis à jour', chantier: verrouille };
+    });
   }
 
   // -------------------- SUPPRIMER UN CHANTIER --------------------

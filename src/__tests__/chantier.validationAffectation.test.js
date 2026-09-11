@@ -32,7 +32,8 @@ jest.mock('../infrastructure/emailService.js', () => ({
   sendChantierValidationEmail: jest.fn().mockResolvedValue(null),
 }));
 
-const { Chantier, ChantierMembre } = require('../models/index.js');
+const { Chantier, ChantierMembre, Plan } = require('../models/index.js');
+const sequelize = require('../config/db.js');
 const ChantierService = require('../modules/chantier/service/chantier.service.js');
 
 const VALIDEUR = { id: 'gestionnaire-1', role: 'ChefProjet' };
@@ -52,6 +53,25 @@ describe('validerChantier — rattachement du demandeur', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     ChantierMembre.findOrCreate.mockResolvedValue([{}, true]);
+    // La validation s'écrit sous transaction ; le verrou relit le chantier.
+    // `transaction(options, fn)` : le savepoint du rattachement.
+    jest.spyOn(sequelize, 'transaction').mockImplementation(async (a, b) => (typeof a === 'function' ? a : b)({ LOCK: { UPDATE: 'UPDATE' } }));
+  });
+
+  it('un autre valideur a tranché entre la lecture et le verrou : refus, rien n’est écrit', async () => {
+    // Deux valideurs au même instant : la première lecture voit la demande en
+    // attente, la relecture SOUS VERROU voit la validation de l'autre.
+    const lue = demandeEnAttente();
+    const tranchee = { ...demandeEnAttente(), statut: 'en_preparation' };
+    Chantier.findByPk.mockResolvedValueOnce(lue).mockResolvedValueOnce(tranchee);
+
+    const res = await ChantierService.validerChantier('chantier-1', VALIDEUR);
+
+    expect(res.success).toBe(false);
+    expect(res.message).toMatch(/déjà tranché/);
+    expect(tranchee.update).not.toHaveBeenCalled();
+    expect(ChantierMembre.findOrCreate).not.toHaveBeenCalled();
+    expect(Plan.update).not.toHaveBeenCalled();
   });
 
   it('inscrit le demandeur comme membre du chantier validé', async () => {

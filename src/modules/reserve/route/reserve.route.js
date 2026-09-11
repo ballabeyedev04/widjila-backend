@@ -6,6 +6,8 @@ const reserveController = require('../controller/reserve.controller.js');
 const reserveExtraController = require('../controller/reserveExtra.controller.js');
 const reserveExcelController = require('../controller/reserveExcel.controller.js');
 const mediaController = require('../../media/controller/media.controller.js');
+const observationsController = require('../controller/observations.controller.js');
+const { suggestionsObservationSchema } = require('../validation/observations.validation.js');
 const upload = require('../../../middlewares/upload.middleware.js');
 const auth = require('../../../middlewares/auth.middleware.js');
 const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware.js');
@@ -67,6 +69,18 @@ router.post(
 // les deux motifs ne se recouvrent pas (`:id` exige un segment), l'ordre n'est
 // donc pas fonctionnellement nécessaire ici.
 router.get('/reserves', auth, checkActiveUser, checkSubscription, paginate(), reserveController.listerToutesReserves);
+
+// Observations déjà saisies PAR L'UTILISATEUR — suggestions du champ
+// « Observation » à la création d'une réserve (mobile). Déclarée AVANT
+// `/reserves/:id`, qui capturerait sinon « observations » comme identifiant.
+router.get(
+  '/reserves/observations',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  validate(suggestionsObservationSchema, 'query'),
+  observationsController.listerObservationsUtilisees
+);
 
 router.get('/reserves/:id', auth, checkActiveUser, checkSubscription, reserveController.detailReserve);
 

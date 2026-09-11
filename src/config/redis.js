@@ -33,6 +33,20 @@ if (process.env.REDIS_URL) {
     // l'API pour un Redis indisponible, on dégrade juste ces deux usages.
     maxRetriesPerRequest: 2,
     lazyConnect: false,
+    // CORRECTIF (audit performance / résilience) : Redis tombé, ioredis
+    // mettait chaque commande en FILE D'ATTENTE pendant ses reconnexions
+    // (10 s par tentative, deux tentatives). Chaque requête HTTP passant par
+    // un limiteur de débit attendait donc jusqu'à ~20 s avant d'échouer — et
+    // sous charge, des milliers de requêtes s'empilaient ainsi en mémoire.
+    // Sans file d'attente, une commande échoue AUSSITÔT quand Redis est
+    // injoignable ; les limiteurs laissent alors passer (`passOnStoreError`,
+    // rateLimit.middleware.js) et le cache retombe sur un recalcul.
+    enableOfflineQueue: false,
+    connectTimeout: 2000,
+    // Redis CONNECTÉ mais qui ne répond plus (surcharge, commande lente) :
+    // sans ce délai, chaque commande attendait indéfiniment. 1 s, puis erreur
+    // — que les limiteurs et le cache savent traiter.
+    commandTimeout: 1000,
   });
 
   client.on('error', (err) => {

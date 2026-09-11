@@ -24,11 +24,20 @@ jest.mock('stripe', () => jest.fn(() => mockStripe));
 jest.mock('../models/index.js', () => ({
   Organisation: { findByPk: jest.fn(), findOne: jest.fn() },
   PlanAbonnement: { findOne: jest.fn(), findAll: jest.fn() },
-  AbonnementSouscrit: { findOne: jest.fn(), findAll: jest.fn(), create: jest.fn(), update: jest.fn() },
+  AbonnementSouscrit: {
+    findOne: jest.fn(), findByPk: jest.fn(), findAll: jest.fn(), create: jest.fn(), update: jest.fn(),
+  },
   EvenementPaiement: { create: jest.fn(), findOne: jest.fn(), update: jest.fn() },
   Utilisateur: { count: jest.fn() },
   Chantier: { count: jest.fn() },
 }));
+
+// L'activation se fait désormais dans une transaction verrouillée
+// (`_activerSousVerrou`) : on la joue sans base, en exécutant le rappel.
+const sequelizeReel = require('../config/db.js');
+beforeEach(() => {
+  jest.spyOn(sequelizeReel, 'transaction').mockImplementation(async (fn) => fn({ LOCK: { UPDATE: 'UPDATE' } }));
+});
 
 const { UniqueConstraintError } = require('sequelize');
 const {
@@ -275,7 +284,8 @@ describe('webhook — activation', () => {
       stripe_customer_id: null, plan_code: 'pro', plan_nom: 'Pro',
       update: jest.fn().mockResolvedValue(),
     };
-    AbonnementSouscrit.findOne.mockResolvedValue(souscription);
+    AbonnementSouscrit.findOne.mockImplementation(async ({ where }) => (where.reference_paiement ? souscription : null));
+    AbonnementSouscrit.findByPk.mockResolvedValue(souscription);
     Organisation.findByPk.mockResolvedValue(organisation());
 
     await SubscriptionService._activerDepuisPaiement('pi_1', 'cus_1');
@@ -293,10 +303,30 @@ describe('webhook — activation', () => {
       update: jest.fn().mockResolvedValue(),
     };
     AbonnementSouscrit.findOne.mockResolvedValue(souscription);
+    AbonnementSouscrit.findByPk.mockResolvedValue(souscription);
 
     await SubscriptionService._activerDepuisPaiement('pi_1', 'cus_1');
 
     expect(souscription.update).not.toHaveBeenCalled();
+    // Et surtout : aucune AUTRE souscription n'est expirée par ce rejeu.
+    expect(AbonnementSouscrit.update).not.toHaveBeenCalled();
+  });
+
+  it('un rejeu répare une organisation restée désynchronisée', async () => {
+    // Activation interrompue avant la synchronisation : la souscription est
+    // active mais l'organisation ne le sait pas. Le rejeu doit réparer.
+    const souscription = {
+      id: 's1', organisationId: ORG, statut: 'active', plan_nom: 'Pro',
+      update: jest.fn().mockResolvedValue(),
+    };
+    const org = organisation({ is_subscribed: false });
+    AbonnementSouscrit.findOne.mockResolvedValue(souscription);
+    AbonnementSouscrit.findByPk.mockResolvedValue(souscription);
+    Organisation.findByPk.mockResolvedValue(org);
+
+    await SubscriptionService._activerDepuisPaiement('pi_1', 'cus_1');
+
+    expect(org.update).toHaveBeenCalledWith(expect.objectContaining({ is_subscribed: true }), expect.anything());
   });
 
   it('retrouve la souscription par la RÉFÉRENCE du paiement', async () => {

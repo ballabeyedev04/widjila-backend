@@ -52,7 +52,12 @@ const activerManuellementSchema = Joi.object({
   // Prix négocié : c'est LUI qui fait foi dans l'historique, pas le catalogue.
   prix: Joi.number().min(0).max(1000000).precision(2).optional().allow(null),
   periode: Joi.string().valid('mois', 'an').optional(),
-  dateFin: Joi.date().iso().optional().allow(null),
+  // Dans le FUTUR : une fin passée créait une souscription « active » dont la
+  // période est inversée (début = maintenant). La base la refuse désormais
+  // (contrainte `abonnements_souscrits_periode_ordonnee`) — mieux vaut un 400
+  // explicite ici qu'une erreur de base en 500.
+  dateFin: Joi.date().iso().greater('now').optional().allow(null)
+    .messages({ 'date.greater': 'La date de fin doit être dans le futur.' }),
   note: Joi.string().trim().max(2000).optional().allow('', null),
 });
 

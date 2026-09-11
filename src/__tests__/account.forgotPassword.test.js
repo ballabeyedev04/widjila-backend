@@ -19,7 +19,9 @@ jest.mock('../models/index.js', () => ({
   Utilisateur: { findOne: jest.fn() },
   UserOtp: { destroy: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({}) },
 }));
-jest.mock('bcryptjs', () => ({ hash: jest.fn().mockResolvedValue('hash'), compare: jest.fn() }));
+// Le service hache via utils/motDePasse.js (bcrypt natif) : c'est ce module
+// qu'on double, plus `bcryptjs`.
+jest.mock('../utils/motDePasse.js', () => ({ hash: jest.fn().mockResolvedValue('hash'), compare: jest.fn() }));
 jest.mock('../infrastructure/emailService.js', () => ({ sendOtpEmail: jest.fn() }));
 jest.mock('../infrastructure/storage.service.js', () => ({ storeFile: jest.fn(), deleteFile: jest.fn() }));
 // Même raison que dans auth.lockout.test.js : `otplib` est un paquet ESM pur
@@ -28,7 +30,7 @@ jest.mock('../modules/auth/service/mfa.service.js', () => ({ verify: jest.fn() }
 jest.mock('../utils/logger.js', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
 
 const { Utilisateur, UserOtp } = require('../models/index.js');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('../utils/motDePasse.js');
 const { sendOtpEmail } = require('../infrastructure/emailService.js');
 const logger = require('../utils/logger.js');
 const AccountService = require('../modules/account/service/account.service.js');

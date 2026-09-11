@@ -50,11 +50,13 @@ describe('validerChantier / rejeterChantier — pas de verdict sur sa propre dem
     jest.spyOn(Chantier, 'findByPk').mockResolvedValue(chantier);
     jest.spyOn(models.ChantierMembre, 'findOrCreate').mockResolvedValue([{}, true]);
     jest.spyOn(models.Plan, 'update').mockResolvedValue([0]);
+    // `transaction(fn)` et `transaction(options, fn)` (savepoint) : même exécution.
+    jest.spyOn(sequelize, 'transaction').mockImplementation(async (a, b) => (typeof a === 'function' ? a : b)({ LOCK: { UPDATE: 'UPDATE' } }));
 
     const r = await ChantierService.validerChantier('c1', { id: 'u-moa', role: 'MaitreOuvrage' });
 
     expect(r.success).toBe(true);
-    expect(chantier.update).toHaveBeenCalledWith(expect.objectContaining({ statut: 'en_preparation' }));
+    expect(chantier.update).toHaveBeenCalledWith(expect.objectContaining({ statut: 'en_preparation' }), expect.anything());
   });
 
   it('le helper n’arrête jamais le super-admin', () => {

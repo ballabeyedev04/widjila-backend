@@ -74,6 +74,13 @@ beforeEach(() => {
     return r;
   });
   modeles.Rapport.findOne.mockImplementation(async ({ where }) => base.get(where.id) || null);
+  // Réclamation conditionnelle de la génération : `UPDATE … WHERE id = …`.
+  modeles.Rapport.update.mockImplementation(async (champs, { where }) => {
+    const r = base.get(where.id);
+    if (!r) return [0];
+    Object.assign(r, champs);
+    return [1];
+  });
   mockStoreFile.mockResolvedValue('/uploads/rapports/rapport.pdf');
   mockOuvrirFichier.mockResolvedValue(null);
 });

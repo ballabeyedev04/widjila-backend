@@ -127,15 +127,26 @@ class DemandeInscriptionService {
     // se connecter mais dont l'essai n'a jamais démarré — donc reçue par
     // « votre période d'essai est terminée » dès sa première visite, sans
     // recours autre qu'une correction en base.
+    //
+    // La demande est RELUE SOUS VERROU : deux administrateurs, l'un validant
+    // et l'autre refusant, passaient tous deux le contrôle ci-dessus. Le
+    // compte finissait « rejete » avec un essai démarré — ou « actif » avec
+    // un motif de refus — et le demandeur recevait les deux courriels.
     const t = await sequelize.transaction();
     try {
-      await demande.update(updates, { transaction: t });
+      const verrouillee = await Utilisateur.findByPk(id, { transaction: t, lock: true });
+      if (!verrouillee || verrouillee.statut !== 'en_attente_validation') {
+        await t.rollback();
+        return { success: false, message: 'Cette demande a déjà été traitée.' };
+      }
+      await verrouillee.update(updates, { transaction: t });
       await EssaiService.demarrerEssai(demande.organisationId, { transaction: t });
       await t.commit();
     } catch (err) {
       await t.rollback();
       throw err;
     }
+    Object.assign(demande, updates);
 
     await AuditLogService.logAction({
       admin,
@@ -173,12 +184,23 @@ class DemandeInscriptionService {
 
     const motifPropre = String(motif).trim();
 
-    await demande.update({
-      statut: 'rejete',
-      motif_rejet: motifPropre,
-      valide_par: admin.id,
-      valide_le: new Date(),
-    });
+    // Même arbitrage que la validation : relue sous verrou, une demande déjà
+    // tranchée par un autre administrateur n'est pas réécrite.
+    const rejet = { statut: 'rejete', motif_rejet: motifPropre, valide_par: admin.id, valide_le: new Date() };
+    const t = await sequelize.transaction();
+    try {
+      const verrouillee = await Utilisateur.findByPk(id, { transaction: t, lock: true });
+      if (!verrouillee || verrouillee.statut !== 'en_attente_validation') {
+        await t.rollback();
+        return { success: false, message: 'Cette demande a déjà été traitée.' };
+      }
+      await verrouillee.update(rejet, { transaction: t });
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
+    Object.assign(demande, rejet);
 
     await AuditLogService.logAction({
       admin,

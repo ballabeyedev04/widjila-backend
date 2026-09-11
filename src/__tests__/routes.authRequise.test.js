@@ -47,6 +47,10 @@ const PUBLIQUES = new Map([
   ['auth.route.js::/refresh', 'renouvellement : le jeton d’accès est justement expiré'],
   ['auth.route.js::/mfa-verify', 'seconde étape, portée par un jeton temporaire propre'],
   ['auth.route.js::/logout', 'doit aboutir même si le jeton est déjà périmé'],
+  ['auth.route.js::/transfert-web/echange',
+    'le navigateur ouvert depuis le mobile n’a pas encore de session : il '
+    + 'présente un code signé, de deux minutes, à usage unique, émis par la '
+    + 'route authentifiée `/transfert-web`'],
 
   // ── Reprendre la main sur un compte ──────────────────────────────────────
   ['account.route.js::/forgot-password', 'parcours de secours : par définition sans session'],

@@ -96,6 +96,12 @@ const mfaVerifySchema = Joi.object({
   }),
 });
 
+// Échange du code de transfert mobile → navigateur. Un JWT court : borné pour
+// ne jamais faire vérifier une chaîne arbitrairement longue.
+const transfertWebEchangeSchema = Joi.object({
+  code: Joi.string().trim().max(2048).required(),
+});
+
 // Vérification de l'email d'inscription (lien signé)
 const forgotPasswordSchema = Joi.object({
   email: email.required(),
@@ -110,5 +116,5 @@ const resetPasswordSchema = Joi.object({
 module.exports = {
   registerSchema, loginSchema, refreshSchema, logoutSchema,
   forgotPasswordSchema, resetPasswordSchema,
-  mfaVerifySchema,
+  mfaVerifySchema, transfertWebEchangeSchema,
 };

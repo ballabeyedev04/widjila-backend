@@ -131,6 +131,41 @@ exports.refresh = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Code de transfert de session — appelé par le MOBILE, authentifié, juste
+ * avant d'ouvrir la page de paiement du web. Voir
+ * `auth.service.js#_generateTransfertWeb`.
+ */
+exports.creerTransfertWeb = asyncHandler(async (req, res) => {
+  const result = await AuthService.creerTransfertWeb(req.user);
+  res.status(201).json({
+    success: true,
+    message: 'Code de transfert émis',
+    data: { code: result.code, expiresIn: result.expiresIn },
+  });
+});
+
+/**
+ * Échange du code de transfert — appelé par la page web ouverte depuis le
+ * mobile. Même réponse qu'une connexion, à une différence près : le refresh
+ * token ne part JAMAIS dans le corps. Seul un navigateur appelle cette route,
+ * et le cookie httpOnly le lui livre déjà (voir `_refreshDansLeCorps`).
+ */
+exports.echangerTransfertWeb = asyncHandler(async (req, res) => {
+  const result = await AuthService.echangerTransfertWeb({ code: req.body?.code }, _meta(req));
+  if (!result.success) throw new BadRequestError(result.message, 'TRANSFERT_INVALIDE');
+
+  res.cookie('refreshToken', result.refreshToken, REFRESH_COOKIE_OPTS);
+  res.status(200).json({
+    success: true,
+    message: 'Connexion réussie',
+    data: {
+      token: result.token,
+      utilisateur: formatUser(result.utilisateur),
+    },
+  });
+});
+
 exports.logout = asyncHandler(async (req, res) => {
   const refreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
   await AuthService.logout({ refreshToken });

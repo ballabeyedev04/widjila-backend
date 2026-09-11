@@ -28,6 +28,15 @@ class InspectionService {
     const chantier = await Chantier.findOne({ where: { id: data.chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
+    // Ni sur un chantier fermé, ni sur une demande non validée : même règle
+    // que les réserves (reserve.service.js#_refusSurDemande).
+    if (['cloture', 'archive'].includes(chantier.statut)) {
+      return { success: false, message: 'Ce chantier est clôturé ou archivé : aucune inspection ne peut y être créée.' };
+    }
+    if (['en_attente_validation', 'rejete'].includes(chantier.statut)) {
+      return { success: false, message: 'Ce chantier n’est pas encore validé : aucune inspection ne peut y être créée.' };
+    }
+
     if (data.inspecteurId) {
       const erreur = await InspectionService._verifierInspecteur(organisationId, data.inspecteurId);
       if (erreur) return { success: false, message: erreur };

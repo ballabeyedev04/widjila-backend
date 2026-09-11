@@ -2,7 +2,7 @@
 
 const ReserveService = require('../service/reserve.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
-const { BadRequestError, NotFoundError } = require('../../../errors/AppError.js');
+const { BadRequestError, NotFoundError, ConflictError } = require('../../../errors/AppError.js');
 const { organisationCible, estSuperAdmin } = require('../../../utils/organisationRequete.js');
 // Le plan sert à DÉDUIRE le chantier d'une réserve créée depuis lui
 // (`creerReserveSurPlan`) ; le chantier porte le cloisonnement multi-tenant.
@@ -97,7 +97,13 @@ exports.detailReserve = asyncHandler(async (req, res) => {
 
 exports.modifierReserve = asyncHandler(async (req, res) => {
   const result = await ReserveService.modifierReserve(await orgDeReserve(req), req.params.id, req.body, req.user.id);
-  if (!result.success) throw new BadRequestError(result.message);
+  if (!result.success) {
+    // 409 et non 400 : ce n'est pas une requête invalide, c'est un conflit
+    // d'édition (A2-13). Le mobile le distingue d'un refus métier et garde la
+    // version serveur au lieu d'écraser ; `details` porte les champs en cause.
+    if (result.code === 'CONFLIT_MODIFICATION') throw new ConflictError(result.message, result.code, result.conflits);
+    throw new BadRequestError(result.message);
+  }
   res.status(200).json({ success: true, message: result.message, data: { reserve: result.reserve } });
 });
 

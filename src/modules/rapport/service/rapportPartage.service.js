@@ -64,6 +64,13 @@ class RapportPartageService {
       // Partager un rapport non généré donnerait un lien qui ouvre le vide.
       return { success: false, message: 'Générez le rapport avant de le partager.' };
     }
+    // Un fichier PÉRIMÉ ne se partage pas plus qu'il ne s'envoie (voir
+    // `rapportEnvoi.service.js#envoyer`) : un rapport modifié après génération
+    // repasse en brouillon avec l'ancien PDF, et le lien aurait diffusé une
+    // version que la configuration ne décrit plus.
+    if (![R.ETATS.GENERE, R.ETATS.ENVOYE].includes(rapport.statut)) {
+      return { success: false, message: 'Régénérez le rapport avant de le partager : sa configuration a changé depuis le dernier fichier.' };
+    }
 
     const token = crypto.randomBytes(32).toString('base64url');
     // Plus de lien ÉTERNEL par défaut : sans durée, le lien vivait

@@ -5,6 +5,20 @@ const sharp = require('sharp');
 const { Media, Reserve, Inspection, Chantier, ReserveAffectation } = require('../../../models/index.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
 const logger = require('../../../utils/logger.js');
+const sequelize = require('../../../config/db.js');
+
+/**
+ * Suppression de fichier « au mieux » : un nettoyage raté ne doit jamais
+ * transformer une réussite en erreur — le fichier en trop se perd, pas
+ * l'enregistrement du média. Tolère aussi un `deleteFile` synchrone.
+ */
+async function _supprimerSansEchec(url) {
+  try {
+    await deleteFile(url);
+  } catch {
+    /* fichier orphelin : signalé par le stockage lui-même, sans conséquence ici */
+  }
+}
 
 /**
  * Média — photos / vidéos / notes vocales des réserves et photos
@@ -71,6 +85,9 @@ async function _dossierDuMedia(type, reserveId, inspectionId) {
 }
 
 const TYPES_MEDIA = ['photo', 'video', 'audio'];
+
+// Statuts de réserve après verdict : leurs preuves sont figées.
+const STATUTS_RESERVE_FIGES = ['validee', 'cloturee'];
 
 /** Nombre borné, ou null si absent ; `undefined` signale une valeur invalide. */
 function _nombre(valeur, min, max) {
@@ -246,32 +263,83 @@ class MediaService {
       ? await MediaService._vignette(fichier.buffer, fichier.originalname, sousDossier)
       : null;
 
+    // ── Deux envois SIMULTANÉS du même contenu (deuxième audit, A2-07) ──────
+    //
+    // Le contrôle d'empreinte plus haut lit AVANT d'écrire, sans verrou : deux
+    // requêtes concurrentes le passaient toutes deux, et la même photo était
+    // enregistrée deux fois. Le cas est réel : un envoi en ligne dépasse son
+    // délai pendant que le serveur stocke encore le fichier, le mobile met la
+    // photo en file, et la file la rejoue quelques centaines de ms plus tard.
+    //
+    // Verrou consultatif de TRANSACTION sur (parent, empreinte) autour de
+    // « revérifier puis créer » — et SEULEMENT autour : l'envoi vers le
+    // stockage reste hors verrou, pour ne jamais tenir une connexion de la
+    // base pendant le téléversement d'une vidéo. Le perdant d'une course a
+    // donc stocké un fichier en trop : il le supprime et renvoie le média du
+    // gagnant.
+    const cle = parent
+      ? `media:${reserveId ? 'reserve' : 'inspection'}:${reserveId || inspectionId}:${checksum}`
+      : null;
+
+    let concurrent = null;
     let media;
     try {
-      media = await Media.create({
-        reserveId: reserveId || null,
-        inspectionId: inspectionId || null,
-        type,
-        url,
-        thumbnail_url: thumbnailUrl,
-        latitude: meta.latitude,
-        longitude: meta.longitude,
-        largeur: meta.largeur,
-        hauteur: meta.hauteur,
-        duree: meta.duree,
-        checksum,
-        uploaderId,
-        pris_le: meta.pris_le || new Date(),
+      media = await MediaService._sousVerrou(cle, async () => {
+        if (parent) {
+          concurrent = await Media.findOne({ where: { ...parent, checksum } });
+          if (concurrent) return null;
+        }
+        return Media.create({
+          reserveId: reserveId || null,
+          inspectionId: inspectionId || null,
+          type,
+          url,
+          thumbnail_url: thumbnailUrl,
+          latitude: meta.latitude,
+          longitude: meta.longitude,
+          largeur: meta.largeur,
+          hauteur: meta.hauteur,
+          duree: meta.duree,
+          checksum,
+          uploaderId,
+          pris_le: meta.pris_le || new Date(),
+        });
       });
     } catch (err) {
       // Le fichier est déjà sur le disque : si la ligne n'a pas pu être créée,
       // il n'aurait plus jamais de référence (audit § 5 — fichier orphelin
       // téléchargeable indéfiniment). Nettoyage best-effort.
-      await deleteFile(url).catch(() => {});
+      await _supprimerSansEchec(url);
       throw err;
     }
 
+    if (concurrent) {
+      // Noms de fichiers uniques (`storage.service.js#storeFile`) : ce sont
+      // bien NOS octets en trop qui partent, jamais ceux du gagnant.
+      await _supprimerSansEchec(url);
+      if (thumbnailUrl) await _supprimerSansEchec(thumbnailUrl);
+      return { success: true, message: 'Média déjà enregistré', media: concurrent, rejeu: true };
+    }
+
     return { success: true, message: 'Média ajouté', media };
+  }
+
+  /**
+   * Exécute [travail] sous le verrou consultatif de TRANSACTION [cle]
+   * (`pg_advisory_xact_lock`), rendu à la fin de la transaction — y compris si
+   * le processus meurt. Sans clé, [travail] s'exécute tel quel.
+   *
+   * @template T
+   * @param {string|null} cle
+   * @param {() => Promise<T>} travail
+   * @returns {Promise<T>}
+   */
+  static async _sousVerrou(cle, travail) {
+    if (!cle) return travail();
+    return sequelize.transaction(async (t) => {
+      await sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:cle))', { replacements: { cle }, transaction: t });
+      return travail();
+    });
   }
 
   // -------------------- AJOUTER UN MÉDIA SUR UNE RÉSERVE --------------------
@@ -327,6 +395,18 @@ class MediaService {
     // Le média doit appartenir à l'org via sa réserve OU son inspection
     const appartient = (media.reserve && media.reserve.chantier) || (media.inspection && media.inspection.chantier);
     if (!appartient) return { success: false, message: 'Média introuvable dans cette organisation' };
+
+    // Une PREUVE ne disparaît pas après le verdict. La validation exige au
+    // moins un média (reserve.service#changerStatut) : supprimer ceux d'une
+    // réserve validée ou clôturée rompait cet invariant après coup, et
+    // effaçait définitivement le fichier — sans trace. Même règle pour le PV
+    // d'une inspection signée.
+    if (media.reserve && STATUTS_RESERVE_FIGES.includes(media.reserve.statut)) {
+      return { success: false, message: 'Ce média est une preuve d’une réserve validée ou clôturée : il ne peut plus être supprimé.' };
+    }
+    if (media.inspection && media.inspection.statut === 'signee') {
+      return { success: false, message: 'Ce média appartient à une inspection signée : il ne peut plus être supprimé.' };
+    }
 
     const fichiers = [media.url, media.thumbnail_url].filter(Boolean);
 

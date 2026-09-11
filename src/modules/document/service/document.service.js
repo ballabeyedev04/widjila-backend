@@ -67,6 +67,12 @@ class DocumentService {
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
+    // Un chantier ARCHIVÉ est figé : sa GED est une archive, pas un dossier
+    // de travail. (Clôturé, il reçoit encore ses pièces de fin : DOE, PV.)
+    if (chantier.statut === 'archive') {
+      return { success: false, message: 'Ce chantier est archivé : aucun document ne peut y être ajouté.' };
+    }
+
     // Nom tel que l'utilisateur l'a vu (accents rétablis, longueur bornée) —
     // voir utils/nomFichierUpload.js. Il sert aussi de clé de versionnement.
     const nomFichier = nomFichierOriginal(fichier.originalname);

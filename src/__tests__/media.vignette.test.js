@@ -22,6 +22,14 @@ jest.mock('../infrastructure/storage.service.js', () => ({
   deleteFile: jest.fn(),
 }));
 
+// `_enregistrer` pose un verrou consultatif de transaction autour de
+// « revérifier puis créer » (A2-07) : sans base, la transaction exécute
+// simplement son travail.
+jest.mock('../config/db.js', () => ({
+  transaction: jest.fn(async (travail) => travail({})),
+  query: jest.fn(async () => [{}]),
+}));
+
 jest.mock('../models/index.js', () => ({
   Media: { create: jest.fn(), findByPk: jest.fn(), findAll: jest.fn(), destroy: jest.fn() },
   Reserve: { findByPk: jest.fn() },

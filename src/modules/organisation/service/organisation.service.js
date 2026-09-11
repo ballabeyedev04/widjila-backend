@@ -1,8 +1,11 @@
 'use strict';
 
-const bcrypt = require('bcryptjs');
+// bcrypt NATIF (hors boucle d'événements) — voir utils/motDePasse.js. Compte
+// ici plus qu'ailleurs : l'import CSV hache jusqu'à 500 mots de passe d'affilée.
+const bcrypt = require('../../../utils/motDePasse.js');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
+const sequelize = require('../../../config/db.js');
 const { Utilisateur, Organisation, Equipe, RefreshToken } = require('../../../models/index.js');
 const { bcryptConfig } = require('../../../config/security.js');
 const { storeFile } = require('../../../infrastructure/storage.service.js');
@@ -262,20 +265,41 @@ class OrganisationService {
       mdpTemporaire = true;
     }
 
-    const utilisateur = await Utilisateur.create({
-      organisationId,
-      nom: data.nom,
-      prenom: data.prenom,
-      email: emailClean,
-      mot_de_passe: await bcrypt.hash(motDePasse, bcryptConfig.saltRounds),
-      telephone: data.telephone || null,
-      fonction: data.fonction || null,
-      role: data.role,
-      permissions: data.permissions || null,
-      statut: 'actif',
-      mdp_temporaire: mdpTemporaire,
-      email_verifie: true, // invité par un acteur de confiance de l'organisation
+    const motDePasseHache = await bcrypt.hash(motDePasse, bcryptConfig.saltRounds);
+
+    // Plafond d'utilisateurs RE-vérifié sous verrou. La route ne contrôle
+    // qu'AVANT l'appel (`verifierLimite('utilisateurs')`) : deux ajouts
+    // simultanés passaient tous deux ce contrôle, et le plafond payé était
+    // dépassé d'autant. Le verrou consultatif par organisation sérialise les
+    // créations ; le recomptage, fait après l'avoir obtenu, voit celle de
+    // l'autre — déjà validée, le verrou n'étant rendu qu'au commit.
+    const utilisateur = await sequelize.transaction(async (t) => {
+      await sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:cle))', {
+        replacements: { cle: `organisation:sieges:${organisationId}` }, transaction: t,
+      });
+      if (roleAuteur && roleAuteur !== 'Admin') {
+        const DroitsService = require('../../subscription/service/droits.service.js');
+        const places = await DroitsService.verifierLimite(organisationId, 'utilisateurs', 1);
+        if (!places.autorise) return null;
+      }
+      return Utilisateur.create({
+        organisationId,
+        nom: data.nom,
+        prenom: data.prenom,
+        email: emailClean,
+        mot_de_passe: motDePasseHache,
+        telephone: data.telephone || null,
+        fonction: data.fonction || null,
+        role: data.role,
+        permissions: data.permissions || null,
+        statut: 'actif',
+        mdp_temporaire: mdpTemporaire,
+        email_verifie: true, // invité par un acteur de confiance de l'organisation
+      }, { transaction: t });
     });
+    if (!utilisateur) {
+      return { success: false, message: "Ajout impossible : le plafond d'utilisateurs actifs de votre abonnement est atteint." };
+    }
 
     logger.info(`Membre ajouté à l'organisation ${organisationId} : ${emailClean}`);
 

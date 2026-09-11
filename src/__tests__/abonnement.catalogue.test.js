@@ -46,8 +46,12 @@ const planLigne = (extra = {}) => ({
   ...extra,
 });
 
+const sequelizeReel = require('../config/db.js');
+
 beforeEach(() => {
   jest.clearAllMocks();
+  // Les activations passent par une transaction verrouillée : jouée sans base.
+  jest.spyOn(sequelizeReel, 'transaction').mockImplementation(async (fn) => fn({ LOCK: { UPDATE: 'UPDATE' } }));
   AbonnementSouscrit.count.mockResolvedValue(0);
   AbonnementSouscrit.update.mockResolvedValue([0]);
   AbonnementSouscrit.create.mockResolvedValue({ id: 's1', organisationId: ORG, statut: 'active' });
@@ -180,9 +184,13 @@ describe('encaissement externe (PayTech)', () => {
 
     expect(AbonnementSouscrit.update).toHaveBeenCalledWith(
       { statut: 'expiree' },
-      { where: { organisationId: ORG, statut: 'active' } }
+      expect.objectContaining({ where: { organisationId: ORG, statut: 'active' } })
     );
     expect(AbonnementSouscrit.create.mock.calls[0][0].statut).toBe('active');
+    // L'expiration PRÉCÈDE la création : l'index unique partiel « une seule
+    // active par organisation » ne peut pas être heurté.
+    expect(AbonnementSouscrit.update.mock.invocationCallOrder[0])
+      .toBeLessThan(AbonnementSouscrit.create.mock.invocationCallOrder[0]);
   });
 
   it('ne recrée rien si la référence est déjà connue', async () => {

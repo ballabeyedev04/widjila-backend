@@ -101,6 +101,14 @@ beforeEach(() => {
     return base.get(where.id) || null;
   });
   modeles.Rapport.create.mockImplementation(async (v) => enBase({ id: `rap-${base.size + 1}`, createdAt: new Date(), ...v }));
+  // Réclamations conditionnelles (génération, archivage) : la ligne visée est
+  // modifiée et comptée, comme le ferait `UPDATE … WHERE id = …`.
+  modeles.Rapport.update.mockImplementation(async (champs, { where }) => {
+    const r = base.get(where.id);
+    if (!r) return [0];
+    Object.assign(r, champs);
+    return [1];
+  });
   modeles.Reserve.findAll.mockImplementation(async ({ where }) => {
     const entreprises = where.partenaireId?.[Op.in];
     return entreprises ? reserves.filter((r) => entreprises.includes(r.partenaireId)) : reserves;
@@ -242,8 +250,13 @@ describe('génération (§ 11)', () => {
     brouillon();
     await RapportsService.generer('rap-1', UTILISATEUR, ORG);
 
+    // GÉNÉRATION est RÉCLAMÉE par un UPDATE conditionnel (une génération à la
+    // fois), puis GÉNÉRÉ est posé sur la ligne.
+    const [champs, { where }] = modeles.Rapport.update.mock.calls[0];
+    expect(champs.statut).toBe('generation');
+    expect(where.id).toBe('rap-1');
     const etats = base.get('rap-1').update.mock.calls.map(([c]) => c.statut).filter(Boolean);
-    expect(etats).toEqual(['generation', 'genere']);
+    expect(etats).toEqual(['genere']);
   });
 
   it('journalise la génération (§ 18, § 23)', async () => {
@@ -323,6 +336,39 @@ describe('génération (§ 11)', () => {
 
     const echec = await RapportsService.generer('rap-1', UTILISATEUR, ORG).catch((e) => e);
     expect(echec.message).toMatch(/migration/);
+  });
+
+  it('deux clics : la seconde génération est refusée, aucun fichier en double', async () => {
+    brouillon({ statut: 'generation' });
+    modeles.Rapport.update.mockResolvedValueOnce([0]); // la réclamation conditionnelle perd
+
+    const r = await RapportsService.generer('rap-1', UTILISATEUR, ORG);
+
+    expect(r).toEqual({ success: false, message: 'Ce rapport est déjà en cours de génération.' });
+    expect(mockStoreFile).not.toHaveBeenCalled();
+    expect(modeles.RapportHistorique.create).not.toHaveBeenCalled();
+  });
+
+  it('un rapport ARCHIVÉ ne se régénère pas sur place', async () => {
+    brouillon({ statut: 'archive', fichier_url: '/uploads/rapports/v1.pdf' });
+
+    const r = await RapportsService.generer('rap-1', UTILISATEUR, ORG);
+
+    expect(r.success).toBe(false);
+    expect(mockStoreFile).not.toHaveBeenCalled();
+    expect(mockDeleteFile).not.toHaveBeenCalled();
+    expect(base.get('rap-1').fichier_url).toBe('/uploads/rapports/v1.pdf');
+  });
+
+  it('un rapport exposé par un LIEN DE PARTAGE actif est diffusé : nouvelle version, fichier gardé', async () => {
+    brouillon({ statut: 'genere', fichier_url: '/uploads/rapports/partage.pdf' });
+    modeles.RapportPartage.count.mockResolvedValue(1);
+
+    const r = await RapportsService.generer('rap-1', UTILISATEUR, ORG);
+
+    expect(r.nouvelleVersion).toBe(true);
+    expect(base.get('rap-1').fichier_url).toBe('/uploads/rapports/partage.pdf');
+    expect(mockDeleteFile).not.toHaveBeenCalled();
   });
 });
 

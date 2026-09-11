@@ -2,7 +2,21 @@
 
 const { Notification, Utilisateur, DeviceToken, Chantier, ChantierMembre } = require('../../../models/index.js');
 const logger = require('../../../utils/logger.js');
+const metrics = require('../../../utils/metrics.js');
+const { Disjoncteur } = require('../../../utils/circuitBreaker.js');
 const { getMessaging } = require('../../../config/firebase.js');
+
+/**
+ * Délai et disjoncteur de l'envoi FCM : sans délai, un appel à Google qui ne
+ * répond plus gardait en mémoire la promesse, le lot de jetons et le message
+ * — une par notification émise pendant la panne (voir utils/circuitBreaker.js).
+ */
+const disjoncteurPush = new Disjoncteur('push', {
+  libelle: 'de notifications push',
+  delaiAppelMs: parseInt(process.env.PUSH_TIMEOUT_MS || '10000', 10),
+  seuilEchecs: 5,
+  dureeOuvertureMs: 60_000,
+});
 
 /**
  * Notification in-app — utilisée par les services métier pour informer
@@ -31,7 +45,12 @@ class NotificationService {
     try {
       await Notification.create({ utilisateurId, type, titre, message, donnees });
     } catch (err) {
-      logger.warn(`[notification] Échec création notif ${type} pour ${utilisateurId} :`, err.message);
+      // Notification PERDUE (ni en base, ni en push) : niveau `error` et
+      // compteur — c'était un `warn` dont le motif était jeté par winston.
+      metrics.incrementer('notification.perdue');
+      logger.error(`[notification] Échec création notif ${type} pour ${utilisateurId}`, {
+        type, utilisateurId, error: err.message,
+      });
       return; // Rien en base : inutile de pousser une alerte introuvable dans l'app.
     }
 
@@ -128,6 +147,20 @@ class NotificationService {
     return { success: true, notifications: rows, total: count, nonLuesCount };
   }
 
+  // -------------------- COMPTEUR DE LA PASTILLE --------------------
+  /**
+   * Nombre de notifications non lues — UNE requête.
+   *
+   * CORRECTIF (audit performance) : la pastille de la cloche, l'endpoint le
+   * plus sollicité du produit (en-tête de chaque écran), passait par
+   * `listNotifications({ nonLues: true, limit: 1 })` : un `findAndCountAll`
+   * (COUNT + SELECT trié) puis un SECOND `count` identique — trois requêtes
+   * pour un seul entier. Servi par l'index (utilisateur_id, lu_a).
+   */
+  static async compterNonLues(utilisateurId) {
+    return Notification.count({ where: { utilisateurId, lu_a: null } });
+  }
+
   // -------------------- MARQUER COMME LUE --------------------
   /** @param {string} userId — les ids fournis ou toutes si non précisés */
   static async marquerLues(userId, ids = []) {
@@ -196,7 +229,7 @@ class NotificationService {
       for (let i = 0; i < jetons.length; i += 500) lots.push(jetons.slice(i, i + 500));
 
       for (const lot of lots) {
-        const reponse = await messaging.sendEachForMulticast({
+        const reponse = await disjoncteurPush.executer(() => messaging.sendEachForMulticast({
           tokens: lot,
           notification: {
             title: payload.titre,
@@ -224,12 +257,19 @@ class NotificationService {
               aps: { sound: 'default', badge: 1, 'mutable-content': 1 },
             },
           },
-        });
+        }));
 
         await NotificationService._purgerJetonsInvalides(lot, reponse);
       }
     } catch (err) {
-      logger.warn('[push] Envoi impossible :', err.message);
+      metrics.incrementer('push.echec');
+      logger.warn('[push] Envoi impossible', {
+        type: payload?.type,
+        destinataires: (utilisateurIds || []).length,
+        error: err.message,
+        code: err.code,
+        circuit: disjoncteurPush.etatCourant().etat,
+      });
     }
   }
 
@@ -244,6 +284,10 @@ class NotificationService {
    */
   static async _purgerJetonsInvalides(jetons, reponse) {
     const morts = [];
+    // Refus AUTRES que « jeton mort » (quota, panne, message invalide) : ils
+    // étaient ignorés en silence — une notification pouvait ne partir vers
+    // aucun appareil sans la moindre trace.
+    const autresRefus = {};
     reponse.responses.forEach((resultat, i) => {
       const code = resultat.error?.code;
       if (
@@ -251,8 +295,16 @@ class NotificationService {
         code === 'messaging/invalid-registration-token'
       ) {
         morts.push(jetons[i]);
+      } else if (code) {
+        autresRefus[code] = (autresRefus[code] || 0) + 1;
       }
     });
+
+    const nbAutres = Object.values(autresRefus).reduce((a, b) => a + b, 0);
+    if (nbAutres > 0) {
+      metrics.incrementer('push.refus', nbAutres);
+      logger.warn(`[push] ${nbAutres}/${jetons.length} envoi(s) refusé(s) par FCM`, { codes: autresRefus });
+    }
 
     if (morts.length === 0) return;
     await DeviceToken.destroy({ where: { token: morts } });

@@ -10,7 +10,7 @@
  */
 
 jest.mock('../models/index.js', () => ({
-  Utilisateur: { findByPk: jest.fn(), findOne: jest.fn(), increment: jest.fn() },
+  Utilisateur: { findByPk: jest.fn(), findOne: jest.fn(), increment: jest.fn(), count: jest.fn() },
   ConnexionLog: { findAndCountAll: jest.fn(), update: jest.fn(), findAll: jest.fn() },
   RefreshToken: { findAll: jest.fn(), findOne: jest.fn(), update: jest.fn() },
   MfaChallenge: { destroy: jest.fn() },
@@ -285,9 +285,37 @@ describe('AccountService', () => {
   });
 
   describe('deleteAccount', () => {
+    test('refuse au DERNIER gestionnaire actif d’une organisation qui a encore des membres', async () => {
+      Utilisateur.findByPk.mockResolvedValue(fakeUtilisateur({ role: 'ChefProjet' }));
+      // 0 autre gestionnaire actif, 3 autres membres actifs.
+      Utilisateur.count.mockImplementation(async ({ where }) => (where.role ? 0 : 3));
+      const pseudonymiserSpy = jest.spyOn(AccountService, 'pseudonymiserEtSupprimer');
+
+      const result = await AccountService.deleteAccount('user-1');
+
+      expect(result.error).toMatch(/dernier gestionnaire actif/);
+      expect(pseudonymiserSpy).not.toHaveBeenCalled();
+      const [{ where }] = Utilisateur.count.mock.calls[0];
+      expect(where).toMatchObject({ organisationId: 'org-1', statut: 'actif' });
+
+      pseudonymiserSpy.mockRestore();
+    });
+
+    test('un autre gestionnaire actif existe : la suppression passe', async () => {
+      Utilisateur.findByPk.mockResolvedValue(fakeUtilisateur({ role: 'Entreprise' }));
+      Utilisateur.count.mockImplementation(async ({ where }) => (where.role ? 1 : 3));
+      const pseudonymiserSpy = jest.spyOn(AccountService, 'pseudonymiserEtSupprimer').mockResolvedValue({});
+
+      const result = await AccountService.deleteAccount('user-1');
+
+      expect(result.success).toBe(true);
+      pseudonymiserSpy.mockRestore();
+    });
+
     test('pseudonymise et supprime le compte d’un utilisateur non-Admin', async () => {
       const utilisateur = fakeUtilisateur({ role: 'ChefProjet' });
       Utilisateur.findByPk.mockResolvedValue(utilisateur);
+      Utilisateur.count.mockResolvedValue(0); // seul dans son organisation : libre de partir
       const pseudonymiserSpy = jest
         .spyOn(AccountService, 'pseudonymiserEtSupprimer')
         .mockResolvedValue({ connexionLogsAnonymises: 3 });
@@ -391,7 +419,7 @@ describe('AccountService', () => {
 });
 
 describe('changePassword — révocation des autres sessions', () => {
-  const bcrypt = require('bcryptjs');
+  const bcrypt = require('../utils/motDePasse.js');
   const hashToken = require('../utils/hashToken.js');
   const { Op } = require('sequelize');
 
@@ -473,7 +501,7 @@ describe('changePassword — révocation des autres sessions', () => {
 });
 
 describe('token_version — invalidation des tokens d\'accès', () => {
-  const bcrypt = require('bcryptjs');
+  const bcrypt = require('../utils/motDePasse.js');
   // `UserOtp` est mocké en tête de fichier mais pas déstructuré dans le
   // require partagé — on le récupère ici, où il sert.
   const { UserOtp } = require('../models/index.js');

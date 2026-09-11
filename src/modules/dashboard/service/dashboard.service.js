@@ -1,6 +1,7 @@
 'use strict';
 
-const { Op, fn, col } = require('sequelize');
+const { Op, fn, col, literal } = require('sequelize');
+const sequelize = require('../../../config/db.js');
 const { STATUT_CHANTIER_EN_DEMANDE } = require('../../../config/enums.js');
 const ExcelJS = require('exceljs');
 const {
@@ -10,6 +11,71 @@ const cache = require('../../../utils/cache.js');
 const ChantierService = require('../../chantier/service/chantier.service.js');
 
 const STATUTS_FERMES = ['validee', 'cloturee'];
+
+/**
+ * Tous les compteurs de réserves en UNE requête — CORRECTIF (audit performance).
+ *
+ * `statsGlobales` lançait douze requêtes EN PARALLÈLE par appel, dont huit
+ * sur `reserves` qui relisaient les mêmes lignes pour produire chacune un
+ * compteur (total, ouvertes, validées, refusées, en retard, par statut, par
+ * sévérité, par chantier). Chaque requête parallèle tient une connexion : deux
+ * ouvertures simultanées de l'écran d'accueil prenaient 24 connexions quand un
+ * worker n'en a que 20, et toutes les autres requêtes du worker attendaient
+ * derrière. `statsChantier` faisait de même avec dix.
+ *
+ * Une seule requête groupée par (chantier ?, statut, sévérité) suffit : elle
+ * rend au plus quelques dizaines de lignes, et chaque compteur s'en déduit
+ * en mémoire. Le nombre d'échues (« en retard ») sort de la même requête par
+ * un `FILTER`, avec l'horloge de l'application comme avant.
+ *
+ * @param {object} where
+ * @param {string[]} groupe  colonnes de regroupement
+ */
+function _compterReserves(where, groupe) {
+  const maintenant = sequelize.escape(new Date());
+  return Reserve.findAll({
+    where,
+    attributes: [
+      ...groupe,
+      [fn('COUNT', col('id')), 'n'],
+      [literal(`COUNT(*) FILTER (WHERE date_limite < ${maintenant})`), 'echues'],
+    ],
+    group: groupe,
+    raw: true,
+  });
+}
+
+/**
+ * Déduit les compteurs des lignes groupées de `_compterReserves`.
+ * « En retard » = échue ET non fermée — même définition que les anciens
+ * `count()` séparés.
+ */
+function _agregerReserves(lignes, fermes = STATUTS_FERMES) {
+  const agregat = {
+    total: 0, ouvertes: 0, validees: 0, refusees: 0, enRetard: 0,
+    parStatut: {}, parSeverite: {}, parChantier: new Map(),
+  };
+  for (const ligne of lignes) {
+    const n = Number(ligne.n) || 0;
+    const ouverte = !fermes.includes(ligne.statut);
+    agregat.total += n;
+    agregat.parStatut[ligne.statut] = (agregat.parStatut[ligne.statut] || 0) + n;
+    agregat.parSeverite[ligne.severite] = (agregat.parSeverite[ligne.severite] || 0) + n;
+    if (ouverte) {
+      agregat.ouvertes += n;
+      agregat.enRetard += Number(ligne.echues) || 0;
+    }
+    if (ligne.statut === 'validee') agregat.validees += n;
+    if (ligne.statut === 'refusee') agregat.refusees += n;
+    if (ligne.chantierId !== undefined) {
+      const parChantier = agregat.parChantier.get(ligne.chantierId) || { total: 0, ouvertes: 0 };
+      parChantier.total += n;
+      if (ouverte) parChantier.ouvertes += n;
+      agregat.parChantier.set(ligne.chantierId, parChantier);
+    }
+  }
+  return agregat;
+}
 
 /**
  * Filtre « chantiers concernés » d'une requête de statistiques.
@@ -86,6 +152,15 @@ class DashboardService {
     const enCache = await cache.lire(cleCache);
     if (enCache) return enCache;
 
+    // Vol unique : à l'expiration de l'entrée, les ouvertures simultanées de
+    // l'accueil partagent UN calcul au lieu d'en lancer un chacune (voir
+    // utils/cache.js#volUnique).
+    return cache.volUnique(cleCache,
+      () => DashboardService._calculerStatsGlobales(organisationId, toutesOrganisations, whereOrg, cleCache));
+  }
+
+  /** Calcul de `statsGlobales` hors cache — voir ci-dessus. */
+  static async _calculerStatsGlobales(organisationId, toutesOrganisations, whereOrg, cleCache) {
     // Portee des COMPTES : l'organisation, rien d'autre. Voir plus bas.
     const whereUtilisateurs =
       toutesOrganisations && !organisationId ? {} : { organisationId };
@@ -129,34 +204,14 @@ class DashboardService {
 
     const whereChantiers = { chantierId: chantierIds };
 
-    // Toutes les requêtes d'agrégation sont indépendantes : lancées en
-    // parallèle plutôt qu'en série pour ne payer qu'un seul aller-retour de
-    // latence réseau vers la base au lieu de neuf.
-    const [
-      parStatut, parSeverite,
-      total, ouvertes, validees, refusees, enRetard,
-      plans, inspections, documents,
-      reservesParChantierStatut, batimentsParChantier,
-    ] = await Promise.all([
-      Reserve.findAll({ where: whereChantiers, attributes: ['statut', [fn('COUNT', col('id')), 'n']], group: ['statut'], raw: true }),
-      Reserve.findAll({ where: whereChantiers, attributes: ['severite', [fn('COUNT', col('id')), 'n']], group: ['severite'], raw: true }),
-      Reserve.count({ where: whereChantiers }),
-      Reserve.count({ where: { ...whereChantiers, statut: { [Op.notIn]: STATUTS_FERMES } } }),
-      Reserve.count({ where: { ...whereChantiers, statut: 'validee' } }),
-      Reserve.count({ where: { ...whereChantiers, statut: 'refusee' } }),
-      // Réserves en retard : échéance passée et non clôturée/validée
-      Reserve.count({ where: { ...whereChantiers, date_limite: { [Op.lt]: new Date() }, statut: { [Op.notIn]: STATUTS_FERMES } } }),
+    // Cinq requêtes indépendantes en parallèle (douze auparavant) : tous les
+    // compteurs de réserves sortent d'UNE requête groupée — voir
+    // `_compterReserves`.
+    const [reservesGroupees, plans, inspections, documents, batimentsParChantier] = await Promise.all([
+      _compterReserves(whereChantiers, ['chantierId', 'statut', 'severite']),
       Plan.count({ where: whereChantiers }),
       Inspection.count({ where: whereChantiers }),
       Document.count({ where: whereChantiers }),
-      // Résumé par chantier — UNE requête groupée par (chantierId, statut)
-      // au lieu d'un count() par chantier.
-      Reserve.findAll({
-        where: whereChantiers,
-        attributes: ['chantierId', 'statut', [fn('COUNT', col('id')), 'n']],
-        group: ['chantierId', 'statut'],
-        raw: true,
-      }),
       Batiment.findAll({
         where: whereChantiers,
         attributes: ['chantierId', [fn('COUNT', col('id')), 'n']],
@@ -165,30 +220,29 @@ class DashboardService {
       }),
     ]);
 
-    for (const row of parStatut) stats.parStatut[row.statut] = Number(row.n);
-    for (const row of parSeverite) stats.parSeverite[row.severite] = Number(row.n);
-    stats.reserves = { total, ouvertes, validees, refusees, enRetard };
+    const agregat = _agregerReserves(reservesGroupees);
+    stats.parStatut = agregat.parStatut;
+    stats.parSeverite = agregat.parSeverite;
+    stats.reserves = {
+      total: agregat.total,
+      ouvertes: agregat.ouvertes,
+      validees: agregat.validees,
+      refusees: agregat.refusees,
+      enRetard: agregat.enRetard,
+    };
     stats.plans = plans;
     stats.inspections = inspections;
     stats.documents = documents;
 
     const batimentsParChantierMap = new Map(batimentsParChantier.map((b) => [b.chantierId, Number(b.n)]));
-    const parChantierMap = new Map(chantiers.map((c) => [c.id, {
+    stats.parChantier = chantiers.map((c) => ({
       id: c.id,
       nom: c.nom,
       code: c.code,
       statut: c.statut,
-      reserves: { total: 0, ouvertes: 0 },
+      reserves: agregat.parChantier.get(c.id) || { total: 0, ouvertes: 0 },
       batiments: batimentsParChantierMap.get(c.id) || 0,
-    }]));
-    for (const row of reservesParChantierStatut) {
-      const entree = parChantierMap.get(row.chantierId);
-      if (!entree) continue;
-      const n = Number(row.n);
-      entree.reserves.total += n;
-      if (!STATUTS_FERMES.includes(row.statut)) entree.reserves.ouvertes += n;
-    }
-    stats.parChantier = Array.from(parChantierMap.values());
+    }));
 
     const resultat = { success: true, stats };
     await cache.ecrire(cleCache, resultat);
@@ -196,50 +250,41 @@ class DashboardService {
   }
 
   // -------------------- STATISTIQUES D'UN CHANTIER --------------------
-  static async statsChantier(organisationId, chantierId) {
+  static statsChantier(organisationId, chantierId) {
+    // Vol unique : plusieurs membres qui ouvrent le même chantier au même
+    // instant partagent un seul calcul. Pas de mise en cache au-delà : ces
+    // chiffres doivent refléter la réserve qu'on vient de créer.
+    return cache.volUnique(`dashboard:stats-chantier:${organisationId}:${chantierId}`,
+      () => DashboardService._calculerStatsChantier(organisationId, chantierId));
+  }
+
+  static async _calculerStatsChantier(organisationId, chantierId) {
     const chantier = await Chantier.findOne({
       where: { id: chantierId, organisationId },
       include: [{ model: Utilisateur, as: 'responsable', attributes: ['id', 'nom', 'prenom', 'photoProfil'] }],
     });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
-    // Requêtes indépendantes lancées en parallèle (même logique que
-    // statsGlobales) plutôt qu'une cascade de `await` séquentiels.
-    const [
-      total, ouvertes, validees, enRetard, parSeverite, parStatutRows, batiments, plans, inspections, documents,
-    ] = await Promise.all([
-      Reserve.count({ where: { chantierId } }),
-      Reserve.count({ where: { chantierId, statut: { [Op.notIn]: ['validee', 'cloturee'] } } }),
-      Reserve.count({ where: { chantierId, statut: 'validee' } }),
-      Reserve.count({
-        where: { chantierId, date_limite: { [Op.lt]: new Date() }, statut: { [Op.notIn]: ['validee', 'cloturee'] } },
-      }),
-      Reserve.findAll({
-        where: { chantierId },
-        attributes: ['severite', [fn('COUNT', col('id')), 'n']],
-        group: ['severite'],
-        raw: true,
-      }),
-      // Répartition par statut — alimente les compteurs de filtre et le
-      // donut de l'écran mobile « Réserves » : les chiffres viennent du
-      // back, seul le rendu graphique est fait côté client (mobile/web).
-      Reserve.findAll({
-        where: { chantierId },
-        attributes: ['statut', [fn('COUNT', col('id')), 'n']],
-        group: ['statut'],
-        raw: true,
-      }),
+    // Cinq requêtes en parallèle (dix auparavant) : les six comptages de
+    // réserves sortent d'UNE requête groupée (voir `_compterReserves`). La
+    // répartition par statut alimente toujours les compteurs de filtre et le
+    // donut de l'écran mobile « Réserves ».
+    const [reservesGroupees, batiments, plans, inspections, documents] = await Promise.all([
+      _compterReserves({ chantierId }, ['statut', 'severite']),
       Batiment.count({ where: { chantierId } }),
       Plan.count({ where: { chantierId } }),
       Inspection.count({ where: { chantierId } }),
       Document.count({ where: { chantierId } }),
     ]);
+    const agregat = _agregerReserves(reservesGroupees);
 
     const stats = {
       chantier,
-      reserves: { total, ouvertes, validees, enRetard },
-      parSeverite: parSeverite.reduce((acc, r) => ({ ...acc, [r.severite]: Number(r.n) }), {}),
-      parStatut: parStatutRows.reduce((acc, r) => ({ ...acc, [r.statut]: Number(r.n) }), {}),
+      reserves: {
+        total: agregat.total, ouvertes: agregat.ouvertes, validees: agregat.validees, enRetard: agregat.enRetard,
+      },
+      parSeverite: agregat.parSeverite,
+      parStatut: agregat.parStatut,
       batiments,
       plans,
       inspections,

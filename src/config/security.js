@@ -116,11 +116,31 @@ const bcryptConfig = {
 // (authenticatedRateLimitConfig) prend le relais sur les routes
 // authentifiées pour éviter que plusieurs comptes derrière la même IP
 // (4G, box partagée) ne se bloquent mutuellement.
+/**
+ * Corps d'une réponse 429 — la MÊME enveloppe que `errorHandler.middleware.js`.
+ *
+ * Les limiteurs répondent eux-mêmes, sans passer par le gestionnaire
+ * d'erreurs : leur corps se réduisait à `{ success, message }`, sans
+ * `error.code` ni `requestId`. Les clients branchent sur le statut et lisent
+ * `message` (inchangé) ; le code et l'identifiant permettent en plus de
+ * rapprocher un refus signalé par un utilisateur de la ligne de journal.
+ *
+ * @param {string} texte  message affiché à l'utilisateur
+ * @returns {(req: import('express').Request) => object}
+ */
+const reponseLimite = (texte) => (req) => ({
+  success: false,
+  message: texte,
+  error: { code: 'TROP_DE_REQUETES', message: texte },
+  ...(req?.id ? { requestId: req.id } : {}),
+});
+
 const rateLimitConfig = {
   windowMs: 15 * 60 * 1000,
   max: 1000,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  message: reponseLimite('Trop de requêtes. Veuillez réessayer dans quelques minutes.'),
 };
 
 // Limite par utilisateur authentifié (clé = req.user.id, pas l'IP) — couvre
@@ -131,7 +151,7 @@ const authenticatedRateLimitConfig = {
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: 'Trop de requêtes. Veuillez réessayer dans 15 minutes.' }
+  message: reponseLimite('Trop de requêtes. Veuillez réessayer dans 15 minutes.'),
 };
 
 const authRateLimitConfig = {
@@ -141,7 +161,7 @@ const authRateLimitConfig = {
   max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '8', 10),
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: 'Trop de tentatives. Veuillez réessayer dans 15 minutes.' }
+  message: reponseLimite('Trop de tentatives. Veuillez réessayer dans 15 minutes.'),
 };
 
 /**
@@ -164,7 +184,7 @@ const sessionRateLimitConfig = {
   max: parseInt(process.env.SESSION_RATE_LIMIT_MAX || '60', 10),
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: 'Trop de requêtes de session. Veuillez réessayer dans quelques minutes.' }
+  message: reponseLimite('Trop de requêtes de session. Veuillez réessayer dans quelques minutes.'),
 };
 
 // Routes de mutation sensibles (modifier profil, changer mdp, supprimer compte)
@@ -173,7 +193,7 @@ const mutationRateLimitConfig = {
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: 'Trop de requêtes. Veuillez réessayer dans 15 minutes.' }
+  message: reponseLimite('Trop de requêtes. Veuillez réessayer dans 15 minutes.'),
 };
 
 // Routes admin (toutes protégées par auth admin, mais on limite quand même)
@@ -182,7 +202,7 @@ const adminRateLimitConfig = {
   max: 200,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: 'Trop de requêtes admin. Veuillez réessayer.' }
+  message: reponseLimite('Trop de requêtes admin. Veuillez réessayer.'),
 };
 
 // OTP par email : 3 tentatives par email par 15 min (anti ciblage multi-IP)
@@ -191,7 +211,7 @@ const otpEmailRateLimitConfig = {
   max: 3,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: 'Trop de tentatives pour cet email. Réessayez dans 15 minutes.' }
+  message: reponseLimite('Trop de tentatives pour cet email. Réessayez dans 15 minutes.'),
 };
 
 /**
@@ -200,7 +220,12 @@ const otpEmailRateLimitConfig = {
 const corsConfig = {
   origin: _rawCorsOrigins.length ? _rawCorsOrigins : ['http://localhost:3000'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  // `X-Request-Id` : identifiant de corrélation qu'un client peut fournir
+  // (voir requestId.middleware.js). Autorisé en entrée et LISIBLE en sortie :
+  // sans `exposedHeaders`, un navigateur le masque au code de la page, qui ne
+  // peut alors pas le citer dans un rapport d'erreur.
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+  exposedHeaders: ['X-Request-Id', 'Retry-After'],
   credentials: true
 };
 
@@ -257,6 +282,7 @@ const mfaConfig = {
 };
 
 module.exports = {
+  reponseLimite,
   jwtConfig,
   mfaConfig,
   bcryptConfig,

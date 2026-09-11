@@ -1,6 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('crypto');
+const { idempotent } = require('../utils/migrationIdempotente.js');
 
 /**
  * Référentiel des CODES D'APPARTEMENT, et son catalogue standard.
@@ -54,6 +55,9 @@ function catalogueStandard() {
 
 module.exports = {
   async up(queryInterface, Sequelize) {
+    // Base vierge : table déjà créée d'après le modèle par 20260809000000 —
+    // voir utils/migrationIdempotente.js.
+    queryInterface = idempotent(queryInterface);
     const t = await queryInterface.sequelize.transaction();
     try {
       await queryInterface.createTable('codes_appartement', {
@@ -82,13 +86,13 @@ module.exports = {
       });
 
       await queryInterface.sequelize.query(
-        `CREATE UNIQUE INDEX codes_appartement_standard_unique
+        `CREATE UNIQUE INDEX IF NOT EXISTS codes_appartement_standard_unique
            ON codes_appartement (code)
            WHERE organisation_id IS NULL AND deleted_at IS NULL`,
         { transaction: t }
       );
       await queryInterface.sequelize.query(
-        `CREATE UNIQUE INDEX codes_appartement_organisation_unique
+        `CREATE UNIQUE INDEX IF NOT EXISTS codes_appartement_organisation_unique
            ON codes_appartement (organisation_id, code)
            WHERE organisation_id IS NOT NULL AND deleted_at IS NULL`,
         { transaction: t }

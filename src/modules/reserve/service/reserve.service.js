@@ -54,14 +54,31 @@ const TRANSITIONS = {
   validee:         ['cloturee', 'rouverte'],
   refusee:         ['en_cours', 'corrigee', 'rouverte'],
   rouverte:        ['affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier'],
-  // Positionné automatiquement par le job (module 5) ; reprise du cycle normal
-  en_retard:       ['affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte'],
+  // Positionné automatiquement par le job (module 5) ; reprise du cycle normal.
+  //
+  // Ni `validee` ni `refusee` : le job ne marque en retard que du travail
+  // NON ENCORE déclaré fait (voir markReservesEnRetard.job.js). Un verdict
+  // direct depuis ce statut validait une réserve jamais corrigée — la photo de
+  // constat prise à la création suffisait comme « preuve ». La réserve repasse
+  // par `corrigee` / `a_verifier`, comme toutes les autres.
+  en_retard:       ['affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier', 'rouverte'],
   cloturee:        [],
 };
 
 // Statuts figés : la réserve a reçu son verdict, elle n'est plus modifiable
 // (aligné sur la règle déjà appliquée par supprimerReserve).
 const STATUTS_FIGES = ['validee', 'cloturee'];
+
+// Champs qu'une MODIFICATION peut écrire — et seuls ceux-là peuvent entrer en
+// conflit (voir `_conflitsModification`).
+const CHAMPS_MODIFIABLES = [
+  'titre', 'description', 'severite', 'priorite', 'categorie', 'corpsEtatId', 'phaseId',
+  'batimentId', 'etageId', 'zoneId', 'planId', 'lotId', 'entrepriseId', 'partenaireId',
+  'assigneA', 'date_limite',
+];
+
+// Statuts d'un chantier FERMÉ : plus aucune réserve ne s'y ajoute.
+const STATUTS_CHANTIER_FERMES = ['cloture', 'archive'];
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  NUMÉROTATION R-0001 — concurrence & lignes supprimées
@@ -370,6 +387,12 @@ class ReserveService {
    * @returns {string|null} Message de refus, ou `null`.
    */
   static _refusSurDemande(chantier) {
+    // Chantier FERMÉ : clôturé ou archivé, il n'accepte plus de travail. La
+    // clôture exige zéro réserve ouverte — en créer une après la rendait
+    // fausse (chantier.service.js#changerStatut).
+    if (STATUTS_CHANTIER_FERMES.includes(chantier.statut)) {
+      return 'Ce chantier est clôturé ou archivé : aucune réserve ne peut y être ajoutée.';
+    }
     if (!STATUT_CHANTIER_EN_DEMANDE.includes(chantier.statut)) return null;
     return chantier.statut === 'rejete'
       ? 'Cette demande de chantier a été refusée : aucune réserve ne peut y être posée.'
@@ -400,7 +423,12 @@ class ReserveService {
         if (existante.chantier?.organisationId !== organisationId) {
           return { success: false, message: 'Identifiant de reserve deja utilise' };
         }
-        return { success: true, message: 'Reserve deja enregistree', reserve: existante, rejeu: true };
+        return {
+          success: true,
+          message: 'Reserve deja enregistree',
+          reserve: await ReserveService._reponseEcriture(existante, organisationId),
+          rejeu: true,
+        };
       }
     }
 
@@ -446,7 +474,11 @@ class ReserveService {
       });
     }
 
-    return { success: true, message: 'Réserve créée avec succès', reserve };
+    return {
+      success: true,
+      message: 'Réserve créée avec succès',
+      reserve: await ReserveService._reponseEcriture(reserve, organisationId),
+    };
   }
 
   /**
@@ -481,7 +513,12 @@ class ReserveService {
       return { success: false, message: 'Cette réserve a été supprimée entre-temps : elle ne peut pas être recréée.' };
     }
     logger.info(`[reserve] Création rejouée en concurrence (id ${data.id}) — réserve existante renvoyée`);
-    return { success: true, message: 'Reserve deja enregistree', reserve: existante, rejeu: true };
+    return {
+      success: true,
+      message: 'Reserve deja enregistree',
+      reserve: await ReserveService._reponseEcriture(existante, organisationId),
+      rejeu: true,
+    };
   }
 
   /** Réserve + position + historique, dans UNE transaction (avec réessai de numéro). */
@@ -893,6 +930,51 @@ class ReserveService {
     return { success: true, reserves: rows, total: count };
   }
 
+  /**
+   * Relit une réserve AVEC ses associations, pour la réponse d'une écriture
+   * — deuxième audit synchronisation, A2-03.
+   *
+   * Création, changement de statut et modification répondaient la ligne
+   * BRUTE : ni plan, ni phase, ni position, ni photos, ni historique. Le
+   * mobile écrit cette réponse telle quelle dans son cache et l'affiche : après
+   * un changement de statut, la fiche montrait 0 photo (et ne proposait donc
+   * plus « validée »), plus d'aperçu du plan ni d'historique, et la réserve
+   * perdait son repère hors ligne jusqu'au tirage suivant.
+   *
+   * Plus légère que `getReserve` : ni commentaires, ni pièces jointes, ni
+   * signatures — ils ont leurs propres routes.
+   *
+   * @returns {Promise<object|null>} la réserve complète, ou `null` si son
+   *   chantier n'est pas (ou plus) dans cette organisation.
+   */
+  static async _relire(reserveId, organisationId) {
+    return Reserve.findByPk(reserveId, {
+      include: [
+        { model: Chantier, as: 'chantier', where: { organisationId }, attributes: ['id', 'nom', 'code', 'organisationId'] },
+        { model: ReservePosition, as: 'position' },
+        { model: Plan, as: 'plan', attributes: ['id', 'nom', 'version', 'fichier_url', 'format'], required: false },
+        { model: Phase, as: 'phase', attributes: ['id', 'nom', 'ordre'], required: false },
+        { model: CorpsEtat, as: 'corpsEtat', attributes: ['id', 'nom', 'code'], required: false },
+        { model: Lot, as: 'lot', attributes: ['id', 'nom'] },
+        { model: Batiment, as: 'batiment', attributes: ['id', 'nom'] },
+        { model: Etage, as: 'etage', attributes: ['id', 'nom'] },
+        { model: Zone, as: 'zone', attributes: ['id', 'nom'] },
+        { model: Partenaire, as: 'partenaire', attributes: ['id', 'nom', 'type'], required: false },
+        { model: Organisation, as: 'entreprise', attributes: ['id', 'nom'] },
+        { model: Utilisateur, as: 'assigne', attributes: ['id', 'nom', 'prenom', 'photoProfil'] },
+        { model: Utilisateur, as: 'createur', attributes: ['id', 'nom', 'prenom'] },
+        { model: Media, as: 'medias' },
+        { model: ReserveHistorique, as: 'historiques', include: [{ model: Utilisateur, as: 'utilisateur', attributes: ['id', 'nom', 'prenom'] }] },
+      ],
+      order: [[{ model: ReserveHistorique, as: 'historiques' }, 'createdAt', 'ASC']],
+    });
+  }
+
+  /** La réserve relue pour la réponse — ou la ligne écrite, si la relecture ne rend rien. */
+  static async _reponseEcriture(ligne, organisationId) {
+    return (await ReserveService._relire(ligne.id, organisationId)) || ligne;
+  }
+
   // -------------------- DÉTAIL D'UNE RÉSERVE --------------------
   static async getReserve(reserveId, organisationId) {
     const reserve = await Reserve.findByPk(reserveId, {
@@ -965,6 +1047,50 @@ class ReserveService {
     return { success: true, reserve };
   }
 
+  /**
+   * Conflits entre une modification et l'état ACTUEL de la réserve —
+   * deuxième audit synchronisation, A2-13.
+   *
+   * Le client envoie, avec les champs modifiés, les valeurs qu'il avait SOUS
+   * LES YEUX (`valeursInitiales`). Pour chaque champ :
+   *  - personne n'y a touché depuis (valeur actuelle = valeur initiale) : on
+   *    applique ;
+   *  - il porte DÉJÀ la valeur demandée : c'est un rejeu, rien à signaler ;
+   *  - sinon, quelqu'un l'a modifié entre-temps : CONFLIT, et rien n'est
+   *    écrit — la seconde modification écrasait la première sans que personne
+   *    le sache (un titre corrigé depuis le web, perdu au rejeu d'une saisie
+   *    hors ligne).
+   *
+   * Des champs DIFFÉRENTS modifiés par deux personnes ne sont pas en conflit.
+   * Sans `valeursInitiales` (web, ancien client), le comportement historique
+   * est conservé.
+   */
+  static _conflitsModification(reserve, data) {
+    const initiales = data.valeursInitiales;
+    if (!initiales || typeof initiales !== 'object') return [];
+
+    const comparable = (champ, valeur) => {
+      if (valeur === undefined || valeur === null || valeur === '') return null;
+      if (champ === 'date_limite') {
+        // « 2026-09-30 » et « 2026-09-30T00:00:00.000Z » sont la même échéance.
+        if (valeur instanceof Date) return Number.isNaN(valeur.getTime()) ? null : valeur.toISOString().slice(0, 10);
+        const texte = String(valeur);
+        return /^\d{4}-\d{2}-\d{2}/.test(texte) ? texte.slice(0, 10) : texte;
+      }
+      return String(valeur);
+    };
+
+    const conflits = [];
+    for (const champ of Object.keys(initiales)) {
+      if (!CHAMPS_MODIFIABLES.includes(champ) || data[champ] === undefined) continue;
+      const actuelle = comparable(champ, reserve[champ]);
+      if (actuelle === comparable(champ, initiales[champ])) continue; // personne n'y a touché
+      if (actuelle === comparable(champ, data[champ])) continue; // déjà la valeur voulue : rejeu
+      conflits.push({ champ, valeurServeur: reserve[champ] ?? null, valeurDemandee: data[champ] });
+    }
+    return conflits;
+  }
+
   // -------------------- MODIFIER UNE RÉSERVE --------------------
   static async modifierReserve(organisationId, reserveId, data, utilisateurId) {
     const reserve = await Reserve.findByPk(reserveId, {
@@ -980,6 +1106,18 @@ class ReserveService {
       return {
         success: false,
         message: 'Une réserve validée ou clôturée ne peut plus être modifiée. Rouvrez-la d’abord.',
+      };
+    }
+
+    // A2-13 — rien n'est écrit si un champ modifié l'a été ailleurs entre-temps.
+    const conflits = ReserveService._conflitsModification(reserve, data);
+    if (conflits.length) {
+      return {
+        success: false,
+        code: 'CONFLIT_MODIFICATION',
+        message: `Modifié par quelqu’un d’autre entre-temps : ${conflits.map((c) => c.champ).join(', ')}. `
+          + 'Rechargez la réserve pour voir la version actuelle avant de la modifier.',
+        conflits,
       };
     }
 
@@ -1012,7 +1150,7 @@ class ReserveService {
     if (erreurLoc) return { success: false, message: erreurLoc };
 
     const updates = {};
-    for (const champ of ['titre', 'description', 'severite', 'priorite', 'categorie', 'corpsEtatId', 'phaseId', 'batimentId', 'etageId', 'zoneId', 'planId', 'lotId', 'entrepriseId', 'partenaireId', 'assigneA', 'date_limite']) {
+    for (const champ of CHAMPS_MODIFIABLES) {
       if (data[champ] !== undefined) updates[champ] = data[champ];
     }
 
@@ -1051,7 +1189,11 @@ class ReserveService {
       throw err;
     }
 
-    return { success: true, message: 'Réserve mise à jour avec succès', reserve };
+    return {
+      success: true,
+      message: 'Réserve mise à jour avec succès',
+      reserve: await ReserveService._reponseEcriture(reserve, organisationId),
+    };
   }
 
   // -------------------- CHANGER LE STATUT --------------------
@@ -1104,7 +1246,12 @@ class ReserveService {
     // Placé APRÈS les contrôles de droits : un rejeu ne contourne rien.
     // Aucune écriture, aucun historique, aucune notification : rien n'a changé.
     if (reserve.statut === statut) {
-      return { success: true, message: `Statut déjà à jour : ${statut}`, reserve, rejeu: true };
+      return {
+        success: true,
+        message: `Statut déjà à jour : ${statut}`,
+        reserve: await ReserveService._reponseEcriture(reserve, organisationId),
+        rejeu: true,
+      };
     }
 
     const statutsAutorises = TRANSITIONS[reserve.statut] || [];
@@ -1115,18 +1262,13 @@ class ReserveService {
       };
     }
 
-    const ancienStatut = reserve.statut;
+    let ancienStatut = reserve.statut;
     const updates = { statut };
 
     if (statut === 'validee') {
-      // Preuves de correction obligatoires
-      const preuves = await Media.count({ where: { reserveId: reserve.id } });
-      if (preuves === 0) {
-        return {
-          success: false,
-          message: 'Une réserve ne peut être validée qu’avec des preuves de correction (photo, vidéo ou note vocale).',
-        };
-      }
+      // Les preuves de correction sont exigées plus bas, SOUS LE VERROU : c'est
+      // l'état au moment de l'écriture qui compte, pas celui d'une lecture
+      // antérieure.
       updates.validePar = utilisateurId;
       updates.date_validation = new Date();
       updates.motif_refus = null;
@@ -1150,7 +1292,55 @@ class ReserveService {
     // réception incontestablement faux.
     const t = await sequelize.transaction();
     try {
-      await reserve.update(updates, { transaction: t });
+      // A2-06 — relecture VERROUILLÉE (FOR UPDATE) avant d'écrire.
+      //
+      // Les contrôles ci-dessus portent sur une lecture SANS verrou. Deux
+      // changements simultanés — « validée » par l'un, « en cours » par
+      // l'autre — étaient donc jugés tous deux contre le MÊME état de départ,
+      // et passaient tous deux : la réserve finissait « en cours » après avoir
+      // été validée, transition interdite, et le verdict disparaissait.
+      //
+      // Le verrou fait attendre le second jusqu'à la fin du premier ; il est
+      // alors REJUGÉ sur l'état réellement laissé.
+      const verrouillee = await Reserve.findByPk(reserve.id, {
+        transaction: t,
+        lock: t.LOCK?.UPDATE ?? true,
+      });
+      if (!verrouillee) {
+        await t.rollback();
+        return { success: false, message: 'Réserve introuvable dans cette organisation' };
+      }
+      if (verrouillee.statut !== ancienStatut) {
+        if (verrouillee.statut === statut) {
+          // L'autre requête a fait exactement ce qu'on demandait : rejeu.
+          await t.rollback();
+          return {
+            success: true,
+            message: `Statut déjà à jour : ${statut}`,
+            reserve: await ReserveService._reponseEcriture(verrouillee, organisationId),
+            rejeu: true,
+          };
+        }
+        if (!(TRANSITIONS[verrouillee.statut] || []).includes(statut)) {
+          await t.rollback();
+          return { success: false, message: `Transition impossible : ${verrouillee.statut} → ${statut}.` };
+        }
+        ancienStatut = verrouillee.statut;
+      }
+
+      if (statut === 'validee') {
+        // Preuves de correction obligatoires — comptées dans la transaction.
+        const preuves = await Media.count({ where: { reserveId: reserve.id }, transaction: t });
+        if (preuves === 0) {
+          await t.rollback();
+          return {
+            success: false,
+            message: 'Une réserve ne peut être validée qu’avec des preuves de correction (photo, vidéo ou note vocale).',
+          };
+        }
+      }
+
+      await verrouillee.update(updates, { transaction: t });
 
       await ReserveHistorique.create({
         reserveId: reserve.id,
@@ -1162,7 +1352,8 @@ class ReserveService {
 
       await t.commit();
     } catch (err) {
-      await t.rollback();
+      // `finished` : un refus ci-dessus a déjà annulé la transaction.
+      if (!t.finished) await t.rollback();
       throw err;
     }
 
@@ -1178,7 +1369,11 @@ class ReserveService {
       });
     }
 
-    return { success: true, message: `Statut mis à jour : ${statut}`, reserve };
+    return {
+      success: true,
+      message: `Statut mis à jour : ${statut}`,
+      reserve: await ReserveService._reponseEcriture(reserve, organisationId),
+    };
   }
 
   // -------------------- COMMENTAIRES --------------------
@@ -1233,7 +1428,23 @@ class ReserveService {
     const reserve = await Reserve.findByPk(reserveId, {
       include: [{ model: Chantier, as: 'chantier', where: { organisationId } }],
     });
-    if (!reserve) return { success: false, message: 'Réserve introuvable dans cette organisation' };
+    if (!reserve) {
+      // A2-12 — suppression REJOUÉE. Le mobile renvoie la suppression quand la
+      // réponse s'est perdue ; « introuvable » passait pour un refus définitif,
+      // le mobile restaurait la réserve depuis son instantané — un fantôme — et
+      // la tâche restait en échec pour toujours. Une réserve DÉJÀ supprimée
+      // dans CETTE organisation est un succès sans effet ; toute autre absence
+      // reste « introuvable » (jamais de confirmation hors organisation).
+      const supprimee = await Reserve.findOne({
+        where: { id: reserveId },
+        paranoid: false,
+        include: [{ model: Chantier, as: 'chantier', attributes: ['organisationId'], paranoid: false }],
+      });
+      if (supprimee?.deletedAt && supprimee.chantier?.organisationId === organisationId) {
+        return { success: true, message: 'Réserve déjà supprimée', rejeu: true };
+      }
+      return { success: false, message: 'Réserve introuvable dans cette organisation' };
+    }
 
     // Règle métier : une réserve validée ou clôturée ne peut pas être supprimée
     if (STATUTS_FIGES.includes(reserve.statut)) {

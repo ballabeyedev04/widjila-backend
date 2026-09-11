@@ -26,7 +26,9 @@ jest.mock('../models/index.js', () => ({
     create: jest.fn().mockResolvedValue({}),
   },
 }));
-jest.mock('bcryptjs', () => ({ compare: jest.fn(), hash: jest.fn() }));
+// Le service hache via utils/motDePasse.js (bcrypt natif) : c'est ce module
+// qu'on double, plus `bcryptjs`.
+jest.mock('../utils/motDePasse.js', () => ({ compare: jest.fn(), hash: jest.fn() }));
 jest.mock('../modules/auth/service/connexionLog.service.js', () => ({
   journaliserConnexion: jest.fn().mockResolvedValue(undefined),
 }));
@@ -38,7 +40,7 @@ jest.mock('../modules/auth/service/connexionLog.service.js', () => ({
 jest.mock('../modules/auth/service/mfa.service.js', () => ({ verify: jest.fn() }));
 
 const { Utilisateur } = require('../models/index.js');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('../utils/motDePasse.js');
 const { journaliserConnexion } = require('../modules/auth/service/connexionLog.service.js');
 const AuthService = require('../modules/auth/service/auth.service.js');
 

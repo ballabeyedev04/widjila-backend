@@ -35,6 +35,14 @@
  * sur une connexion qui vient d'échouer.
  */
 
+// `_enregistrer` pose un verrou consultatif de transaction autour de
+// « revérifier puis créer » (A2-07, voir sync2.mediaConcurrence.test.js) :
+// sans base, la transaction exécute simplement son travail.
+jest.mock('../config/db.js', () => ({
+  transaction: jest.fn(async (travail) => travail({})),
+  query: jest.fn(async () => [{}]),
+}));
+
 jest.mock('../models/index.js', () => ({
   Media: { create: jest.fn(), findOne: jest.fn(), findAll: jest.fn(), destroy: jest.fn() },
   // `findByPk` en plus de `findOne` : le service remonte désormais au CHANTIER

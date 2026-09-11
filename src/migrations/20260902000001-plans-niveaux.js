@@ -1,6 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('crypto');
+const { idempotent } = require('../utils/migrationIdempotente.js');
 
 /**
  * Fondation du parcours « Envoi de plans ».
@@ -77,6 +78,9 @@ function catalogueStandard() {
 
 module.exports = {
   async up(queryInterface, Sequelize) {
+    // Base vierge : colonnes et table déjà créées d'après les modèles par
+    // 20260809000000 — voir utils/migrationIdempotente.js.
+    queryInterface = idempotent(queryInterface);
     const t = await queryInterface.sequelize.transaction();
     try {
       // ── 1. Statut des plans ───────────────────────────────────────────────
@@ -147,13 +151,13 @@ module.exports = {
       // doublons dans le standard, PostgreSQL ne considérant jamais deux NULL
       // comme égaux.
       await queryInterface.sequelize.query(
-        `CREATE UNIQUE INDEX codes_niveau_standard_unique
+        `CREATE UNIQUE INDEX IF NOT EXISTS codes_niveau_standard_unique
            ON codes_niveau (type_niveau, code)
            WHERE organisation_id IS NULL AND deleted_at IS NULL`,
         { transaction: t }
       );
       await queryInterface.sequelize.query(
-        `CREATE UNIQUE INDEX codes_niveau_organisation_unique
+        `CREATE UNIQUE INDEX IF NOT EXISTS codes_niveau_organisation_unique
            ON codes_niveau (organisation_id, type_niveau, code)
            WHERE organisation_id IS NOT NULL AND deleted_at IS NULL`,
         { transaction: t }

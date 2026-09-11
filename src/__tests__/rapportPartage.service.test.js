@@ -49,7 +49,7 @@ beforeEach(() => {
   process.env.API_PUBLIC_URL = 'https://api.widjila.test/';
 
   rapport = instance({
-    id: 'rap-1', nom: 'Rapport global', fichier_url: '/uploads/rapports/r.pdf',
+    id: 'rap-1', nom: 'Rapport global', fichier_url: '/uploads/rapports/r.pdf', statut: 'genere',
     chantier: { id: 'ch-1', nom: 'Résidence', organisationId: ORG },
   });
   modeles.Rapport.findOne.mockImplementation(async ({ include }) => (
@@ -108,6 +108,22 @@ describe('création d’un lien (§ 14)', () => {
 
     expect((await RapportPartageService.creer('rap-1', 'autre-org', { id: 'u1' })).message).toMatch(/introuvable/);
   });
+
+  it.each(['brouillon', 'generation', 'echec', 'archive'])(
+    'refuse de partager un fichier PÉRIMÉ (rapport « %s » qui garde un ancien PDF)',
+    async (statut) => {
+      // Un rapport modifié après génération repasse en brouillon SANS perdre
+      // son ancien fichier : le lien aurait diffusé une version que la
+      // configuration ne décrit plus — ce que `envoyer` refuse déjà.
+      rapport.statut = statut;
+
+      const r = await RapportPartageService.creer('rap-1', ORG, { id: 'u1' });
+
+      expect(r.success).toBe(false);
+      expect(r.message).toMatch(/Régénérez/);
+      expect(modeles.RapportPartage.create).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('§ 23 — Lien sécurisé : accès contrôlé', () => {

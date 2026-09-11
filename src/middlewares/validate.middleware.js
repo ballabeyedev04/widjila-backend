@@ -2,6 +2,7 @@
 
 const { ValidationError } = require('../errors/AppError.js');
 const logger = require('../utils/logger.js');
+const masquerUrl = require('../utils/masquerUrl.js');
 
 /**
  * Clés systématiquement présentes dans les requêtes sans jamais appartenir aux
@@ -60,7 +61,8 @@ const validate = (schema, source = 'body') => (req, res, next) => {
     return next(new ValidationError('Données invalides', error.details.map((d) => d.message)));
   }
 
-  signalerChampsIgnores(source, req[source], value, `${req.method} ${req.originalUrl}`);
+  // URL masquée : un jeton passé en paramètre de requête finissait ici en clair.
+  signalerChampsIgnores(source, req[source], value, `${req.method} ${masquerUrl(req.originalUrl)}`);
 
   if (source === 'query') {
     Object.assign(req.query, value);

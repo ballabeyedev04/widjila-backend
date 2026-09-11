@@ -1,6 +1,7 @@
 'use strict';
 
-const bcrypt = require('bcryptjs');
+// bcrypt NATIF (hors boucle d'événements) — voir utils/motDePasse.js.
+const bcrypt = require('../../../utils/motDePasse.js');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const { Utilisateur, Organisation, RefreshToken } = require('../../../models/index.js');

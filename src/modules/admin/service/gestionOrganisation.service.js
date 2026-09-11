@@ -28,7 +28,8 @@ class GestionOrganisationService {
 
     const { rows, count } = await Organisation.findAndCountAll({
       where,
-      order: [['createdAt', 'DESC']],
+      // `id` départage les lignes du même instant — pagination stable.
+      order: [['createdAt', 'DESC'], ['id', 'DESC']],
       limit,
       offset: (page - 1) * limit,
       distinct: true,
