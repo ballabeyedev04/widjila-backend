@@ -332,15 +332,18 @@ class DashboardService {
       };
     }
 
+    // Le chantier se filtre sur la RÉSERVE jointe : `reserve_historiques` n'a
+    // pas de colonne `chantier_id`, et la poser sur l'historique faisait
+    // échouer la requête (colonne inconnue) à chaque appel.
     const creations = await ReserveHistorique.findAll({
-      where: { ...whereChantier, action: 'creation' },
-      include: [{ model: Reserve, as: 'reserve', attributes: [] }],
+      where: { action: 'creation' },
+      include: [{ model: Reserve, as: 'reserve', attributes: [], where: whereChantier, required: true }],
       attributes: ['reserveId', 'createdAt'],
       raw: true,
     });
     const validations = await ReserveHistorique.findAll({
-      where: { ...whereChantier, action: 'validation' },
-      include: [{ model: Reserve, as: 'reserve', attributes: [] }],
+      where: { action: 'validation' },
+      include: [{ model: Reserve, as: 'reserve', attributes: [], where: whereChantier, required: true }],
       attributes: ['reserveId', 'createdAt'],
       raw: true,
     });

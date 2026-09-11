@@ -23,6 +23,23 @@ const MFA_COOKIE_OPTS = {
 /** Métadonnées d'audit extraites de la requête (journal des connexions). */
 const _meta = (req) => ({ ip: req.ip, userAgent: req.headers['user-agent'] || null });
 
+/**
+ * Le refresh token part-il AUSSI dans le corps de la réponse ?
+ *
+ * Seulement pour un client qui ne gère pas les cookies — le mobile (Dio), qui
+ * le stocke lui-même. Un navigateur le reçoit déjà en cookie httpOnly, hors
+ * de portée du JavaScript : le lui renvoyer en JSON annulait cette
+ * protection. Une faille XSS dans l'admin n'obtenait sinon qu'un jeton
+ * d'accès d'une heure ; avec le corps, un `POST /auth/refresh` (cookie joint
+ * automatiquement) lui livrait un jeton de SEPT jours, renouvelable, à
+ * exfiltrer (audit sécurité).
+ *
+ * Critère : l'en-tête `Origin`. Les navigateurs l'envoient sur toute requête
+ * cross-origin et sur tout POST même same-origin ; le client HTTP du mobile
+ * n'en envoie pas.
+ */
+const _refreshDansLeCorps = (req) => !req.headers.origin;
+
 exports.inscriptionUser = asyncHandler(async (req, res) => {
   const result = await AuthService.register(req.body);
   if (!result.success) throw new BadRequestError(result.message);
@@ -59,9 +76,8 @@ exports.login = asyncHandler(async (req, res) => {
       token: result.token,
       // Client mobile (Dio) : pas de gestion automatique des cookies comme un
       // navigateur — le refreshToken est donc AUSSI renvoyé ici, en plus du
-      // cookie httpOnly (déjà consommé par le web). Additif, ne change rien
-      // pour le web qui continue d'utiliser le cookie exclusivement.
-      refreshToken: result.refreshToken,
+      // cookie httpOnly. Jamais à un navigateur : voir `_refreshDansLeCorps`.
+      ...(_refreshDansLeCorps(req) ? { refreshToken: result.refreshToken } : {}),
       utilisateur: formatUser(result.utilisateur),
     },
   });
@@ -83,7 +99,8 @@ exports.verifierMfa = asyncHandler(async (req, res) => {
     message: 'Connexion réussie',
     data: {
       token: result.token,
-      refreshToken: result.refreshToken, // voir commentaire dans exports.login
+      // voir commentaire dans exports.login et `_refreshDansLeCorps`
+      ...(_refreshDansLeCorps(req) ? { refreshToken: result.refreshToken } : {}),
       utilisateur: formatUser(result.utilisateur),
     },
   });
@@ -107,7 +124,10 @@ exports.refresh = asyncHandler(async (req, res) => {
     // nouveau refreshToken à chaque appel — un client mobile qui le stocke
     // lui-même (pas de cookie automatique) DOIT recevoir le nouveau pour
     // remplacer l'ancien, sinon le refresh suivant échouera (token consommé).
-    data: { token: result.token, refreshToken: result.refreshToken },
+    data: {
+      token: result.token,
+      ...(_refreshDansLeCorps(req) ? { refreshToken: result.refreshToken } : {}),
+    },
   });
 });
 

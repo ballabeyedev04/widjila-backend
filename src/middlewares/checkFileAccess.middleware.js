@@ -197,10 +197,15 @@ async function resoudreProprietaire(sousDossier, urls) {
     return { ressource: 'Document', id: doc.id, organisationId: await organisationDuChantier(doc.chantierId) };
   }
 
-  // ── Rapports PDF générés (/uploads/rapports/…) → Rapport.fichier_url
+  // ── Rapports générés (/uploads/rapports/…) → Rapport.fichier_url (PDF)
+  //    ou Rapport.fichier_xlsx_url (Excel, cahier des charges Rapports § 4).
+  //    Sans la seconde colonne, tout export Excel répondrait « introuvable » :
+  //    un fichier qu'aucune ligne ne référence est refusé par défaut.
   if (sousDossier === 'rapports') {
     const rapport = await Rapport.findOne({
-      where: { fichier_url: where }, attributes: ['id', 'chantierId'], paranoid: false,
+      where: { [Op.or]: [{ fichier_url: where }, { fichier_xlsx_url: where }] },
+      attributes: ['id', 'chantierId'],
+      paranoid: false,
     });
     if (!rapport) return null;
     return { ressource: 'Rapport', id: rapport.id, organisationId: await organisationDuChantier(rapport.chantierId) };

@@ -76,7 +76,10 @@ exports.listerToutesReserves = asyncHandler(async (req, res) => {
   const result = await ReserveService.listToutesReserves(
     superAdmin ? (req.query.organisationId || null) : req.user.organisationId,
     req.query,
-    { toutesOrganisations: superAdmin }
+    { toutesOrganisations: superAdmin },
+    // Cloisonnement par chantier : l'appelant ne liste que les réserves des
+    // chantiers qu'il peut ouvrir (ChantierService.filtreCloisonnement).
+    req.user
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({

@@ -309,7 +309,10 @@ class ReserveExcelService {
     const [batiments, etages, zones, lots] = await Promise.all([
       Batiment.findAll({ where: { chantierId }, attributes: ['id', 'nom'] }),
       Etage.findAll({ include: [{ model: Batiment, as: 'batiment', where: { chantierId }, attributes: [] }], attributes: ['id', 'nom'] }),
-      Zone.findAll({ include: [{ model: Etage, as: 'etage', include: [{ model: Batiment, as: 'batiment', where: { chantierId }, attributes: [] }] }], attributes: ['id', 'nom'] }),
+      // `required: true` sur l'étage (audit sécurité) : sans lui, la jointure
+      // externe renvoyait TOUTES les zones de la plateforme, et un nom de zone
+      // du fichier pouvait rattacher la réserve à celle d'une autre organisation.
+      Zone.findAll({ include: [{ model: Etage, as: 'etage', required: true, attributes: [], include: [{ model: Batiment, as: 'batiment', where: { chantierId }, attributes: [] }] }], attributes: ['id', 'nom'] }),
       Lot.findAll({ where: { chantierId }, attributes: ['id', 'nom'] }),
     ]);
     const norm = (s) => String(s || '').trim().toLowerCase();

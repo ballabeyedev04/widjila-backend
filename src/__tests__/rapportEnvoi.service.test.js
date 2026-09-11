@@ -1,46 +1,32 @@
 'use strict';
 
 /**
- * Tests — modules/rapport/service/rapportEnvoi.service.js
+ * Tests — la diffusion d'un rapport par e-mail (§ 13 du cahier des charges),
+ * et les critères du § 23 : « E-mail : bon destinataire et bon fichier/lien »
+ * et « Historique : génération et envoi journalisés ».
  *
- * Envoyer un rapport de réserves, c'est diffuser un document contractuel à des
- * tiers. Une erreur ici ne produit pas un écran cassé : elle envoie les
- * réserves de l'entreprise A à l'entreprise B, ou expose l'annuaire d'un
- * chantier à une autre organisation. Ce qui est verrouillé :
+ * Envoyer un rapport de réserves, c'est diffuser un document contractuel à
+ * des tiers. Une erreur ici ne produit pas un écran cassé : elle envoie les
+ * réserves de l'entreprise A à l'entreprise B. Ce qui est verrouillé :
  *
- *   1. CLOISONNEMENT — un rapport d'une autre organisation est introuvable,
- *      même avec son identifiant exact ;
- *   2. DESTINATAIRE — l'entreprise concernée, et elle seule. Jamais « toutes
- *      les entreprises du chantier », jamais un repli sur les clients ;
- *   3. COPIE — les clients du chantier, en `cc` et pas en `to` ;
- *   4. PIÈCE JOINTE — le PDF réellement lu depuis le stockage. Un envoi sans
- *      pièce jointe serait pire qu'un échec : personne ne le remarquerait ;
- *   5. VALIDATION — `preparer` n'envoie RIEN. Le client l'a demandé
- *      explicitement : « ne pas envoyer automatiquement le mail sans
- *      validation de l'utilisateur » ;
- *   6. PAS DE RELAIS OUVERT — `exclure` ne peut que retirer des destinataires,
- *      jamais en ajouter.
+ *   1. CLOISONNEMENT — le rapport d'une autre organisation est introuvable ;
+ *   2. DESTINATAIRE — l'entreprise concernée, et elle seule ; pour un rapport
+ *      par entreprise (§ 15), son seul responsable ;
+ *   3. VALIDATION — `preparer` n'envoie RIEN ;
+ *   4. PAS DE RELAIS OUVERT — seules les adresses du chantier sont acceptées ;
+ *   5. PIÈCE JOINTE OU LIEN — selon le poids du fichier ;
+ *   6. TRAÇABILITÉ — qui a reçu quoi, et l'état ENVOYÉ.
  */
 
 const { Readable } = require('node:stream');
 
-const mockRapport = { findByPk: jest.fn() };
-const mockPartenaire = { findAll: jest.fn(), findOne: jest.fn() };
-const mockReserve = { findAll: jest.fn(), count: jest.fn() };
-const mockUtilisateur = { findByPk: jest.fn() };
-
-jest.mock('../models/index.js', () => ({
-  Rapport: mockRapport,
-  Chantier: 'Chantier',
-  Organisation: 'Organisation',
-  Partenaire: mockPartenaire,
-  Reserve: mockReserve,
-  Utilisateur: mockUtilisateur,
-}));
+jest.mock('../models/index.js', () => require('./helpers/modelesRapportMock.js').creerModeles());
 
 const mockOuvrirFichier = jest.fn();
 jest.mock('../infrastructure/storage.service.js', () => ({
   ouvrirFichier: (...a) => mockOuvrirFichier(...a),
+  storeFile: jest.fn(),
+  deleteFile: jest.fn(),
 }));
 
 const mockSendEmail = jest.fn();
@@ -48,340 +34,302 @@ jest.mock('../infrastructure/emailService.js', () => ({
   sendEmail: (...a) => mockSendEmail(...a),
 }));
 
-jest.mock('../utils/logger.js', () => ({
-  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
-}));
+jest.mock('../utils/logger.js', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
+const modeles = require('../models/index.js');
+const { reinitialiser, instance } = require('./helpers/modelesRapportMock.js');
 const RapportEnvoiService = require('../modules/rapport/service/rapportEnvoi.service.js');
 
 const ORG = '11111111-1111-4111-8111-111111111111';
 const CHANTIER = '22222222-2222-4222-8222-222222222222';
-const RAPPORT = '33333333-3333-4333-8333-333333333333';
-const AUTEUR = '44444444-4444-4444-8444-444444444444';
+const AUTEUR = 'u-auteur';
 
-/** Un rapport déjà généré, tel que le renverrait Sequelize. */
-function rapport(parametres = {}) {
-  return {
-    id: RAPPORT,
+const TOITURE = { id: 'p1', nom: 'SARL Toiture', email: 'toiture@ex.fr', type: 'sous_traitant' };
+const PLOMBERIE = { id: 'p2', nom: 'Plomberie Diop', email: 'Plomberie@EX.fr', type: 'sous_traitant' };
+const MOA = { id: 'c1', nom: 'MOA', email: 'moa@ex.fr', type: 'client' };
+
+let rapport;
+let entreprises;
+let clients;
+
+function nouveauRapport(surcharge = {}) {
+  return instance({
+    id: 'rap-1',
     chantierId: CHANTIER,
-    type: 'reserves',
-    fichier_url: 'rapports/rapport-reserves-RH.pdf',
-    parametres,
-    createdAt: new Date('2026-09-09T08:00:00Z'),
+    nom: 'Rapport global',
+    statut: 'genere',
+    fichier_url: '/uploads/rapports/rapport-global.pdf',
+    taille_pdf: 250 * 1024,
+    nb_reserves: 12,
+    filtres: {},
+    genere_le: new Date('2026-09-09T08:00:00Z'),
     chantier: {
-      id: CHANTIER,
-      nom: 'Résidence Horizon',
-      code: 'RH-2026',
-      organisationId: ORG,
+      id: CHANTIER, nom: 'Résidence Horizon', code: 'RH-2026', organisationId: ORG,
       organisation: { id: ORG, nom: 'Widjila BTP' },
     },
-  };
+    ...surcharge,
+  });
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockRapport.findByPk.mockResolvedValue(rapport());
-  mockPartenaire.findAll.mockResolvedValue([]);
-  mockPartenaire.findOne.mockResolvedValue(null);
-  mockReserve.findAll.mockResolvedValue([]);
-  mockReserve.count.mockResolvedValue(0);
-  mockUtilisateur.findByPk.mockResolvedValue({
-    id: AUTEUR, nom: 'Beye', prenom: 'Balla', email: 'balla@widjila.com',
+  reinitialiser(modeles);
+  delete process.env.RAPPORT_LIEN_BASE;
+  process.env.API_PUBLIC_URL = 'https://api.widjila.test';
+
+  rapport = nouveauRapport();
+  entreprises = [TOITURE, PLOMBERIE];
+  clients = [MOA];
+
+  modeles.Rapport.findOne.mockImplementation(async ({ include }) => (
+    include?.[0]?.where?.organisationId === ORG ? rapport : null
+  ));
+  modeles.Reserve.findAll.mockResolvedValue([
+    { id: 'r1', partenaireId: 'p1' }, { id: 'r2', partenaireId: 'p2' }, { id: 'r3', partenaireId: null },
+  ]);
+  modeles.Partenaire.findAll.mockImplementation(async ({ where }) => {
+    if (where.type === 'client') return clients;
+    if (where.id) return entreprises;
+    return [...entreprises, ...clients]; // l'annuaire complet : les candidats
   });
-  mockOuvrirFichier.mockResolvedValue({ stream: Readable.from([Buffer.from('%PDF-1.7 faux')]) });
+  modeles.ChantierMembre.findAll.mockResolvedValue([
+    { utilisateur: { id: 'u-cond', prenom: 'Awa', nom: 'Diop', email: 'awa@widjila.com', role: 'ConducteurTravaux' } },
+  ]);
+  modeles.Utilisateur.findByPk.mockResolvedValue({ id: AUTEUR, prenom: 'Balla', nom: 'Beye', email: 'balla@widjila.com' });
+
+  mockOuvrirFichier.mockImplementation(async () => ({ stream: Readable.from([Buffer.from('%PDF-1.7 rapport')]) }));
   mockSendEmail.mockResolvedValue({ id: 'msg_1' });
 });
 
-/** Les partenaires renvoyés selon la requête — entreprises ou clients. */
-function annuaire({ entreprises = [], clients = [] }) {
-  mockPartenaire.findAll.mockImplementation(({ where }) => {
-    if (where.type === 'client') return Promise.resolve(clients);
-    return Promise.resolve(entreprises);
-  });
-}
-
-// ── 1. Cloisonnement ────────────────────────────────────────────────────────
+const envoiEnvoye = () => mockSendEmail.mock.calls[0][0];
+const actionsJournalisees = () => modeles.RapportHistorique.create.mock.calls.map(([l]) => l.action);
 
 describe('cloisonnement', () => {
-  test('la requête filtre sur l’organisation du chantier', async () => {
-    await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
-
-    const include = mockRapport.findByPk.mock.calls[0][1].include[0];
+  it('la lecture filtre sur l’organisation du chantier', async () => {
+    await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
+    const include = modeles.Rapport.findOne.mock.calls[0][0].include[0];
     expect(include.where).toEqual({ organisationId: ORG });
   });
 
-  test('un rapport d’une autre organisation est introuvable, pas « interdit »', async () => {
-    mockRapport.findByPk.mockResolvedValue(null);
-
-    const r = await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
+  it('un rapport d’une autre organisation est introuvable, et rien ne part', async () => {
+    const r = await RapportEnvoiService.envoyer('rap-1', 'autre-org', AUTEUR);
 
     expect(r.success).toBe(false);
     expect(r.message).toMatch(/introuvable/i);
-    // Rien ne doit fuir de l'annuaire d'une organisation tierce.
-    expect(mockPartenaire.findAll).not.toHaveBeenCalled();
-  });
-
-  test('aucun envoi n’est tenté sur un rapport introuvable', async () => {
-    mockRapport.findByPk.mockResolvedValue(null);
-
-    const r = await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
-
-    expect(r.success).toBe(false);
+    expect(modeles.Partenaire.findAll).not.toHaveBeenCalled();
     expect(mockSendEmail).not.toHaveBeenCalled();
   });
 });
 
-// ── 2. Destinataires ────────────────────────────────────────────────────────
+describe('§ 13 — Widjila PROPOSE les destinataires, l’objet et le message', () => {
+  it('propose les entreprises concernées en destinataires, les clients en copie', async () => {
+    const { envoi } = await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
 
-describe('destinataires', () => {
-  test('un rapport ciblant une entreprise ne s’adresse qu’à elle', async () => {
-    const cible = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-    mockRapport.findByPk.mockResolvedValue(rapport({ partenaireId: cible }));
-    mockPartenaire.findOne.mockResolvedValue({ id: cible, nom: 'SARL Toiture', email: 'toiture@ex.fr' });
-    mockPartenaire.findAll.mockResolvedValue([]); // aucun client
+    expect(envoi.destinataires.map((d) => d.nom)).toEqual(['SARL Toiture', 'Plomberie Diop']);
+    expect(envoi.copies.map((c) => c.email)).toEqual(['moa@ex.fr']);
+    expect(envoi.objet).toBe('Rapport de chantier – Résidence Horizon – 09/09/2026');
+    expect(envoi.message).toContain('12 réserve(s)');
+  });
 
-    const r = await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
-
-    expect(r.envoi.destinataires).toEqual([
-      { id: cible, nom: 'SARL Toiture', email: 'toiture@ex.fr' },
+  it('les candidats sont l’annuaire du chantier ET ses membres — rien d’autre', async () => {
+    const { envoi } = await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
+    expect(envoi.candidats.map((c) => c.email)).toEqual([
+      'toiture@ex.fr', 'Plomberie@EX.fr', 'moa@ex.fr', 'awa@widjila.com',
     ]);
-    // Le partenaire visé est cherché DANS le chantier du rapport : un
-    // identifiant d'un autre chantier ne doit pas devenir destinataire.
-    expect(mockPartenaire.findOne.mock.calls[0][0].where).toMatchObject({
-      id: cible, chantierId: CHANTIER,
-    });
   });
 
-  test('sans ciblage, seules les entreprises PORTANT une réserve sont retenues', async () => {
-    const a = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-    const b = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-    mockReserve.findAll.mockResolvedValue([
-      { id: 'r1', partenaireId: a },
-      { id: 'r2', partenaireId: a },
-      { id: 'r3', partenaireId: null },
-    ]);
-    annuaire({ entreprises: [{ id: a, nom: 'Toiture', email: 'a@ex.fr' }] });
+  it('seules les entreprises PORTANT une réserve du périmètre sont proposées', async () => {
+    await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
 
-    const r = await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
-
-    // `b` existe sur le chantier mais ne porte aucune réserve : il n'a rien
-    // à recevoir.
-    const [{ where }] = mockPartenaire.findAll.mock.calls.find(([o]) => o.where.id);
-    const ids = where.id;
-    expect(ids).toEqual([a]);
-    expect(ids).not.toContain(b);
-    expect(r.envoi.destinataires).toHaveLength(1);
+    const appel = modeles.Partenaire.findAll.mock.calls.find(([o]) => o.where.id);
+    expect(appel[0].where.id).toEqual(['p1', 'p2']);
   });
 
-  test('le périmètre du rapport filtre les réserves lues', async () => {
-    mockRapport.findByPk.mockResolvedValue(rapport({
-      statut: 'levee', batimentId: 'bat-1', phaseId: 'ph-1', corpsEtatId: 'ce-1',
-    }));
+  it('§ 15 — un rapport PAR ENTREPRISE ne propose que son responsable', async () => {
+    rapport = nouveauRapport({ partenaireId: 'p1' });
+    modeles.Partenaire.findOne.mockResolvedValue(TOITURE);
 
-    await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
+    const { envoi } = await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
 
-    expect(mockReserve.findAll.mock.calls[0][0].where).toEqual({
-      chantierId: CHANTIER,
-      statut: 'levee',
-      batimentId: 'bat-1',
-      phaseId: 'ph-1',
-      corpsEtatId: 'ce-1',
-    });
+    expect(envoi.destinataires).toEqual([{ id: 'p1', nom: 'SARL Toiture', email: 'toiture@ex.fr' }]);
+    // Cherché DANS le chantier : un identifiant d'un autre chantier ne doit pas
+    // devenir destinataire.
+    expect(modeles.Partenaire.findOne.mock.calls[0][0].where).toMatchObject({ id: 'p1', chantierId: CHANTIER });
   });
 
-  test('le nombre annoncé est compté sur le MÊME périmètre que le PDF', async () => {
-    mockRapport.findByPk.mockResolvedValue(rapport({ statut: 'ouverte' }));
-    mockReserve.count.mockResolvedValue(7);
+  it('un petit rapport part en PIÈCE JOINTE, un rapport lourd en LIEN', async () => {
+    const leger = await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
+    expect(leger.envoi.mode).toBe('piece_jointe');
 
-    const r = await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
-
-    expect(r.envoi.nbReserves).toBe(7);
-    expect(mockReserve.count.mock.calls[0][0].where).toEqual({
-      chantierId: CHANTIER, statut: 'ouverte',
-    });
+    rapport = nouveauRapport({ taille_pdf: 12 * 1024 * 1024 });
+    const lourd = await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
+    expect(lourd.envoi.mode).toBe('lien');
   });
 
-  test('seuls les partenaires de type « client » passent en copie', async () => {
-    annuaire({ clients: [{ id: 'c1', nom: 'MOA', email: 'moa@ex.fr' }] });
+  it('NOMME les partenaires sans adresse, sans les ignorer', async () => {
+    entreprises = [{ id: 'p9', nom: 'Électricité Fall', email: null }];
+    clients = [{ id: 'c2', nom: 'AMO', email: '  ' }];
 
-    await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
-
-    const appelClients = mockPartenaire.findAll.mock.calls
-      .find(([opts]) => opts.where.type === 'client');
-    expect(appelClients[0].where).toEqual({ chantierId: CHANTIER, type: 'client' });
-  });
-});
-
-// ── 3. Composition du courriel ──────────────────────────────────────────────
-
-describe('composition', () => {
-  test('l’objet suit exactement le format demandé', async () => {
-    const r = await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
-
-    expect(r.envoi.objet).toBe('Rapport de chantier – Résidence Horizon – 09/09/2026');
+    const { envoi } = await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
+    expect(envoi.sansEmail).toEqual(['Électricité Fall', 'AMO']);
   });
 
-  test('les entreprises sans adresse sont NOMMÉES, pas ignorées', async () => {
-    mockReserve.findAll.mockResolvedValue([{ id: 'r1', partenaireId: 'p1' }]);
-    annuaire({
-      entreprises: [{ id: 'p1', nom: 'Plomberie Diop', email: null }],
-      clients: [{ id: 'c1', nom: 'MOA', email: '   ' }],
-    });
-
-    const r = await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
-
-    expect(r.envoi.sansEmail).toEqual(['Plomberie Diop', 'MOA']);
-  });
-
-  test('les réponses reviennent à l’auteur, pas à la boîte technique', async () => {
-    const r = await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
-
-    expect(r.envoi.expediteur).toBe('Balla Beye');
-    expect(r.envoi.expediteurEmail).toBe('balla@widjila.com');
-  });
-
-  test('sans auteur identifié, l’organisation signe le message', async () => {
-    mockUtilisateur.findByPk.mockResolvedValue(null);
-
-    const r = await RapportEnvoiService.preparer(RAPPORT, ORG, null);
-
-    expect(r.envoi.expediteur).toBe('Widjila BTP');
-    expect(r.envoi.expediteurEmail).toBeNull();
-  });
-
-  test('PRÉPARER N’ENVOIE RIEN', async () => {
-    annuaire({ entreprises: [{ id: 'p1', nom: 'Toiture', email: 'a@ex.fr' }] });
-    mockReserve.findAll.mockResolvedValue([{ id: 'r1', partenaireId: 'p1' }]);
-
-    await RapportEnvoiService.preparer(RAPPORT, ORG, AUTEUR);
+  it('PRÉPARER N’ENVOIE RIEN', async () => {
+    await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
 
     expect(mockSendEmail).not.toHaveBeenCalled();
     expect(mockOuvrirFichier).not.toHaveBeenCalled();
+    expect(modeles.RapportDestinataire.bulkCreate).not.toHaveBeenCalled();
   });
 });
 
-// ── 4. Envoi ────────────────────────────────────────────────────────────────
-
-describe('envoi', () => {
-  beforeEach(() => {
-    mockReserve.findAll.mockResolvedValue([
-      { id: 'r1', partenaireId: 'p1' },
-      { id: 'r2', partenaireId: 'p2' },
-    ]);
-    annuaire({
-      entreprises: [
-        { id: 'p1', nom: 'Toiture', email: 'toiture@ex.fr' },
-        { id: 'p2', nom: 'Plomberie', email: 'Plomberie@EX.fr' },
-      ],
-      clients: [
-        { id: 'c1', nom: 'MOA', email: 'moa@ex.fr' },
-        { id: 'c2', nom: 'AMO', email: 'amo@ex.fr' },
-      ],
-    });
-  });
-
-  test('entreprises en destinataire, clients en copie, PDF joint', async () => {
-    const r = await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
+describe('§ 23 — E-mail : bon destinataire et bon fichier', () => {
+  it('entreprises en destinataire, clients en copie, le PDF GÉNÉRÉ en pièce jointe', async () => {
+    const r = await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR);
 
     expect(r.success).toBe(true);
-    const envoi = mockSendEmail.mock.calls[0][0];
+    const envoi = envoiEnvoye();
     expect(envoi.to).toEqual(['toiture@ex.fr', 'Plomberie@EX.fr']);
-    expect(envoi.cc).toEqual(['moa@ex.fr', 'amo@ex.fr']);
+    expect(envoi.cc).toEqual(['moa@ex.fr']);
     expect(envoi.replyTo).toBe('balla@widjila.com');
-    expect(envoi.subject).toBe('Rapport de chantier – Résidence Horizon – 09/09/2026');
     expect(envoi.attachments).toHaveLength(1);
-    expect(envoi.attachments[0].filename).toBe('rapport-RH-2026.pdf');
-    expect(envoi.attachments[0].content.toString()).toBe('%PDF-1.7 faux');
+    expect(envoi.attachments[0].content.toString()).toBe('%PDF-1.7 rapport');
+    // Le fichier est celui qui a été produit, relu depuis le stockage.
+    expect(mockOuvrirFichier).toHaveBeenCalledWith('/uploads/rapports/rapport-global.pdf');
   });
 
-  test('le PDF joint est CELUI qui a été généré, relu depuis le stockage', async () => {
-    await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
+  it('un rapport lourd part en LIEN SÉCURISÉ, sans pièce jointe', async () => {
+    rapport = nouveauRapport({ taille_pdf: 12 * 1024 * 1024 });
 
-    expect(mockOuvrirFichier).toHaveBeenCalledWith('rapports/rapport-reserves-RH.pdf');
+    const r = await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR);
+
+    expect(r.success).toBe(true);
+    const envoi = envoiEnvoye();
+    expect(envoi.attachments).toBeUndefined();
+    expect(envoi.html).toContain('https://api.widjila.test/api/v1/r/');
+    expect(modeles.RapportPartage.create).toHaveBeenCalledTimes(1);
+    expect(r.message).toMatch(/lien sécurisé/);
   });
 
-  test('une adresse à la fois entreprise et client ne part pas en double', async () => {
-    annuaire({
-      entreprises: [{ id: 'p1', nom: 'Toiture', email: 'meme@ex.fr' }],
-      clients: [{ id: 'c1', nom: 'MOA', email: 'MEME@ex.fr' }],
+  it('l’utilisateur peut forcer le lien sur un petit rapport', async () => {
+    await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR, { mode: 'lien' });
+    expect(envoiEnvoye().attachments).toBeUndefined();
+  });
+
+  it('l’objet et le message saisis remplacent ceux proposés', async () => {
+    await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR, {
+      objet: 'OPR bâtiment A — réserves à lever',
+      message: 'Merci de lever avant vendredi.',
     });
-    mockReserve.findAll.mockResolvedValue([{ id: 'r1', partenaireId: 'p1' }]);
 
-    await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
-
-    const envoi = mockSendEmail.mock.calls[0][0];
-    expect(envoi.to).toEqual(['meme@ex.fr']);
-    expect(envoi.cc).toEqual([]);
+    expect(envoiEnvoye().subject).toBe('OPR bâtiment A — réserves à lever');
+    expect(envoiEnvoye().html).toContain('Merci de lever avant vendredi.');
   });
 
-  test('`exclure` RETIRE un destinataire choisi par l’utilisateur', async () => {
-    await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR, { exclure: ['plomberie@ex.fr'] });
-
-    const envoi = mockSendEmail.mock.calls[0][0];
-    expect(envoi.to).toEqual(['toiture@ex.fr']);
+  it('le message saisi est échappé : il finit dans du HTML', async () => {
+    await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR, { message: '<script>alert(1)</script>' });
+    expect(envoiEnvoye().html).not.toContain('<script>');
   });
+});
 
-  test('`exclure` N’AJOUTE JAMAIS une adresse — pas de relais ouvert', async () => {
-    await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR, { exclure: ['pirate@ailleurs.net'] });
-
-    const envoi = mockSendEmail.mock.calls[0][0];
-    expect([...envoi.to, ...envoi.cc]).not.toContain('pirate@ailleurs.net');
-    expect(envoi.to).toEqual(['toiture@ex.fr', 'Plomberie@EX.fr']);
-  });
-
-  test('sans adresse d’entreprise, on REFUSE en nommant les manquantes', async () => {
-    annuaire({
-      entreprises: [{ id: 'p1', nom: 'Toiture', email: null }],
-      clients: [{ id: 'c1', nom: 'MOA', email: 'moa@ex.fr' }],
+describe('§ 21 — validation des destinataires', () => {
+  it('l’utilisateur choisit PARMI les candidats du chantier', async () => {
+    const r = await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR, {
+      destinataires: ['awa@widjila.com'], copies: [],
     });
-    mockReserve.findAll.mockResolvedValue([{ id: 'r1', partenaireId: 'p1' }]);
 
-    const r = await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
+    expect(r.success).toBe(true);
+    expect(envoiEnvoye().to).toEqual(['awa@widjila.com']);
+    expect(envoiEnvoye().cc).toEqual([]);
+  });
+
+  it('une adresse étrangère au chantier est REFUSÉE en la nommant', async () => {
+    const r = await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR, {
+      destinataires: ['toiture@ex.fr', 'pirate@ailleurs.net'],
+    });
+
+    expect(r.success).toBe(false);
+    expect(r.message).toContain('pirate@ailleurs.net');
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('`exclure` retire, et n’ajoute jamais', async () => {
+    await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR, { exclure: ['plomberie@ex.fr', 'pirate@ailleurs.net'] });
+
+    expect(envoiEnvoye().to).toEqual(['toiture@ex.fr']);
+    expect([...envoiEnvoye().to, ...envoiEnvoye().cc]).not.toContain('pirate@ailleurs.net');
+  });
+
+  it('une même adresse en destinataire et en copie ne part qu’une fois', async () => {
+    entreprises = [{ id: 'p1', nom: 'Toiture', email: 'meme@ex.fr' }];
+    clients = [{ id: 'c1', nom: 'MOA', email: 'MEME@ex.fr' }];
+    modeles.Reserve.findAll.mockResolvedValue([{ id: 'r1', partenaireId: 'p1' }]);
+
+    await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR);
+
+    expect(envoiEnvoye().to).toEqual(['meme@ex.fr']);
+    expect(envoiEnvoye().cc).toEqual([]);
+  });
+
+  it('sans adresse d’entreprise, on REFUSE — jamais de repli sur les clients', async () => {
+    entreprises = [{ id: 'p1', nom: 'Toiture', email: null }];
+    modeles.Reserve.findAll.mockResolvedValue([{ id: 'r1', partenaireId: 'p1' }]);
+
+    const r = await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR);
 
     expect(r.success).toBe(false);
     expect(r.message).toContain('Toiture');
-    // Surtout PAS de repli sur les clients : le rapport s'adresse à
-    // l'entreprise qui doit lever les réserves.
     expect(mockSendEmail).not.toHaveBeenCalled();
   });
 
-  test('aucune entreprise rattachée : message explicite, pas d’envoi', async () => {
-    mockReserve.findAll.mockResolvedValue([]);
-    annuaire({ clients: [{ id: 'c1', nom: 'MOA', email: 'moa@ex.fr' }] });
+  it('un rapport non généré ne s’envoie pas', async () => {
+    rapport = nouveauRapport({ fichier_url: null, statut: 'brouillon' });
 
-    const r = await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
+    const r = await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR);
 
     expect(r.success).toBe(false);
-    expect(r.message).toMatch(/aucune entreprise/i);
-    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(r.message).toMatch(/Générez le rapport/);
+  });
+});
+
+describe('§ 23 — Historique : l’envoi est journalisé', () => {
+  it('trace chaque destinataire (REPORT_RECIPIENT) et passe le rapport à ENVOYÉ', async () => {
+    await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR);
+
+    const lignes = modeles.RapportDestinataire.bulkCreate.mock.calls[0][0];
+    expect(lignes.map((l) => [l.email, l.role, l.statut_envoi, l.mode])).toEqual([
+      ['toiture@ex.fr', 'to', 'envoye', 'piece_jointe'],
+      ['Plomberie@EX.fr', 'to', 'envoye', 'piece_jointe'],
+      ['moa@ex.fr', 'cc', 'envoye', 'piece_jointe'],
+    ]);
+    expect(lignes[0]).toMatchObject({ partenaireId: 'p1', nom: 'SARL Toiture' });
+    expect(lignes[0].envoye_le).toBeInstanceOf(Date);
+
+    expect(rapport.statut).toBe('envoye');
+    const historique = modeles.RapportHistorique.create.mock.calls.map(([l]) => l).find((l) => l.action === 'envoye');
+    expect(historique.metadata).toMatchObject({ to: ['toiture@ex.fr', 'Plomberie@EX.fr'], cc: ['moa@ex.fr'], mode: 'piece_jointe' });
   });
 
-  test('un PDF illisible fait ÉCHOUER l’envoi — jamais de mail sans pièce jointe', async () => {
-    mockOuvrirFichier.mockRejectedValue(new Error('ENOENT'));
-
-    const r = await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
-
-    expect(r.success).toBe(false);
-    expect(r.message).toMatch(/introuvable/i);
-    expect(mockSendEmail).not.toHaveBeenCalled();
-  });
-
-  test('un échec du service de messagerie remonte en clair, sans lever', async () => {
+  it('un échec du service de messagerie est tracé, et dit en clair', async () => {
     mockSendEmail.mockRejectedValue(new Error('Resend 422'));
 
-    const r = await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
+    const r = await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR);
 
     expect(r.success).toBe(false);
-    expect(r.message).toMatch(/échoué/i);
-    // Le détail technique reste au journal : il ne dit rien à l'utilisateur.
+    expect(r.message).toMatch(/échoué/);
     expect(r.message).not.toContain('Resend');
+    expect(modeles.RapportDestinataire.bulkCreate.mock.calls[0][0][0].statut_envoi).toBe('echec');
+    expect(actionsJournalisees()).toContain('echec');
+    expect(rapport.statut).toBe('genere'); // rien n'a été diffusé
   });
 
-  test('le compte rendu dit qui a reçu quoi', async () => {
-    const r = await RapportEnvoiService.envoyer(RAPPORT, ORG, AUTEUR);
+  it('un PDF illisible fait échouer l’envoi — jamais de mail sans pièce jointe', async () => {
+    mockOuvrirFichier.mockRejectedValue(new Error('ENOENT'));
 
-    expect(r.message).toContain('2 entreprise(s)');
-    expect(r.message).toContain('2 client(s) en copie');
-    expect(r.envoi.to).toHaveLength(2);
+    const r = await RapportEnvoiService.envoyer('rap-1', ORG, AUTEUR);
+
+    expect(r.success).toBe(false);
+    expect(r.message).toMatch(/introuvable/);
+    expect(mockSendEmail).not.toHaveBeenCalled();
   });
 });

@@ -21,6 +21,10 @@ const Checklist           = require('./checklist.model.js');
 const Document            = require('./document.model.js');
 const Notification        = require('./notification.model.js');
 const Rapport             = require('./rapport.model.js');
+const RapportFiltre       = require('./rapportFiltre.model.js');
+const RapportDestinataire = require('./rapportDestinataire.model.js');
+const RapportHistorique   = require('./rapportHistorique.model.js');
+const RapportPartage      = require('./rapportPartage.model.js');
 // ── Extensions modules 1-9 ─────────────────────────────────────────────
 const ConnexionLog       = require('./connexionLog.model.js');
 const ChantierMembre     = require('./chantierMembre.model.js');
@@ -83,6 +87,12 @@ Chantier.belongsTo(Utilisateur, { foreignKey: 'valideParId', as: 'validePar' });
 // Affectation des utilisateurs à plusieurs chantiers — module 1
 Utilisateur.belongsToMany(Chantier, { through: ChantierMembre, foreignKey: 'utilisateurId', as: 'chantiers' });
 Chantier.belongsToMany(Utilisateur, { through: ChantierMembre, foreignKey: 'chantierId', as: 'membres' });
+// Accès DIRECT à la table de liaison : le rapport PDF liste les participants
+// en partant de `ChantierMembre` (include `utilisateur`). Le belongsToMany
+// ci-dessus ne déclare pas ces liens — sans eux, Sequelize lève
+// « User is not associated to ChantierMembre! » et aucun rapport ne sort.
+ChantierMembre.belongsTo(Utilisateur, { foreignKey: 'utilisateurId', as: 'utilisateur' });
+ChantierMembre.belongsTo(Chantier, { foreignKey: 'chantierId', as: 'chantier' });
 
 // Phases / planning — module 3
 Chantier.hasMany(Phase, { foreignKey: 'chantierId', as: 'phases', onDelete: 'CASCADE' });
@@ -264,6 +274,29 @@ Document.belongsTo(Utilisateur, { foreignKey: 'signataireId', as: 'signataire' }
 Chantier.hasMany(Rapport, { foreignKey: 'chantierId', as: 'rapports', onDelete: 'CASCADE' });
 Rapport.belongsTo(Chantier, { foreignKey: 'chantierId', as: 'chantier' });
 Rapport.belongsTo(Utilisateur, { foreignKey: 'generePar', as: 'generateur' });
+// Rapport produit POUR une entreprise (§ 15 du cahier des charges Rapports).
+Rapport.belongsTo(Partenaire, { foreignKey: 'partenaireId', as: 'entrepriseCible' });
+
+// Filtres, destinataires, historique, partages — tables du § 12 et du § 14.
+Rapport.hasMany(RapportFiltre, { foreignKey: 'rapportId', as: 'filtresLignes', onDelete: 'CASCADE' });
+RapportFiltre.belongsTo(Rapport, { foreignKey: 'rapportId', as: 'rapport' });
+
+Rapport.hasMany(RapportDestinataire, { foreignKey: 'rapportId', as: 'destinataires', onDelete: 'CASCADE' });
+RapportDestinataire.belongsTo(Rapport, { foreignKey: 'rapportId', as: 'rapport' });
+RapportDestinataire.belongsTo(Partenaire, { foreignKey: 'partenaireId', as: 'partenaire' });
+RapportDestinataire.belongsTo(Utilisateur, { foreignKey: 'utilisateurId', as: 'utilisateur' });
+
+Rapport.hasMany(RapportHistorique, { foreignKey: 'rapportId', as: 'historiques', onDelete: 'CASCADE' });
+RapportHistorique.belongsTo(Rapport, { foreignKey: 'rapportId', as: 'rapport' });
+RapportHistorique.belongsTo(Utilisateur, { foreignKey: 'acteurId', as: 'acteur' });
+
+Rapport.hasMany(RapportPartage, { foreignKey: 'rapportId', as: 'partages', onDelete: 'CASCADE' });
+RapportPartage.belongsTo(Rapport, { foreignKey: 'rapportId', as: 'rapport' });
+RapportPartage.belongsTo(Utilisateur, { foreignKey: 'creePar', as: 'createur' });
+
+// Chaînage des versions : une version remplacée reste consultable (§ 18).
+Rapport.belongsTo(Rapport, { foreignKey: 'rapportParentId', as: 'versionPrecedente' });
+Rapport.hasMany(Rapport, { foreignKey: 'rapportParentId', as: 'versionsSuivantes' });
 
 // ── Partenaires (module 2) ─────────────────────────────────────────────────
 Organisation.hasMany(Partenaire, { foreignKey: 'organisationId', as: 'partenaires', onDelete: 'CASCADE' });
@@ -330,6 +363,10 @@ module.exports = {
   Document,
   Notification,
   Rapport,
+  RapportFiltre,
+  RapportDestinataire,
+  RapportHistorique,
+  RapportPartage,
   ConnexionLog,
   ChantierMembre,
   Phase,

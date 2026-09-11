@@ -6,6 +6,7 @@ const accountController = require('../controller/account.controller.js');
 const chantierController = require('../../chantier/controller/chantier.controller.js');
 const upload = require('../../../middlewares/upload.middleware.js');
 const auth = require('../../../middlewares/auth.middleware.js');
+const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware.js');
 const { authRateLimit, mutationRateLimit, otpEmailRateLimit } = require('../../../middlewares/rateLimit.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
@@ -33,7 +34,10 @@ router.get('/me', auth, accountController.me);
 
 // Projets (chantiers) auxquels l'utilisateur est affecté — module 1
 // paginate() : plafonne page/limit avant le service (voir pagination.middleware.js).
-router.get('/chantiers', auth, paginate(), chantierController.listerMesChantiers);
+// checkActiveUser : `auth` ne bloque que 'inactif'. Un compte rejeté ou remis
+// en attente garderait sinon, avec un jeton encore valide, la lecture des
+// chantiers de son organisation — seule route métier de ce routeur.
+router.get('/chantiers', auth, checkActiveUser, paginate(), chantierController.listerMesChantiers);
 
 router.put(
   '/profil',

@@ -8,7 +8,13 @@ const { BadRequestError } = require('../errors/AppError.js');
 /**
  * Détecte le type réel du fichier depuis ses magic bytes (indépendant du
  * Content-Type annoncé par le client — seule source de confiance).
- * @returns {'png'|'jpg'|'pdf'|'webp'|null}
+ *
+ * Les formats bureautiques et DAO (docx, xlsx, pptx, ole2, dwg) sont reconnus
+ * ici, mais la liste blanche globale (`uploadConfig.allowedMimeTypes`) les
+ * refuse toujours : seule la route des documents (`uploadDocument`) les admet.
+ *
+ * @returns {'png'|'jpg'|'pdf'|'webp'|'wav'|'mp4'|'mov'|'m4a'|'webm'|'ogg'|'mp3'
+ *   |'docx'|'xlsx'|'pptx'|'ole2'|'dwg'|null}
  */
 function detectType(buffer) {
   if (!buffer || buffer.length < 4) return null;
@@ -54,6 +60,20 @@ function detectType(buffer) {
   // MP3 : tag ID3 ("ID3") ou trame MPEG brute (FF Ex/Fx)
   if (buffer[0] === 0x49 && buffer[1] === 0x44 && buffer[2] === 0x33) return 'mp3';
   if (buffer[0] === 0xFF && (buffer[1] & 0xE0) === 0xE0) return 'mp3';
+
+  // ── Bureautique et DAO (GED des chantiers) ─────────────────────────────────
+  // OOXML (.docx, .xlsx, .pptx) : une archive ZIP dont seul le CATALOGUE dit
+  // la nature — lu sans rien décompresser, voir `typeOoxml` plus bas.
+  if (buffer[0] === 0x50 && buffer[1] === 0x4B && buffer[2] === 0x03 && buffer[3] === 0x04) {
+    return typeOoxml(buffer);
+  }
+  // Office 97-2003 (.doc, .xls, .ppt) : conteneur OLE2 commun aux trois.
+  if (buffer.length >= SIG_OLE2.length && buffer.subarray(0, SIG_OLE2.length).equals(SIG_OLE2)) {
+    return 'ole2';
+  }
+  // DWG : « AC » suivi du numéro de version sur 4 chiffres
+  // (AC1015 = AutoCAD 2000, AC1018 = 2004 … AC1032 = 2018 et suivants).
+  if (buffer.length >= 6 && /^AC\d{4}$/.test(buffer.toString('ascii', 0, 6))) return 'dwg';
 
   return null;
 }
@@ -380,12 +400,255 @@ const uploadMedia = multer({
   fileFilter,
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  DOCUMENTS DE GED (POST /chantiers/:chantierId/documents)
+//
+//  La GED d'un chantier ne se limite pas aux PDF et aux photos : comptes rendus
+//  Word, tableaux Excel, présentations, plans DAO. Et depuis le mobile, les
+//  vidéos passent par cette même route. Or elle utilisait l'instance générique
+//  (5 Mo, liste blanche PDF/images/médias) : tout document Office était
+//  refusé, et toute vidéo de plus de quelques secondes aussi.
+//
+//  Instance DÉDIÉE plutôt qu'élargissement de la liste globale : plans, médias
+//  de réserve et pièces jointes gardent exactement leur contrôle actuel.
+//  Le contenu réel (magic bytes) reste la seule source de confiance ; le type
+//  annoncé doit lui correspondre, ou être générique avec la bonne extension.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Signature d'un conteneur OLE2 (Office 97-2003). */
+const SIG_OLE2 = Buffer.from([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+
+/** Entrées lues au plus dans un catalogue ZIP (un .docx en compte quelques dizaines). */
+const ZIP_MAX_ENTREES_LUES = 2000;
+
+/**
+ * Noms des entrées d'une archive ZIP, lus dans son catalogue (central
+ * directory) — aucune décompression.
+ * @returns {string[]|null} null si l'archive est illisible
+ */
+function nomsEntreesZip(buffer) {
+  if (!buffer || buffer.length < 22) return null;
+  const eocd = trouverEocd(buffer);
+  if (eocd < 0) return null;
+
+  const nbEntrees = Math.min(buffer.readUInt16LE(eocd + 10), ZIP_MAX_ENTREES_LUES);
+  const tailleCd = buffer.readUInt32LE(eocd + 12);
+  const offsetCd = buffer.readUInt32LE(eocd + 16);
+  if (offsetCd + tailleCd > buffer.length) return null;
+
+  const noms = [];
+  let position = offsetCd;
+  for (let i = 0; i < nbEntrees; i++) {
+    if (position + 46 > buffer.length || buffer.readUInt32LE(position) !== SIG_CD) return null;
+    const longueurNom = buffer.readUInt16LE(position + 28);
+    const longueurExtra = buffer.readUInt16LE(position + 30);
+    const longueurCommentaire = buffer.readUInt16LE(position + 32);
+    if (position + 46 + longueurNom > buffer.length) return null;
+    noms.push(buffer.toString('utf8', position + 46, position + 46 + longueurNom));
+    position += 46 + longueurNom + longueurExtra + longueurCommentaire;
+  }
+  return noms;
+}
+
+/**
+ * Nature d'un document Office Open XML, d'après les dossiers de l'archive
+ * (`word/`, `xl/`, `ppt/`) en présence du manifeste `[Content_Types].xml`.
+ * Une archive ZIP quelconque n'est PAS un document : elle est refusée.
+ * @returns {'docx'|'xlsx'|'pptx'|null}
+ */
+function typeOoxml(buffer) {
+  const noms = nomsEntreesZip(buffer);
+  if (!noms || !noms.includes('[Content_Types].xml')) return null;
+  if (noms.some((n) => n.startsWith('word/'))) return 'docx';
+  if (noms.some((n) => n.startsWith('xl/'))) return 'xlsx';
+  if (noms.some((n) => n.startsWith('ppt/'))) return 'pptx';
+  return null;
+}
+
+/** Types MIME qu'un client peut annoncer pour chaque format réel. */
+const MIME_DOCUMENT = {
+  pdf: ['application/pdf'],
+  png: ['image/png'],
+  jpg: ['image/jpeg', 'image/jpg'],
+  webp: ['image/webp'],
+  mp4: ['video/mp4', 'video/3gpp'],
+  webm: ['video/webm', 'audio/webm'],
+  mov: ['video/quicktime'],
+  mp3: ['audio/mpeg'],
+  m4a: ['audio/mp4', 'audio/x-m4a'],
+  ogg: ['audio/ogg'],
+  wav: ['audio/wav', 'audio/x-wav'],
+  docx: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  xlsx: ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  pptx: ['application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ole2: ['application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint'],
+  // Aucun type n'est vraiment normalisé pour le DWG : chacun annonce le sien.
+  dwg: [
+    'application/acad', 'application/x-acad', 'application/dwg', 'application/x-dwg',
+    'application/autocad_dwg', 'image/vnd.dwg', 'image/x-dwg',
+  ],
+};
+
+/** Extensions admises pour chaque format réel. */
+const EXTENSIONS_DOCUMENT = {
+  pdf: ['.pdf'],
+  png: ['.png'],
+  jpg: ['.jpg', '.jpeg'],
+  webp: ['.webp'],
+  mp4: ['.mp4', '.m4v', '.3gp'],
+  webm: ['.webm'],
+  mov: ['.mov'],
+  mp3: ['.mp3'],
+  m4a: ['.m4a'],
+  ogg: ['.ogg', '.oga', '.opus'],
+  wav: ['.wav'],
+  docx: ['.docx'],
+  xlsx: ['.xlsx'],
+  pptx: ['.pptx'],
+  ole2: ['.doc', '.xls', '.ppt'],
+  dwg: ['.dwg'],
+};
+
+/**
+ * Types « inconnu » : c'est ce qu'annoncent beaucoup de téléphones et de
+ * navigateurs pour un format qu'ils ne connaissent pas (DWG en tête). Tolérés,
+ * mais l'extension doit alors désigner le format réel.
+ */
+const MIME_GENERIQUES = new Set(['application/octet-stream', 'binary/octet-stream']);
+
+/** Formats lourds par nature : plafond des médias plutôt que des documents. */
+const FORMATS_MEDIA = new Set(['mp4', 'webm', 'mov', 'mp3', 'm4a', 'ogg', 'wav']);
+
+const MIME_DOCUMENT_ACCEPTES = new Set([...Object.values(MIME_DOCUMENT).flat(), ...MIME_GENERIQUES]);
+
+const FORMATS_ACCEPTES = 'PDF, Word, Excel, PowerPoint, DWG, images (JPEG, PNG, WebP) et vidéos (MP4, MOV, WebM)';
+
+const enMo = (octets) => Math.round(octets / (1024 * 1024));
+
+const MESSAGE_TAILLE_DOCUMENT = `Fichier trop volumineux : ${enMo(uploadConfig.maxFileSize)} Mo maximum `
+  + `pour un document ou une photo, ${enMo(uploadConfig.maxMediaSize)} Mo pour une vidéo.`;
+
+const documentFilter = (req, file, cb) => {
+  if (!MIME_DOCUMENT_ACCEPTES.has(file.mimetype)) {
+    return cb(
+      new BadRequestError(`Type de fichier non autorisé : ${file.mimetype}. Formats acceptés : ${FORMATS_ACCEPTES}.`),
+      false
+    );
+  }
+  cb(null, true);
+};
+
+// Plafond de TRANSPORT = le plus haut des deux. Le plafond propre à chaque
+// format est appliqué ensuite par `verifierDocument`, une fois le type réel
+// connu — multer ne sait pas encore, à ce stade, ce que contient le fichier.
+const uploadDocumentMulter = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: Math.max(uploadConfig.maxFileSize, uploadConfig.maxMediaSize), files: 1 },
+  fileFilter: documentFilter,
+});
+
+/**
+ * `upload.document('fichier')` — équivalent de `single()`, mais un
+ * dépassement du plafond de transport répond par un message exact : le
+ * gestionnaire global annonce « max 5 MB » pour toute `MulterError`.
+ */
+function uploadDocument(champ) {
+  const recevoir = uploadDocumentMulter.single(champ);
+  return (req, res, next) => recevoir(req, res, (err) => {
+    if (err && err.code === 'LIMIT_FILE_SIZE') return next(new BadRequestError(MESSAGE_TAILLE_DOCUMENT));
+    return next(err);
+  });
+}
+
+/**
+ * Vérifie un document reçu : format réel reconnu, type annoncé cohérent,
+ * extension cohérente quand c'est elle qui tranche, taille dans le plafond
+ * de son format.
+ * @param {{buffer: Buffer, mimetype: string, originalname: string, size?: number}} file
+ * @returns {{ ok: boolean, raison?: string, type?: string }}
+ */
+function verifierDocument(file) {
+  const type = detectType(file.buffer);
+  if (!type || !MIME_DOCUMENT[type]) {
+    return { ok: false, raison: `format non reconnu (formats acceptés : ${FORMATS_ACCEPTES})` };
+  }
+
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  const generique = MIME_GENERIQUES.has(file.mimetype);
+
+  if (!generique && !MIME_DOCUMENT[type].includes(file.mimetype)) {
+    return { ok: false, raison: 'le contenu ne correspond pas au type déclaré' };
+  }
+  // L'extension tranche quand le type annoncé est générique — et toujours
+  // pour un OLE2, dont la signature est commune à .doc, .xls et .ppt.
+  if ((generique || type === 'ole2') && !EXTENSIONS_DOCUMENT[type].includes(ext)) {
+    return { ok: false, raison: `l'extension « ${ext || '(aucune)'} » ne correspond pas au contenu du fichier` };
+  }
+
+  const max = FORMATS_MEDIA.has(type) ? uploadConfig.maxMediaSize : uploadConfig.maxFileSize;
+  const taille = file.size ?? file.buffer.length;
+  if (taille > max) {
+    return { ok: false, raison: `fichier trop volumineux (${enMo(max)} Mo maximum pour ce format)` };
+  }
+
+  return { ok: true, type };
+}
+
+/** Middleware à enchaîner après `upload.document('fichier')`. */
+const validateDocument = (req, res, next) => {
+  if (!req.file) return next();
+
+  const verdict = verifierDocument(req.file);
+  if (!verdict.ok) {
+    return res.status(400).json({
+      success: false,
+      message: `Fichier invalide : "${req.file.originalname}" — ${verdict.raison}.`,
+    });
+  }
+  next();
+};
+
+/**
+ * Enveloppe une instance multer pour qu'un dépassement de taille réponde par
+ * SON plafond.
+ *
+ * Le gestionnaire global (`errorHandler.middleware.js`) annonce « max 5 MB »
+ * pour toute `MulterError` de taille : faux pour les médias de réserve
+ * (100 Mo) comme pour les imports tableur (2 Mo, 512 Ko). L'utilisateur
+ * recevait un plafond inventé et ne pouvait pas savoir quoi corriger.
+ *
+ * Même interface (`single`) que l'instance d'origine : les routes ne changent
+ * pas.
+ */
+function avecPlafondExplicite(instance, message) {
+  return {
+    single(champ) {
+      const recevoir = instance.single(champ);
+      return (req, res, next) => recevoir(req, res, (err) => {
+        if (err && err.code === 'LIMIT_FILE_SIZE') return next(new BadRequestError(message));
+        return next(err);
+      });
+    },
+  };
+}
+
+const MESSAGE_TAILLE_MEDIA = `Fichier trop volumineux : ${enMo(uploadConfig.maxMediaSize)} Mo maximum `
+  + 'pour une photo, une vidéo ou une note vocale.';
+const MESSAGE_TAILLE_TABLEUR = `Fichier trop volumineux : ${enMo(TAILLE_MAX_TABLEUR)} Mo maximum pour un import Excel ou CSV.`;
+const MESSAGE_TAILLE_CONTACTS = `Fichier trop volumineux : ${Math.round(TAILLE_MAX_CONTACTS / 1024)} Ko maximum `
+  + 'pour un import de membres.';
+
 module.exports = upload;
-module.exports.media = uploadMedia;
+module.exports.media = avecPlafondExplicite(uploadMedia, MESSAGE_TAILLE_MEDIA);
+module.exports.document = uploadDocument;
+module.exports.validateDocument = validateDocument;
+module.exports.verifierDocument = verifierDocument;
+module.exports.MIME_DOCUMENT = MIME_DOCUMENT;
+module.exports.EXTENSIONS_DOCUMENT = EXTENSIONS_DOCUMENT;
 module.exports.validateMagicBytes = validateMagicBytes;
 module.exports.validateTableurMagicBytes = validateTableurMagicBytes;
-module.exports.tableurUpload = tableurUpload;
-module.exports.tableurUploadContacts = tableurUploadContacts;
+module.exports.tableurUpload = avecPlafondExplicite(tableurUpload, MESSAGE_TAILLE_TABLEUR);
+module.exports.tableurUploadContacts = avecPlafondExplicite(tableurUploadContacts, MESSAGE_TAILLE_CONTACTS);
 module.exports.detectType = detectType;
 module.exports.MIME_BY_TYPE = MIME_BY_TYPE;
 module.exports.checkTableurMagic = checkTableurMagic;

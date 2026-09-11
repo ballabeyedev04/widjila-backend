@@ -18,7 +18,7 @@
  */
 
 jest.mock('../models/index.js', () => ({
-  Utilisateur: { findOne: jest.fn() },
+  Utilisateur: { findOne: jest.fn(), increment: jest.fn().mockResolvedValue(undefined) },
   Organisation: {},
   RefreshToken: {},
   MfaChallenge: {
@@ -58,6 +58,12 @@ function fakeUtilisateur(overrides = {}) {
     ...overrides,
   };
   u.update = jest.fn(async (champs) => Object.assign(u, champs));
+  // `reload` relit le compteur après l'incrément atomique fait par la base :
+  // on simule ici l'effet de `Utilisateur.increment` sur la ligne.
+  u.reload = jest.fn(async () => {
+    u.tentatives_connexion = (u.tentatives_connexion || 0) + 1;
+    return u;
+  });
   return u;
 }
 
@@ -96,14 +102,29 @@ describe('AuthService.login — verrouillage anti brute-force', () => {
     expect(resultat.message).not.toMatch(/bloqué/i);
   });
 
-  test('compte inactif : rejette avant même de vérifier le mot de passe', async () => {
+  // Ce test vérifiait l'INVERSE jusqu'ici : « rejette avant même de vérifier
+  // le mot de passe ». C'était précisément la faille — n'importe qui apprenait,
+  // sans le mot de passe, qu'un e-mail correspondait à un compte désactivé.
+  // Il est remplacé par les deux comportements attendus, pas supprimé.
+  test('compte inactif + MAUVAIS mot de passe : même réponse qu’un compte inexistant', async () => {
     Utilisateur.findOne.mockResolvedValue(fakeUtilisateur({ statut: 'inactif' }));
+    bcrypt.compare.mockResolvedValue(false);
 
-    const resultat = await AuthService.login({ identifiant: 'chef@chantier.test', mot_de_passe: 'x' });
+    const resultat = await AuthService.login({ identifiant: 'chef@chantier.test', mot_de_passe: 'faux' });
+
+    expect(resultat.success).toBe(false);
+    expect(resultat.message).toBe('Identifiant ou mot de passe incorrect');
+    expect(resultat.message).not.toMatch(/inactif/i);
+  });
+
+  test('compte inactif + BON mot de passe : l’état est annoncé à son titulaire', async () => {
+    Utilisateur.findOne.mockResolvedValue(fakeUtilisateur({ statut: 'inactif' }));
+    bcrypt.compare.mockResolvedValue(true);
+
+    const resultat = await AuthService.login({ identifiant: 'chef@chantier.test', mot_de_passe: 'bon' });
 
     expect(resultat.success).toBe(false);
     expect(resultat.message).toMatch(/inactif/i);
-    expect(bcrypt.compare).not.toHaveBeenCalled();
   });
 
   test('mauvais mot de passe : incrémente tentatives_connexion de 1', async () => {
@@ -113,8 +134,31 @@ describe('AuthService.login — verrouillage anti brute-force', () => {
 
     await AuthService.login({ identifiant: 'chef@chantier.test', mot_de_passe: 'faux' });
 
-    expect(utilisateur.update).toHaveBeenCalledWith({ tentatives_connexion: 3 });
+    // Incrément fait PAR LA BASE (atomique), puis relu — jamais recalculé en mémoire.
+    expect(Utilisateur.increment).toHaveBeenCalledWith('tentatives_connexion', { where: { id: 'user-1' } });
+    expect(utilisateur.tentatives_connexion).toBe(3);
     expect(utilisateur.compte_bloque_jusqua).toBeNull();
+  });
+
+  test('rafale parallèle : chaque échec est compté (pas de lecture-écriture en mémoire)', async () => {
+    // Avant le correctif, N essais simultanés lisaient tous 0 et écrivaient
+    // tous 1 : le compte n'était jamais verrouillé. On simule ici une base qui
+    // incrémente réellement, et 5 requêtes concurrentes sur le même compte.
+    const ligne = { tentatives_connexion: 0 };
+    Utilisateur.increment.mockImplementation(async () => { ligne.tentatives_connexion += 1; });
+    Utilisateur.findOne.mockImplementation(async () => {
+      const u = fakeUtilisateur({ tentatives_connexion: ligne.tentatives_connexion });
+      u.reload = jest.fn(async () => { u.tentatives_connexion = ligne.tentatives_connexion; return u; });
+      u.update = jest.fn(async (champs) => { Object.assign(u, champs); Object.assign(ligne, champs); });
+      return u;
+    });
+    bcrypt.compare.mockResolvedValue(false);
+
+    await Promise.all(Array.from({ length: MAX_TENTATIVES }, () =>
+      AuthService.login({ identifiant: 'chef@chantier.test', mot_de_passe: 'faux' })));
+
+    expect(Utilisateur.increment).toHaveBeenCalledTimes(MAX_TENTATIVES);
+    expect(ligne.compte_bloque_jusqua).toBeInstanceOf(Date);
   });
 
   test(`atteindre ${MAX_TENTATIVES} échecs verrouille le compte ET remet le compteur à 0`, async () => {

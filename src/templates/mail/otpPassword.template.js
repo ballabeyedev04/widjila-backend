@@ -1,10 +1,20 @@
 'use strict';
 
+const escapeHtml = require('../../utils/escapeHtml.js');
+
 /**
  * Template email OTP de réinitialisation de mot de passe.
+ *
+ * `nom` est le prénom saisi par l'utilisateur (ou par un administrateur) :
+ * interpolé tel quel, une balise y injectait du contenu dans un courriel qui
+ * porte la signature de la plateforme — le pire endroit pour un lien piégé.
+ *
  * @param {{ nom: string, otp: string }} data
  */
-module.exports = ({ nom, otp }) => `
+module.exports = ({ nom: nomBrut, otp: otpBrut }) => {
+  const nom = escapeHtml(nomBrut);
+  const otp = escapeHtml(otpBrut);
+  return `
 <!DOCTYPE html>
 <html lang="fr">
   <head>
@@ -50,3 +60,4 @@ module.exports = ({ nom, otp }) => `
   </body>
 </html>
 `;
+};

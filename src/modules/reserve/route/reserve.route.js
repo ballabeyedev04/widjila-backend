@@ -146,8 +146,11 @@ router.post(
   checkActiveUser,
   checkSubscription,
   requireRole(...RESERVE_INTERVENANTS),
-  upload.single('fichier'),
-  upload.validateMagicBytes,
+  // Même contrôle que la GED : une pièce jointe est souvent un devis Word,
+  // un tableau Excel ou un PV scanné — la liste blanche générique (PDF et
+  // images, 5 Mo) les refusait. Magic bytes + plafond propre au format.
+  upload.document('fichier'),
+  upload.validateDocument,
   reserveExtraController.ajouterPieceJointe
 );
 

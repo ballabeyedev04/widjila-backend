@@ -117,11 +117,16 @@ router.delete(
 );
 
 // ── Photos d'inspection (module 6) ───────────────────────────────────────────
+// `requireRole` — CORRECTIF (audit sécurité) : dernière écriture du module
+// sans garde de rôle. Un Client ou un sous-traitant ajoutait des preuves à
+// n'importe quelle OPR de l'organisation. Même groupe que la checklist : ceux
+// qui mènent l'inspection sont ceux qui la documentent.
 router.post(
   '/inspections/:id/photos',
   auth,
   checkActiveUser,
   checkSubscription,
+  requireRole(...OPERATIONNEL_CONTROLE),
   upload.single('fichier'),
   upload.validateMagicBytes,
   mediaController.ajouterPhotoInspection

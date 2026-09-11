@@ -60,7 +60,10 @@ exports.listerTousPlans = asyncHandler(async (req, res) => {
   const result = await PlanService.listTousPlans(
     superAdmin ? (req.query.organisationId || null) : req.user.organisationId,
     req.query,
-    { toutesOrganisations: superAdmin }
+    // `auteur` : applique le cloisonnement des chantiers — la liste
+    // transversale faisait fuiter les plans (et l'identifiant) des chantiers
+    // qu'un compte n'a pas le droit d'ouvrir.
+    { toutesOrganisations: superAdmin, auteur: req.user }
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: 'Plans récupérés', data: { plans: result.plans } });

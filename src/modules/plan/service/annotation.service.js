@@ -43,13 +43,28 @@ class AnnotationService {
     return { success: true, annotations };
   }
 
-  static async modifierAnnotation(organisationId, annotationId, data) {
-    const annotation = await Annotation.findByPk(annotationId, {
+  /**
+   * Charge une annotation SI ET SEULEMENT SI son plan appartient à un
+   * chantier de l'organisation.
+   *
+   * CORRECTIF (audit sécurité — IDOR inter-organisations) : l'include `Plan`
+   * n'était pas `required`. Sequelize produisait alors
+   * `LEFT OUTER JOIN (plans INNER JOIN chantiers … organisation_id = X)` : le
+   * filtre d'organisation portait sur la jointure, jamais sur l'annotation,
+   * qui revenait toujours (avec `plan = null`). N'importe quelle organisation
+   * modifiait ou supprimait l'annotation d'une autre en connaissant son id.
+   */
+  static _chargerDansOrganisation(organisationId, annotationId) {
+    return Annotation.findByPk(annotationId, {
       include: [{
-        model: Plan, as: 'plan',
-        include: [{ model: Chantier, as: 'chantier', where: { organisationId } }],
+        model: Plan, as: 'plan', required: true,
+        include: [{ model: Chantier, as: 'chantier', required: true, where: { organisationId } }],
       }],
     });
+  }
+
+  static async modifierAnnotation(organisationId, annotationId, data) {
+    const annotation = await AnnotationService._chargerDansOrganisation(organisationId, annotationId);
     if (!annotation) return { success: false, message: 'Annotation introuvable' };
 
     const updates = {};
@@ -61,12 +76,7 @@ class AnnotationService {
   }
 
   static async supprimerAnnotation(organisationId, annotationId) {
-    const annotation = await Annotation.findByPk(annotationId, {
-      include: [{
-        model: Plan, as: 'plan',
-        include: [{ model: Chantier, as: 'chantier', where: { organisationId } }],
-      }],
-    });
+    const annotation = await AnnotationService._chargerDansOrganisation(organisationId, annotationId);
     if (!annotation) return { success: false, message: 'Annotation introuvable' };
 
     await annotation.destroy(); // soft delete

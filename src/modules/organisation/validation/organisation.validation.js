@@ -40,7 +40,11 @@ const modifierMembreSchema = Joi.object({
   telephone: telephone.optional().allow('', null),
   fonction: Joi.string().trim().max(100).optional().allow('', null),
   role: role.optional(),
-  statut: Joi.string().valid('actif', 'inactif', 'en_attente_validation').optional(),
+  // 'en_attente_validation' retiré (audit sécurité) : ce statut désigne une
+  // demande d'INSCRIPTION publique, tranchée par le super-admin. Un
+  // gestionnaire pouvait y replacer un membre et le faire apparaître dans la
+  // file de validation de la plateforme.
+  statut: Joi.string().valid('actif', 'inactif').optional(),
 });
 
 const creerEquipeSchema = Joi.object({

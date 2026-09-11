@@ -136,6 +136,10 @@ class InspectionExtraService {
   static async appliquerModele(organisationId, inspectionId, modeleId) {
     const inspection = await InspectionExtraService._verifierInspection(organisationId, inspectionId);
     if (!inspection) return { success: false, message: 'Inspection introuvable dans cette organisation' };
+    // Appliquer un modèle ajoute des lignes : interdit sur un PV signé.
+    if (inspection.statut === 'signee') {
+      return { success: false, message: 'Une inspection signée est figée : elle ne peut plus être modifiée.' };
+    }
 
     const modele = await ChecklistModele.findOne({ where: { id: modeleId, organisationId } });
     if (!modele) return { success: false, message: 'Modèle introuvable' };

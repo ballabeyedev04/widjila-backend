@@ -71,7 +71,24 @@ const PUBLIQUES = new Map([
     'appelé par Stripe : authentifié par SIGNATURE, pas par jeton'],
   ['paytech.route.js::/ipn',
     'notification du prestataire : authentifiée par signature'],
+
+  // ── Portées par un JETON SECRET, pas par un identifiant ──────────────────
+  ['reports.route.js::/r/:token',
+    'lien de partage d’un rapport (cahier des charges Rapports § 14) : '
+    + '« widjila.app/r/{token} » doit s’ouvrir sans compte chez le destinataire. '
+    + 'Le paramètre est un jeton de 256 bits, dont seule l’empreinte est stockée, '
+    + 'révocable et éventuellement expirant — il ne se parcourt pas comme un '
+    + 'identifiant. Chaque ouverture est journalisée'],
 ]);
+
+/**
+ * Seul paramètre toléré sur une route publique : un JETON secret.
+ *
+ * La règle « aucune route publique paramétrée » vise les identifiants, qui
+ * se parcourent en les incrémentant. Un jeton aléatoire de 256 bits ne se
+ * parcourt pas ; il reste nommé `:token` pour que l'exception se lise.
+ */
+const PARAMETRE_JETON = /\/:token$/;
 
 /** Les fichiers de routes du projet. */
 function fichiersDeRoutes(dossier = MODULES, acc = []) {
@@ -151,7 +168,8 @@ describe('authentification des routes', () => {
     // incrémentant l'identifiant. Si une telle route devenait nécessaire,
     // elle mériterait sa propre discussion plutôt qu'une ligne de plus dans
     // la liste ci-dessus.
-    const parametrees = [...PUBLIQUES.keys()].filter((c) => c.includes('/:'));
+    const parametrees = [...PUBLIQUES.keys()]
+      .filter((c) => c.includes('/:') && !PARAMETRE_JETON.test(c));
 
     expect(parametrees).toEqual([]);
   });

@@ -6,7 +6,15 @@ const paytechController = require('../controller/paytech.controller.js');
 const auth = require('../../../middlewares/auth.middleware.js');
 const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware.js');
 const validate = require('../../../middlewares/validate.middleware.js');
+const requireRole = require('../../../middlewares/requireRole.middleware.js');
+const { FACTURATION } = require('../../../config/roles.js');
 const { createPaymentSchema } = require('../validation/paytech.validation.js');
+
+// FACTURATION sur les trois routes authentifiées : comme pour Stripe
+// (subscription.route.js), seul qui règle l'abonnement de l'organisation peut
+// en lancer ou en consulter un paiement. Sans cette garde, un compte Client
+// remplaçait la formule de l'organisation, et `status`/`verify` relayaient
+// vers PayTech le statut de n'importe quel jeton de paiement.
 
 // Pour l'IPN, PayTech n'envoie pas de token JWT - on a besoin du body brut
 // Mais on peut utiliser express.json() car PayTech envoie du JSON ou form-urlencoded
@@ -17,6 +25,7 @@ router.post(
   '/payment',
   auth,
   checkActiveUser,
+  requireRole(...FACTURATION),
   validate(createPaymentSchema),
   paytechController.createPayment
 );
@@ -26,6 +35,7 @@ router.get(
   '/payment/status',
   auth,
   checkActiveUser,
+  requireRole(...FACTURATION),
   paytechController.getPaymentStatus
 );
 
@@ -34,6 +44,7 @@ router.get(
   '/payment/verify',
   auth,
   checkActiveUser,
+  requireRole(...FACTURATION),
   paytechController.verifyPayment
 );
 

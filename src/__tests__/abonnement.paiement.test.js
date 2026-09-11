@@ -25,7 +25,7 @@ jest.mock('../models/index.js', () => ({
   Organisation: { findByPk: jest.fn(), findOne: jest.fn() },
   PlanAbonnement: { findOne: jest.fn(), findAll: jest.fn() },
   AbonnementSouscrit: { findOne: jest.fn(), findAll: jest.fn(), create: jest.fn(), update: jest.fn() },
-  EvenementPaiement: { create: jest.fn() },
+  EvenementPaiement: { create: jest.fn(), findOne: jest.fn(), update: jest.fn() },
   Utilisateur: { count: jest.fn() },
   Chantier: { count: jest.fn() },
 }));
@@ -180,6 +180,8 @@ describe('webhook — idempotence', () => {
     // Stripe réémet tant qu'il n'a pas de 2xx : répondre en erreur
     // relancerait la boucle indéfiniment.
     EvenementPaiement.create.mockRejectedValue(new UniqueConstraintError({ errors: [] }));
+    // Déjà reçu ET déjà traité : aucune ligne « en échec » à réclamer.
+    EvenementPaiement.update.mockResolvedValue([0]);
 
     const res = await SubscriptionService.traiterEvenement(
       'stripe', 'evt_1', 'payment_intent.succeeded', { id: 'pi_1' }
@@ -187,6 +189,56 @@ describe('webhook — idempotence', () => {
 
     expect(res.success).toBe(true);
     expect(res.duplicate).toBe(true);
+    expect(AbonnementSouscrit.findOne).not.toHaveBeenCalled();
+  });
+
+  it('RETRAITE un événement déjà reçu dont le traitement n’avait pas abouti', async () => {
+    // Premier passage en échec (base indisponible) → 500 → Stripe réémet.
+    // Classer la réémission en « doublon » perdait l'activation pour de bon.
+    EvenementPaiement.create.mockRejectedValue(new UniqueConstraintError({ errors: [] }));
+    EvenementPaiement.update.mockResolvedValue([1]); // la reprise est réclamée
+    const journal = { id: 'e1', traite_le: null, update: jest.fn().mockResolvedValue() };
+    EvenementPaiement.findOne.mockResolvedValue(journal);
+    AbonnementSouscrit.findOne.mockResolvedValue(null);
+
+    const res = await SubscriptionService.traiterEvenement(
+      'stripe', 'evt_1', 'payment_intent.succeeded', { id: 'pi_1' }
+    );
+
+    expect(res.duplicate).toBeUndefined();
+    expect(AbonnementSouscrit.findOne).toHaveBeenCalled();
+    expect(journal.update).toHaveBeenCalledWith({ traite_le: expect.any(Date) });
+    // Réclamation CONDITIONNELLE : uniquement une ligne en échec, jamais traitée.
+    const [, options] = EvenementPaiement.update.mock.calls[0];
+    expect(options.where).toMatchObject({ evenement_id: 'evt_1', traite_le: null });
+  });
+
+  it('une réémission CONCURRENTE d’un traitement encore en cours est un doublon', async () => {
+    // Premier passage en cours : ni `traite_le`, ni `erreur`. Le retraiter
+    // en parallèle expirait la souscription que le premier venait de créer.
+    EvenementPaiement.create.mockRejectedValue(new UniqueConstraintError({ errors: [] }));
+    EvenementPaiement.update.mockResolvedValue([0]);
+
+    const res = await SubscriptionService.traiterEvenement(
+      'paytech', 'ref_1', 'sale_complete', { organisationId: 'org-1', planId: 'pro', reference: 'ref_1' }
+    );
+
+    expect(res.duplicate).toBe(true);
+    expect(AbonnementSouscrit.create).not.toHaveBeenCalled();
+  });
+
+  it('customer.subscription.updated ne prolonge PAS la période (seule invoice.paid le fait)', async () => {
+    // Un renouvellement émet les deux événements : les deux prolongeaient,
+    // soit deux périodes pour un seul paiement — et un changement de carte
+    // prolongeait sans aucun encaissement.
+    const journal = { id: 'e2', update: jest.fn().mockResolvedValue() };
+    EvenementPaiement.create.mockResolvedValue(journal);
+
+    await SubscriptionService.traiterEvenement(
+      'stripe', 'evt_upd', 'customer.subscription.updated', { id: 'sub_1', customer: 'cus_1' }
+    );
+
+    expect(Organisation.findOne).not.toHaveBeenCalled();
     expect(AbonnementSouscrit.findOne).not.toHaveBeenCalled();
   });
 

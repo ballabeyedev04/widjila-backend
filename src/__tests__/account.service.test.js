@@ -10,7 +10,7 @@
  */
 
 jest.mock('../models/index.js', () => ({
-  Utilisateur: { findByPk: jest.fn(), findOne: jest.fn() },
+  Utilisateur: { findByPk: jest.fn(), findOne: jest.fn(), increment: jest.fn() },
   ConnexionLog: { findAndCountAll: jest.fn(), update: jest.fn(), findAll: jest.fn() },
   RefreshToken: { findAll: jest.fn(), findOne: jest.fn(), update: jest.fn() },
   MfaChallenge: { destroy: jest.fn() },
@@ -166,6 +166,16 @@ describe('AccountService', () => {
         { revoked: true },
         { where: { utilisateurId: 'user-1', revoked: false } }
       );
+    });
+
+    test('périme aussi les jetons d’ACCÈS déjà émis (token_version)', async () => {
+      // Sans cet incrément, un jeton d'accès volé survivait jusqu'à une heure
+      // à « déconnecter tous les appareils ».
+      RefreshToken.update.mockResolvedValue([1]);
+
+      await AccountService.revokeAllSessions('user-1');
+
+      expect(Utilisateur.increment).toHaveBeenCalledWith('token_version', { where: { id: 'user-1' } });
     });
 
     test('retourne un succès même si aucune session n’était active', async () => {

@@ -133,6 +133,15 @@ const TYPES = {
   '.wav': 'audio/wav',
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   '.csv': 'text/csv',
+  // Documents de GED (comptes rendus, tableaux, présentations, plans DAO)
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.doc': 'application/msword',
+  '.xls': 'application/vnd.ms-excel',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  // `application/acad` plutôt que `image/vnd.dwg` : un type en `image/` ferait
+  // ranger le plan parmi les PHOTOS par les clients qui trient sur ce préfixe.
+  '.dwg': 'application/acad',
 };
 
 function contentType(nomFichier) {

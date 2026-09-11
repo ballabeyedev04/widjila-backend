@@ -6,17 +6,9 @@ const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const logger = require('../../../utils/logger.js');
 const { BadRequestError, ForbiddenError } = require('../../../errors/AppError.js');
 
-/**
- * Taux de change fixe EUR → XOF (franc CFA d'Afrique de l'Ouest).
- * Le XOF a une parité FIXE avec l'euro depuis 1999 : 1 EUR = 655,957 XOF.
- * Ce n'est pas une approximation de marché, c'est une constante réglementaire.
- *
- * PayTech attend un montant en XOF, unité entière (pas de centimes : le franc
- * CFA n'a pas de subdivision en circulation).
- */
-const TAUX_EUR_XOF = 655.957;
-
-const eurosVersXof = (montantEuros) => Math.round(montantEuros * TAUX_EUR_XOF);
+// La conversion EUR → XOF (parité fixe 655,957) vit dans
+// `PayTechService.montantXof` : la demande de paiement et la vérification de
+// l'IPN doivent calculer EXACTEMENT le même montant.
 
 exports.createPayment = asyncHandler(async (req, res) => {
   const { planId } = req.body;
@@ -25,10 +17,15 @@ exports.createPayment = asyncHandler(async (req, res) => {
   const organisationId = req.user.organisationId;
   if (!organisationId) throw new ForbiddenError('Organisation non trouvée');
 
-  // Récupérer le plan pour le montant
-  const plans = SubscriptionService.getPlans();
-  const plan = plans.find(p => p.id === planId);
+  // Récupérer le plan pour le montant. `getPlans` est ASYNCHRONE (lecture du
+  // catalogue en base) : non attendu, `plans.find` levait et la route
+  // répondait 500 à chaque appel. La formule est désignée par son CODE —
+  // c'est lui qui voyage dans `ref_command`, seule donnée signée de l'IPN.
+  const plans = await SubscriptionService.getPlans();
+  const plan = plans.find((p) => p.code === planId);
   if (!plan) throw new BadRequestError('Plan inconnu');
+  const montant = PayTechService.montantXof(plan);
+  if (montant === null) throw new BadRequestError('Cette formule ne peut pas être réglée en ligne');
 
   // Vérifier si l'org a déjà un abonnement actif
   const status = await SubscriptionService.getStatus(organisationId);
@@ -45,16 +42,15 @@ exports.createPayment = asyncHandler(async (req, res) => {
   const refCommand = PayTechService.generateRefCommand(organisationId, planId);
 
   // Encoder les métadonnées dans custom_field
-  const customField = PayTechService.encodeCustomField({
-    organisationId,
-    planId,
-    priceId: plan.priceId,
-  });
+  // Informatif seulement : l'IPN n'en tire plus rien (non signé par PayTech).
+  const customField = PayTechService.encodeCustomField({ organisationId, planId });
 
   // Initier le paiement PayTech
   const result = await PayTechService.requestPayment({
     itemName: `Abonnement ${plan.nom}`,
-    itemPrice: eurosVersXof(plan.prix), // tarifs exprimés en EUR → converti en XOF
+    // Même calcul que la vérification de l'IPN (`montantXof`) : les deux
+    // doivent tomber sur le même entier, sinon tout paiement serait refusé.
+    itemPrice: montant,
     refCommand,
     commandName: `Souscription au plan ${plan.nom} pour l'organisation ${req.user.organisation?.nom || organisationId}`,
   }, {

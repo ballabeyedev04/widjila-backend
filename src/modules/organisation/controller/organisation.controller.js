@@ -47,7 +47,9 @@ exports.importContacts = asyncHandler(async (req, res) => {
   const result = await OrganisationService.importContacts(
     req.user.organisationId,
     req.file.buffer,
-    req.body.role || 'Client'
+    req.body.role || 'Client',
+    // L'appelant : garde de rang sur le rôle par défaut et sur chaque ligne.
+    req.user
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { results: result.results } });
@@ -111,7 +113,8 @@ exports.modifierMembre = asyncHandler(async (req, res) => {
 });
 
 exports.supprimerMembre = asyncHandler(async (req, res) => {
-  const result = await OrganisationService.supprimerMembre(req.user.organisationId, req.params.id);
+  // `req.user` : gardes de rang, du dernier gestionnaire et d'auto-suppression.
+  const result = await OrganisationService.supprimerMembre(req.user.organisationId, req.params.id, req.user);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message });
 });

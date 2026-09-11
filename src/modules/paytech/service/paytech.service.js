@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const axios = require('axios');
-const { Organisation } = require('../../../models/index.js');
+const { PlanAbonnement } = require('../../../models/index.js');
 const logger = require('../../../utils/logger.js');
 const SubscriptionService = require('../../subscription/service/subscription.service.js');
 
@@ -96,22 +96,45 @@ class PayTechService {
   }
 
   /**
-   * Vérifie une notification IPN (les deux méthodes)
+   * Vérifie une notification IPN — méthode HMAC UNIQUEMENT.
+   *
+   * La méthode « SHA256 des clés » (`verifySha256`) n'est plus acceptée : elle
+   * compare deux empreintes STATIQUES, identiques pour toutes les
+   * notifications. Une seule notification capturée devenait un sésame
+   * permanent, rejouable avec n'importe quel contenu. Le HMAC, lui, porte sur
+   * `item_price|ref_command` : il lie la signature au montant et à la commande.
    */
   verifyIpn(payload) {
-    const { item_price, ref_command, api_key_sha256, api_secret_sha256, hmac_compute } = payload;
+    const { item_price, ref_command, hmac_compute } = payload || {};
+    if (!hmac_compute) return false;
+    return this.verifyHmac(item_price, ref_command, hmac_compute);
+  }
 
-    // Méthode 1: HMAC (recommandée)
-    if (hmac_compute) {
-      return this.verifyHmac(item_price, ref_command, hmac_compute);
-    }
+  /**
+   * Montant attendu en XOF pour une formule, tel qu'il est demandé à PayTech.
+   * Le franc CFA a une parité FIXE avec l'euro (1 EUR = 655,957 XOF).
+   * @returns {number|null} null si la formule n'a pas de prix exploitable.
+   */
+  montantXof(plan) {
+    if (!plan || plan.prix === null || plan.prix === undefined) return null;
+    const prix = Number(plan.prix);
+    if (!Number.isFinite(prix) || prix <= 0) return null;
+    const devise = String(plan.devise || 'EUR').toUpperCase();
+    if (devise === 'XOF') return Math.round(prix);
+    if (devise === 'EUR') return Math.round(prix * 655.957);
+    return null; // aucune conversion fiable : on ne devine pas
+  }
 
-    // Méthode 2: SHA256 des clés
-    if (api_key_sha256 && api_secret_sha256) {
-      return this.verifySha256(api_key_sha256, api_secret_sha256);
-    }
-
-    return false;
+  /**
+   * Organisation et formule tirées de `ref_command` — la SEULE donnée
+   * d'identification couverte par le HMAC (`custom_field` ne l'est pas).
+   * Format produit par `generateRefCommand` : org_<uuid>_<code>_<ts>_<alea>.
+   * @returns {{ organisationId: string, planCode: string }|null}
+   */
+  lireRefCommand(refCommand) {
+    const m = /^org_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_([a-z0-9-]{1,50})_/i
+      .exec(String(refCommand || ''));
+    return m ? { organisationId: m[1], planCode: m[2] } : null;
   }
 
   /**
@@ -231,7 +254,7 @@ class PayTechService {
    * Traite une notification IPN de paiement réussi
    */
   async handlePaymentIpn(payload) {
-    const { type_event, ref_command, item_price, token, payment_method, custom_field, item_name } = payload;
+    const { type_event, ref_command, item_price, env } = payload || {};
 
     logger.info(`[paytech] IPN reçu: ${type_event} pour ${ref_command}`);
 
@@ -246,54 +269,56 @@ class PayTechService {
       return { success: true, message: 'Événement ignoré' };
     }
 
-    // Extraire organisationId et planId du custom_field ou ref_command
-    let organisationId, planId, priceId;
-
-    try {
-      if (custom_field) {
-        const decoded = JSON.parse(Buffer.from(custom_field, 'base64').toString());
-        organisationId = decoded.organisationId;
-        planId = decoded.planId;
-        priceId = decoded.priceId;
-      }
-
-      // Fallback: parser ref_command si format connu (ex: "org_123_plan_pro")
-      if (!organisationId && ref_command) {
-        const parts = ref_command.split('_');
-        if (parts.length >= 3 && parts[0] === 'org') {
-          organisationId = parts[1];
-          planId = parts[2];
-        }
-      }
-    } catch (e) {
-      logger.warn('[paytech] Impossible de parser custom_field:', e.message);
+    // En production, un encaissement de l'environnement de TEST n'ouvre rien :
+    // un paiement fictif signé avec les mêmes clés activerait sinon une formule.
+    if (process.env.NODE_ENV === 'production' && (this.env !== 'prod' || (env && env !== 'prod'))) {
+      logger.error(`[paytech] IPN hors environnement de production refusé pour ${ref_command}`);
+      return { success: false, message: 'Environnement PayTech invalide' };
     }
 
-    if (!organisationId) {
-      logger.error('[paytech] organisationId introuvable dans IPN');
-      return { success: false, message: 'organisationId manquant' };
+    // ── Organisation et formule : UNIQUEMENT depuis la donnée signée ────────
+    //
+    // Elles étaient lues dans `custom_field`, que le HMAC ne couvre pas : une
+    // notification authentique, rejouée avec un `custom_field` réécrit,
+    // activait n'importe quelle formule pour n'importe quelle organisation.
+    // `ref_command` est signé et porte les deux.
+    const cible = this.lireRefCommand(ref_command);
+    if (!cible) {
+      logger.error(`[paytech] ref_command illisible : ${ref_command}`);
+      return { success: false, message: 'Référence de commande invalide' };
+    }
+
+    // ── Le montant signé doit être le tarif de la formule ──────────────────
+    const plan = await PlanAbonnement.findOne({ where: { code: cible.planCode } });
+    const attendu = this.montantXof(plan);
+    if (!plan || !plan.actif || attendu === null) {
+      logger.error(`[paytech] Formule non achetable pour ${ref_command} : ${cible.planCode}`);
+      return { success: false, message: 'Formule invalide' };
+    }
+    if (Number(item_price) !== attendu) {
+      logger.error(
+        `[paytech] ÉCART DE MONTANT sur ${ref_command} : reçu ${item_price} XOF, `
+        + `attendu ${attendu} XOF pour ${plan.code} — activation refusée`
+      );
+      return { success: false, message: 'Montant incorrect' };
     }
 
     // Même chemin que Stripe : prix relu EN BASE, souscription historisée, et
     // idempotence portée par `traiterEvenement`.
     //
-    // PayTech réémet ses notifications comme Stripe : sans ce passage par le
-    // journal des événements, un IPN rejoué créait une seconde souscription et
-    // prolongeait l'abonnement gratuitement. Le `token` du paiement sert
-    // d'identifiant d'événement — c'est lui qui identifie l'encaissement.
+    // L'identifiant d'événement est `ref_command` — signé, unique par
+    // commande. Le `token` PayTech ne l'est PAS : s'en servir de clé
+    // d'idempotence laissait rejouer la même notification sous un token neuf.
     try {
       const resultat = await SubscriptionService.traiterEvenement(
         'paytech',
-        token || ref_command,
+        ref_command,
         'sale_complete',
         {
-          organisationId,
-          planId,
-          reference: token || ref_command,
+          organisationId: cible.organisationId,
+          planId: plan.code,
+          reference: ref_command,
           fournisseur: 'paytech',
-          // Montant ANNONCÉ par PayTech : conservé pour signaler un écart,
-          // jamais utilisé comme prix facturé.
-          montantRecu: item_price,
         }
       );
       if (resultat.duplicate) {

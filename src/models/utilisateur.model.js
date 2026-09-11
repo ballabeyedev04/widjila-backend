@@ -164,4 +164,22 @@ const User = sequelize.define('User', {
   ]
 });
 
+/**
+ * Colonnes qui ne sortent JAMAIS d'une réponse, quel que soit le chemin.
+ *
+ * Les listes d'attributs (`SAFE_USER_ATTRIBUTES`) et `formatUser` protègent
+ * les routes qui y pensent. Celles qui renvoyaient l'instance brute —
+ * validation d'une demande d'inscription, par exemple — exposaient le hash
+ * bcrypt et le secret TOTP DÉCHIFFRÉ par son getter. Ce filet s'applique à
+ * toute sérialisation JSON (`res.json(utilisateur)`), sans exception.
+ */
+const COLONNES_SECRETES = ['mot_de_passe', 'mfa_secret', 'token_version', 'tentatives_connexion', 'compte_bloque_jusqua'];
+
+User.prototype.toJSON = function toJSON() {
+  const valeurs = { ...this.get({ plain: true }) };
+  for (const cle of COLONNES_SECRETES) delete valeurs[cle];
+  return valeurs;
+};
+
 module.exports = User;
+module.exports.COLONNES_SECRETES = COLONNES_SECRETES;

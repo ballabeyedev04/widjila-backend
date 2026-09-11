@@ -60,7 +60,16 @@ const EXT_BY_TYPE = {
   png: '.png', jpg: '.jpg', pdf: '.pdf', webp: '.webp',
   mp4: '.mp4', webm: '.webm', mov: '.mov',
   mp3: '.mp3', m4a: '.m4a', ogg: '.ogg', wav: '.wav',
+  // Bureautique et DAO — GED des chantiers uniquement (voir upload.middleware.js)
+  docx: '.docx', xlsx: '.xlsx', pptx: '.pptx', dwg: '.dwg',
 };
+
+/**
+ * Office 97-2003 : .doc, .xls et .ppt partagent le même conteneur OLE2, que
+ * les magic bytes ne départagent pas. L'extension d'origine tranche alors —
+ * uniquement parmi ces trois-là, le contenu étant de toute façon un OLE2.
+ */
+const EXT_OLE2 = new Set(['.doc', '.xls', '.ppt']);
 
 /** Vrai si ce sous-dossier relève du régime public. */
 function estPublic(sousDossier = '') {
@@ -71,9 +80,11 @@ function estPublic(sousDossier = '') {
 /** Extension déduite du contenu réel, avec repli sur une liste blanche. */
 function extensionSure(buffer, originalname) {
   const typeReel = detectType(buffer);
+  const extOrig = path.extname(originalname || '').toLowerCase();
+
+  if (typeReel === 'ole2') return EXT_OLE2.has(extOrig) ? extOrig : '.bin';
   if (typeReel && EXT_BY_TYPE[typeReel]) return EXT_BY_TYPE[typeReel];
 
-  const extOrig = path.extname(originalname || '').toLowerCase();
   return SAFE_EXTS.has(extOrig) ? extOrig : '.bin';
 }
 

@@ -3,16 +3,23 @@
 const PartenaireService = require('../service/partenaire.service.js');
 const asyncHandler = require('../../../middlewares/asyncHandler.js');
 const { BadRequestError } = require('../../../errors/AppError.js');
+const { organisationCible } = require('../../../utils/organisationRequete.js');
 
+// `organisationCible` : même cloisonnement des chantiers que le reste de
+// l'API. L'annuaire d'un chantier caché (noms, courriels, téléphones des
+// entreprises) restait lisible — et enrichissable — par tout membre de
+// l'organisation qui en connaissait l'identifiant.
 exports.creerPartenaire = asyncHandler(async (req, res) => {
   const data = { ...req.body, chantierId: req.body.chantierId || req.params.chantierId };
-  const result = await PartenaireService.creerPartenaire(req.user.organisationId, data);
+  const organisationId = await organisationCible(req, { chantierId: data.chantierId });
+  const result = await PartenaireService.creerPartenaire(organisationId, data);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { partenaire: result.partenaire } });
 });
 
 exports.listerPartenaires = asyncHandler(async (req, res) => {
-  const result = await PartenaireService.listPartenaires(req.user.organisationId, req.params.chantierId, req.query);
+  const organisationId = await organisationCible(req, { chantierId: req.params.chantierId });
+  const result = await PartenaireService.listPartenaires(organisationId, req.params.chantierId, req.query);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({
     success: true,

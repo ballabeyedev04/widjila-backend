@@ -3,7 +3,7 @@
 const jwt = require('jsonwebtoken');
 const { jwtConfig } = require('../config/security.js');
 const User = require('../models/utilisateur.model.js');
-const { UnauthorizedError, ForbiddenError, NotFoundError } = require('../errors/AppError.js');
+const { UnauthorizedError, ForbiddenError } = require('../errors/AppError.js');
 
 const authMiddleware = async (req, res, next) => {
   try {
@@ -24,8 +24,12 @@ const authMiddleware = async (req, res, next) => {
       return next(new UnauthorizedError('Token invalide pour cette opération'));
     }
 
+    // Compte supprimé (y compris en suppression logique) : 401 et non 404.
+    // Un 404 n'était pas lu comme une fin de session par les clients — l'admin
+    // restait « connecté » à un compte qui n'existe plus, chaque écran en
+    // erreur (audit sécurité, déconnexion effective).
     const utilisateur = await User.findByPk(decoded.id);
-    if (!utilisateur) return next(new NotFoundError('Utilisateur introuvable'));
+    if (!utilisateur) return next(new UnauthorizedError('Session invalide, veuillez vous reconnecter'));
 
     // 'en_attente_validation' n'est PAS bloquant — seul 'inactif' l'est.
     if (utilisateur.statut === 'inactif') {

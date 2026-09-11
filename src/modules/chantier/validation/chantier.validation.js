@@ -120,7 +120,18 @@ const creerPhaseSchema = Joi.object({
 
 const modifierPhaseSchema = creerPhaseSchema.fork(['nom'], (f) => f.optional()).min(1);
 
+// Affectation de membres à un chantier. La route n'avait AUCUN schéma : un
+// `membreIds` absent ou réduit à une chaîne atteignait `Utilisateur.findAll`
+// tel quel, et une liste contenant un doublon faisait échouer le contrôle
+// d'appartenance (« certains membres ne font pas partie… ») à tort.
+// `roleChantier` : 50 caractères, la taille de la colonne.
+const assignerMembresSchema = Joi.object({
+  membreIds: Joi.array().items(uuid.required()).min(1).max(100).unique().required(),
+  roleChantier: Joi.string().trim().max(50).optional().allow('', null),
+});
+
 module.exports = {
+  assignerMembresSchema,
   creerChantierSchema,
   modifierChantierSchema,
   changerStatutSchema,

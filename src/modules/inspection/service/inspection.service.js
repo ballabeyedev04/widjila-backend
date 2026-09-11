@@ -5,6 +5,10 @@ const {
 } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 
+// Statut qui fige une inspection : c'est un procès-verbal signé.
+const STATUT_SIGNE = 'signee';
+const MESSAGE_FIGEE = 'Une inspection signée est figée : elle ne peut plus être modifiée.';
+
 class InspectionService {
 
   /**
@@ -134,6 +138,11 @@ class InspectionService {
     });
     if (!inspection) return { success: false, message: 'Inspection introuvable dans cette organisation' };
 
+    // Une inspection SIGNÉE est un procès-verbal : elle ne se réécrit plus, ni
+    // son compte rendu, ni son statut (repasser en « planifiée » effaçait
+    // silencieusement la signature).
+    if (inspection.statut === STATUT_SIGNE) return { success: false, message: MESSAGE_FIGEE };
+
     // CORRECTIF (audit § 8) — même contrôle qu'à la création : on ne peut pas
     // réaffecter l'inspection à un utilisateur d'une autre organisation.
     if (data.inspecteurId) {
@@ -156,6 +165,7 @@ class InspectionService {
       include: [{ model: Chantier, as: 'chantier', where: { organisationId } }],
     });
     if (!inspection) return { success: false, message: 'Inspection introuvable dans cette organisation' };
+    if (inspection.statut === STATUT_SIGNE) return { success: false, message: MESSAGE_FIGEE };
 
     const ligne = await Checklist.findOne({ where: { id: checklistId, inspectionId } });
     if (!ligne) return { success: false, message: 'Ligne de checklist introuvable' };

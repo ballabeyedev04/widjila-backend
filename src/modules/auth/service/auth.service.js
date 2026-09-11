@@ -312,26 +312,44 @@ class AuthService {
       };
     }
 
-    // 'en_attente_validation' n'est pas bloquant — seul 'inactif' l'est.
-    if (utilisateur.statut === 'inactif') {
-      return { success: false, message: 'Votre compte est inactif. Veuillez contacter le support.' };
-    }
-
     const valid = await bcrypt.compare(mot_de_passe, utilisateur.mot_de_passe);
     if (!valid) {
-      // Comptabiliser l'échec et verrouiller au bout du seuil
-      const tentatives = (utilisateur.tentatives_connexion || 0) + 1;
-      const updates = { tentatives_connexion: tentatives };
+      // Comptabiliser l'échec — incrément ATOMIQUE, fait par la base.
+      //
+      // L'ancien calcul lisait le compteur, ajoutait 1 en mémoire puis
+      // réécrivait la valeur. Des essais lancés EN PARALLÈLE lisaient tous le
+      // même compteur et écrivaient tous « 1 » : une rafale de tentatives
+      // depuis plusieurs adresses IP ne verrouillait jamais le compte, qui est
+      // pourtant la seule protection anti force-brute indépendante de l'IP.
+      await Utilisateur.increment('tentatives_connexion', { where: { id: utilisateur.id } });
+      await utilisateur.reload({ attributes: ['id', 'tentatives_connexion'] });
+      const tentatives = utilisateur.tentatives_connexion || 0;
       if (tentatives >= MAX_TENTATIVES) {
-        updates.compte_bloque_jusqua = new Date(Date.now() + BLOQUAGE_MINUTES * 60 * 1000);
-        updates.tentatives_connexion = 0;
+        await utilisateur.update({
+          compte_bloque_jusqua: new Date(Date.now() + BLOQUAGE_MINUTES * 60 * 1000),
+          tentatives_connexion: 0,
+        });
       }
-      await utilisateur.update(updates);
       await journaliserConnexion({
         utilisateurId: utilisateur.id, email: utilisateur.email, succes: false, type: 'password', meta,
         donnees: { motif: 'mot_de_passe_incorrect', tentatives },
       });
       return { success: false, message: 'Identifiant ou mot de passe incorrect' };
+    }
+
+    // Compte inactif — annoncé SEULEMENT à qui a prouvé connaître le mot de
+    // passe (audit sécurité — énumération de comptes).
+    //
+    // Ce contrôle précédait la vérification du mot de passe : n'importe qui,
+    // avec n'importe quel mot de passe, apprenait qu'un e-mail donné
+    // correspondait à un compte, et que ce compte était désactivé — un
+    // ex-salarié, typiquement, ce qui est précisément la cible d'une campagne
+    // d'hameçonnage. Un mauvais mot de passe sur un compte inactif reçoit
+    // désormais la même réponse qu'un compte inexistant.
+    //
+    // 'en_attente_validation' n'est pas bloquant ici — seul 'inactif' l'est.
+    if (utilisateur.statut === 'inactif') {
+      return { success: false, message: 'Votre compte est inactif. Veuillez contacter le support.' };
     }
 
     // Mot de passe valide → réinitialiser le compteur d'échecs

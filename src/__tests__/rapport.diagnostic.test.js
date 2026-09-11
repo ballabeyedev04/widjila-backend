@@ -1,137 +1,127 @@
 'use strict';
 
 /**
- * Tests — le diagnostic de la génération de rapport.
+ * Tests — le diagnostic de la génération, par l'ANCIEN point d'entrée.
  *
  * ## Le défaut d'origine
  *
- * « Erreur interne du serveur ». Rien d'autre. La génération enchaîne quatre
+ * « Erreur interne du serveur ». Rien d'autre. La génération enchaîne des
  * étapes qui échouent pour des raisons SANS RAPPORT entre elles — lire les
- * données, charger les photos, composer le PDF, écrire le fichier — et toutes
- * remontaient le même message générique. L'utilisateur ne savait pas quoi
- * corriger, et le journal ne disait pas où chercher.
+ * données, composer le PDF, écrire le fichier — et toutes remontaient le même
+ * message. L'utilisateur ne savait pas quoi corriger, le journal ne disait
+ * pas où chercher.
  *
  * ## Ce qui est verrouillé ici
  *
- *   1. CHAQUE ÉTAPE EST NOMMÉE. L'échec porte son étape (`etapeRapport`) et
- *      un message que l'utilisateur peut lire ;
- *   2. LE JOURNAL PORTE LE CONTEXTE — chantier, type, volumes — et la trace
- *      technique. Sans cela, un rapport qui échoue chez un client reste
- *      indiagnosticable à distance ;
- *   3. UN SCHÉMA EN RETARD EST DIT COMME TEL. Une migration non appliquée
- *      n'est pas un problème de chantier : envoyer l'utilisateur « vérifier
- *      le chantier » lui ferait chercher pendant des heures ;
- *   4. LES PHOTOS NE BLOQUENT PAS. Un stockage injoignable produit un rapport
- *      SANS images — pas l'absence de rapport ;
- *   5. LE CONTRÔLEUR REND UN 400, pas un 500 : le serveur a compris la
- *      demande, c'est son exécution qui a échoué pour une raison que
- *      l'appelant peut souvent lever.
+ *   1. L'ANCIEN ÉCRAN FONCTIONNE TOUJOURS : il passe désormais par le service
+ *      Rapports du cahier des charges, et reçoit le nouveau document ;
+ *   2. CHAQUE ÉTAPE EST NOMMÉE, avec un message lisible ;
+ *   3. LE JOURNAL PORTE LE CONTEXTE et la trace technique ;
+ *   4. UN SCHÉMA EN RETARD EST DIT COMME TEL ;
+ *   5. LES PHOTOS NE BLOQUENT PAS ;
+ *   6. LE CONTRÔLEUR REND UN 400 pour une étape nommée, pas un 500.
  */
 
-const mockFabrique = () => ({
-  findAll: jest.fn().mockResolvedValue([]),
-  findOne: jest.fn().mockResolvedValue(null),
-  findByPk: jest.fn().mockResolvedValue(null),
-  create: jest.fn(),
-  count: jest.fn().mockResolvedValue(0),
-});
-
-const mockModeles = {
-  Rapport: mockFabrique(),
-  Chantier: mockFabrique(),
-  Reserve: mockFabrique(),
-  Inspection: mockFabrique(),
-  Organisation: 'Organisation',
-  Utilisateur: mockFabrique(),
-  ChantierMembre: mockFabrique(),
-  Convocation: mockFabrique(),
-  Partenaire: mockFabrique(),
-  Lot: mockFabrique(),
-  Batiment: 'Batiment',
-  Etage: 'Etage',
-  Zone: 'Zone',
-  Plan: 'Plan',
-  CorpsEtat: 'CorpsEtat',
-  Phase: 'Phase',
-  Media: 'Media',
-};
-
-jest.mock('../models/index.js', () => mockModeles);
+jest.mock('../models/index.js', () => require('./helpers/modelesRapportMock.js').creerModeles());
 
 const mockStoreFile = jest.fn();
 const mockOuvrirFichier = jest.fn();
 jest.mock('../infrastructure/storage.service.js', () => ({
   storeFile: (...a) => mockStoreFile(...a),
   ouvrirFichier: (...a) => mockOuvrirFichier(...a),
+  deleteFile: jest.fn().mockResolvedValue(),
 }));
 
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 jest.mock('../utils/logger.js', () => mockLogger);
 
+const modeles = require('../models/index.js');
+const { reinitialiser, instance } = require('./helpers/modelesRapportMock.js');
 const RapportService = require('../modules/rapport/service/rapport.service.js');
 
 const ORG = '11111111-1111-4111-8111-111111111111';
 const CHANTIER = '22222222-2222-4222-8222-222222222222';
 
-/** Le chantier existe et appartient à l'organisation — le cas nominal. */
-function chantierTrouve() {
-  mockModeles.Chantier.findOne.mockResolvedValue({
-    id: CHANTIER, nom: 'Résidence Horizon', code: 'RH-2026',
-    organisationId: ORG, organisation: { id: ORG, nom: 'Widjila BTP' },
-  });
-}
+const chantier = {
+  id: CHANTIER, nom: 'Résidence Horizon', code: 'RH-2026',
+  organisationId: ORG, organisation: { id: ORG, nom: 'Widjila BTP', logo_url: null },
+};
+
+let base;
+/** Rend l'enregistrement final (statut « genere ») impossible, pour un test. */
+let enregistrementCasse;
 
 beforeEach(() => {
   jest.clearAllMocks();
-  for (const modele of Object.values(mockModeles)) {
-    if (typeof modele !== 'object') continue;
-    modele.findAll.mockResolvedValue([]);
-    modele.findOne.mockResolvedValue(null);
-    modele.findByPk.mockResolvedValue(null);
-    modele.count.mockResolvedValue(0);
-  }
-  chantierTrouve();
-  mockModeles.Rapport.create.mockImplementation(async (v) => ({ id: 'rap-1', ...v }));
+  reinitialiser(modeles);
+  base = new Map();
+  enregistrementCasse = false;
+
+  modeles.Chantier.findOne.mockImplementation(async ({ where }) => (
+    where.id === CHANTIER && where.organisationId === ORG ? chantier : null
+  ));
+  modeles.Rapport.create.mockImplementation(async (v) => {
+    const r = instance({ id: `rap-${base.size + 1}`, createdAt: new Date(), chantier, ...v });
+    const miseAJour = r.update;
+    Object.defineProperty(r, 'update', {
+      enumerable: false,
+      value: jest.fn(async (champs) => {
+        if (enregistrementCasse && champs.statut === 'genere') throw new Error('contrainte violée');
+        return miseAJour(champs);
+      }),
+    });
+    base.set(r.id, r);
+    return r;
+  });
+  modeles.Rapport.findOne.mockImplementation(async ({ where }) => base.get(where.id) || null);
   mockStoreFile.mockResolvedValue('/uploads/rapports/rapport.pdf');
   mockOuvrirFichier.mockResolvedValue(null);
 });
 
 const generer = (params = {}) =>
-  RapportService.genererRapport({ chantierId: CHANTIER, type: 'reserves', ...params }, null, ORG);
+  RapportService.genererRapport({ chantierId: CHANTIER, type: 'reserves', ...params }, 'u1', ORG);
 
-// ── 1. Le chemin nominal reste intact ───────────────────────────────────────
-
-describe('génération nominale', () => {
-  test('produit un PDF, l’enregistre et le trace', async () => {
+describe('l’ancien point d’entrée passe par le nouveau service', () => {
+  it('produit le PDF, l’enregistre et le trace', async () => {
     const r = await generer();
 
     expect(r.success).toBe(true);
     expect(mockStoreFile).toHaveBeenCalledTimes(1);
     const [buffer, nom, dossier] = mockStoreFile.mock.calls[0];
-    expect(Buffer.isBuffer(buffer)).toBe(true);
-    expect(buffer.length).toBeGreaterThan(1000);
-    expect(nom).toBe('rapport-reserves-RH-2026.pdf');
+    expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(nom).toBe('rapport-global-rh-2026-v1.pdf');
     expect(dossier).toBe('rapports');
-
-    // Le journal doit permettre de constater après coup ce qui a été produit.
     expect(mockLogger.info).toHaveBeenCalledWith(expect.stringContaining('[rapport] Généré'));
   });
 
-  test('un chantier d’une autre organisation est introuvable, sans 500', async () => {
-    mockModeles.Chantier.findOne.mockResolvedValue(null);
+  it('conserve l’ancien type, que l’ancien écran affiche en libellé', async () => {
+    const r = await generer({ type: 'opr' });
 
-    const r = await generer();
+    expect(r.rapport.type).toBe('opr');
+    expect(r.rapport.modele).toBe('OPR');
+    expect(r.rapport.statut).toBe('genere');
+  });
 
-    expect(r).toEqual({ success: false, message: 'Chantier introuvable' });
+  it('« par bâtiment » sans bâtiment retombe sur le global, sans refuser', async () => {
+    // L'ancien écran proposait « Tous » : refuser casserait un geste valide
+    // pour lui. Le périmètre obtenu est exactement celui d'avant.
+    const r = await generer({ type: 'batiment' });
+
+    expect(r.success).toBe(true);
+    expect(r.rapport.modele).toBe('GLOBAL');
+  });
+
+  it('un chantier d’une autre organisation est introuvable, sans 500', async () => {
+    modeles.Chantier.findOne.mockResolvedValue(null);
+
+    expect(await generer()).toEqual({ success: false, message: 'Chantier introuvable' });
     expect(mockStoreFile).not.toHaveBeenCalled();
   });
 });
 
-// ── 2. Chaque étape est nommée ──────────────────────────────────────────────
-
 describe('étapes nommées', () => {
-  test('lecture des données : l’étape et le contexte partent au journal', async () => {
-    mockModeles.Reserve.findAll.mockRejectedValue(new Error('connexion perdue'));
+  it('lecture des données : l’étape et le contexte partent au journal', async () => {
+    modeles.Reserve.findAll.mockRejectedValue(new Error('connexion perdue'));
 
     await expect(generer()).rejects.toMatchObject({
       etapeRapport: 'lecture-donnees',
@@ -142,23 +132,21 @@ describe('étapes nommées', () => {
     expect(ligne).toContain('lecture-donnees');
     expect(ligne).toContain(CHANTIER);
     expect(ligne).toContain('connexion perdue');
-    // La trace technique aussi : sans elle, on sait QUE ça a cassé, pas OÙ.
     expect(meta.stack).toBeDefined();
   });
 
-  test('écriture du fichier : message distinct de celui de la lecture', async () => {
+  it('écriture du fichier : message distinct, taille au journal', async () => {
     mockStoreFile.mockRejectedValue(new Error('ENOSPC'));
 
     await expect(generer()).rejects.toMatchObject({ etapeRapport: 'stockage' });
 
     const ligne = mockLogger.error.mock.calls[0][0];
     expect(ligne).toContain('stockage');
-    // Le contexte porte la taille : un échec d'écriture se diagnostique avec.
     expect(ligne).toContain('taille');
   });
 
-  test('enregistrement en base : le PDF était bon, l’historique a échoué', async () => {
-    mockModeles.Rapport.create.mockRejectedValue(new Error('contrainte violée'));
+  it('enregistrement en base : le PDF était bon, l’historique a échoué', async () => {
+    enregistrementCasse = true;
 
     await expect(generer()).rejects.toMatchObject({
       etapeRapport: 'enregistrement',
@@ -167,12 +155,9 @@ describe('étapes nommées', () => {
   });
 });
 
-// ── 3. Un schéma en retard le dit ───────────────────────────────────────────
-
 describe('schéma de base en retard', () => {
-  /** Une erreur PostgreSQL telle que Sequelize la remonte. */
   const erreurSql = (code) => {
-    const err = new Error(`column "x" does not exist`);
+    const err = new Error('column "x" does not exist');
     err.parent = { code };
     return err;
   };
@@ -181,7 +166,7 @@ describe('schéma de base en retard', () => {
     ['42P01', 'table inconnue'],
     ['42703', 'colonne inconnue'],
   ])('%s (%s) → migration à appliquer, pas « vérifiez le chantier »', async (code) => {
-    mockModeles.Reserve.findAll.mockRejectedValue(erreurSql(code));
+    modeles.Reserve.findAll.mockRejectedValue(erreurSql(code));
 
     const echec = await generer().catch((e) => e);
 
@@ -190,7 +175,7 @@ describe('schéma de base en retard', () => {
   });
 
   test('une autre erreur SQL garde le message de l’étape', async () => {
-    mockModeles.Reserve.findAll.mockRejectedValue(erreurSql('40001')); // sérialisation
+    modeles.Reserve.findAll.mockRejectedValue(erreurSql('40001'));
 
     const echec = await generer().catch((e) => e);
 
@@ -199,32 +184,25 @@ describe('schéma de base en retard', () => {
   });
 });
 
-// ── 4. Les photos ne bloquent pas le rapport ────────────────────────────────
-
 describe('photos indisponibles', () => {
   test('un stockage injoignable produit un rapport SANS images', async () => {
-    mockModeles.Reserve.findAll.mockResolvedValue([{
-      id: 'r1', numero: 1, titre: 'Fissure', description: 'Mur nord',
-      statut: 'creee', severite: 'majeure', createdAt: new Date('2026-09-01'),
+    modeles.Reserve.findAll.mockResolvedValue([{
+      id: 'r1', numero: '1', titre: 'Fissure', description: 'Mur nord',
+      statut: 'creee', severite: 'haute', createdAt: new Date('2026-09-01'),
       medias: [{ id: 'm1', url: '/uploads/medias/x.jpg', type: 'photo' }],
     }]);
     mockOuvrirFichier.mockRejectedValue(new Error('R2 injoignable'));
 
     const r = await generer();
 
-    // Le rapport SORT — c'est le point. Une réserve sans photo reste une
-    // réserve ; pas de rapport du tout, c'est une visite perdue.
     expect(r.success).toBe(true);
     expect(mockStoreFile).toHaveBeenCalledTimes(1);
   });
 });
 
-// ── 5. Le contrôleur rend un 400, pas un 500 ────────────────────────────────
-
 describe('contrôleur', () => {
   const controller = require('../modules/rapport/controller/rapport.controller.js');
 
-  /** Une réponse Express réduite à ce que le contrôleur en utilise. */
   const reponse = () => {
     const res = { code: null, corps: null };
     res.status = (c) => { res.code = c; return res; };
@@ -239,7 +217,6 @@ describe('contrôleur', () => {
     params: {},
   });
 
-  /** `asyncHandler` renvoie l'erreur par `next` — on la capture. */
   const executer = async (handler, req, res) => {
     let capturee = null;
     await handler(req, res, (err) => { capturee = err; });
@@ -247,20 +224,16 @@ describe('contrôleur', () => {
   };
 
   test('une étape nommée devient un 400 PORTEUR du message', async () => {
-    mockModeles.Reserve.findAll.mockRejectedValue(new Error('connexion perdue'));
+    modeles.Reserve.findAll.mockRejectedValue(new Error('connexion perdue'));
 
     const err = await executer(controller.genererRapport, requete(), reponse());
 
-    // 400 et non 500 : le serveur a compris la demande. Et surtout, le
-    // message reste celui de l'étape — c'est tout l'objet du changement.
     expect(err.statusCode).toBe(400);
     expect(err.message).toContain('Impossible de lire les données');
   });
 
   test('une erreur INATTENDUE n’est pas déguisée en 400', async () => {
-    // Pas d'`etapeRapport` : le contrôleur ne doit pas s'en attribuer la
-    // compréhension. Une panne qu'on ne sait pas nommer reste une 500.
-    mockModeles.Chantier.findOne.mockRejectedValue(new Error('panne inattendue'));
+    modeles.Chantier.findOne.mockRejectedValue(new Error('panne inattendue'));
 
     const err = await executer(controller.genererRapport, requete(), reponse());
 

@@ -21,7 +21,8 @@
     "docker:prod:down": "docker compose -f docker-compose.prod.yml down",
     "backup": "bash deploy/backup-postgres.sh",
     "test": "jest",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "audit:requetes": "node scripts/auditRequetes.js"
   },
   "keywords": [],
   "author": "",
@@ -48,6 +49,7 @@
     "multer": "^2.0.2",
     "node-cron": "^4.4.1",
     "otplib": "^13.4.1",
+    "pdf-lib": "^1.17.1",
     "pdfkit": "^0.19.1",
     "pg": "^8.18.0",
     "pg-hstore": "^2.3.4",
@@ -62,6 +64,9 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
+    "@babel/parser": "^7.29.8",
+    "@babel/traverse": "^7.29.8",
+    "@babel/types": "^7.29.8",
     "ioredis-mock": "^8.13.1",
     "jest": "^30.4.2",
     "nodemon": "^3.1.11",

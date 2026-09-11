@@ -44,7 +44,8 @@ exports.signerReserve = asyncHandler(async (req, res) => {
     await orgDeReserve(req),
     req.params.id,
     req.body,
-    req.user.id
+    req.user.id,
+    req.user.role
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { signature: result.signature } });

@@ -29,6 +29,15 @@ class MfaService {
    * secret fourni (preuve que l'utilisateur détient bien son téléphone).
    */
   static async activer(utilisateur, { code, secret }) {
+    // Un MFA déjà actif ne se REMPLACE pas par cette porte. Sans ce contrôle,
+    // un jeton d'accès volé suffisait à substituer au secret de la victime un
+    // secret choisi par l'attaquant — sans jamais fournir un code de l'ancien,
+    // alors que `desactiver` l'exige. La victime perdait son second facteur,
+    // l'attaquant en gagnait un. On désactive d'abord (code de l'ancien
+    // secret), on réactive ensuite.
+    if (utilisateur.mfa_active) {
+      return { success: false, message: 'Le MFA est déjà activé. Désactivez-le d’abord avec un code valide.' };
+    }
     if (!secret) return { success: false, message: 'Secret de configuration manquant' };
     if (!MfaService.verify(secret, code)) {
       return { success: false, message: 'Code de vérification invalide' };

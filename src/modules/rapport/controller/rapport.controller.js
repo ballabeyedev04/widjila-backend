@@ -13,7 +13,17 @@ const { organisationCible } = require('../../../utils/organisationRequete.js');
  */
 
 exports.genererRapport = asyncHandler(async (req, res) => {
-  const params = { ...req.body, ...req.query };
+  // Le corps (validé par Joi) PRIME sur la query (non validée). L'ordre
+  // inverse laissait `?chantierId=` viser un autre chantier que celui de l'URL
+  // et `?type=` écraser la valeur validée — y compris par des valeurs qui
+  // faisaient échouer la génération après la création d'un rapport
+  // « brouillon » orphelin. Le chantier est celui du corps, recopié depuis
+  // l'URL par `injectChantierId` avant la validation.
+  const params = {
+    ...req.query,
+    ...req.body,
+    chantierId: req.body?.chantierId ?? req.params?.chantierId,
+  };
   const organisationId = await organisationCible(req, { chantierId: params.chantierId });
 
   let result;
@@ -71,7 +81,9 @@ exports.envoyerRapport = asyncHandler(async (req, res) => {
     req.params.id,
     organisationId,
     req.user.id,
-    { exclure: req.body?.exclure || [] },
+    // Le corps validé en entier : `exclure` pour les anciens clients, et les
+    // choix du § 13 (destinataires, objet, message, mode) pour les nouveaux.
+    { exclure: [], ...(req.body || {}) },
   );
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message, data: { envoi: result.envoi } });

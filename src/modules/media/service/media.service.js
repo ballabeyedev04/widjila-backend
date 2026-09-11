@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const sharp = require('sharp');
-const { Media, Reserve, Inspection, Chantier } = require('../../../models/index.js');
+const { Media, Reserve, Inspection, Chantier, ReserveAffectation } = require('../../../models/index.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
 const logger = require('../../../utils/logger.js');
 
@@ -70,7 +70,65 @@ async function _dossierDuMedia(type, reserveId, inspectionId) {
   return type === 'video' ? 'medias/videos' : type === 'audio' ? 'medias/audios' : 'medias/photos';
 }
 
+const TYPES_MEDIA = ['photo', 'video', 'audio'];
+
+/** Nombre borné, ou null si absent ; `undefined` signale une valeur invalide. */
+function _nombre(valeur, min, max) {
+  if (valeur === undefined || valeur === null || valeur === '') return null;
+  const n = Number(valeur);
+  if (!Number.isFinite(n) || n < min || n > max) return undefined;
+  return n;
+}
+
+/**
+ * Métadonnées d'un média, contrôlées.
+ *
+ * Elles arrivent en multipart, APRÈS multer : aucun schéma Joi ne les voyait.
+ * `pris_le` et la géolocalisation servent de PREUVE (photo de correction
+ * horodatée et située) — un client pouvait les fixer à n'importe quelle
+ * valeur, et une valeur non numérique finissait en erreur 500.
+ *
+ * @returns {{ ok: true, meta: object } | { ok: false, message: string }}
+ */
+function _metaMedia(type, meta = {}) {
+  if (!TYPES_MEDIA.includes(type)) {
+    return { ok: false, message: 'Type de média invalide (photo, video ou audio).' };
+  }
+  const champs = {
+    latitude: _nombre(meta.latitude, -90, 90),
+    longitude: _nombre(meta.longitude, -180, 180),
+    largeur: _nombre(meta.largeur, 1, 100000),
+    hauteur: _nombre(meta.hauteur, 1, 100000),
+    duree: _nombre(meta.duree, 0, 24 * 3600),
+  };
+  const invalide = Object.keys(champs).find((cle) => champs[cle] === undefined);
+  if (invalide) return { ok: false, message: `Métadonnée « ${invalide} » invalide.` };
+
+  let prisLe = null;
+  if (meta.pris_le !== undefined && meta.pris_le !== null && meta.pris_le !== '') {
+    prisLe = new Date(meta.pris_le);
+    // Une prise de vue dans le futur n'existe pas (tolérance d'horloge : 10 min).
+    if (Number.isNaN(prisLe.getTime()) || prisLe.getTime() > Date.now() + 10 * 60 * 1000) {
+      return { ok: false, message: 'Date de prise de vue invalide.' };
+    }
+  }
+  return { ok: true, meta: { ...champs, pris_le: prisLe } };
+}
+
 class MediaService {
+
+  /**
+   * Le sous-traitant ne dépose des preuves que sur une réserve qui LUI est
+   * assignée — même règle que `ReserveService.changerStatut`. Sans elle, il
+   * photographiait n'importe quelle réserve de l'organisation, et ce média
+   * comptait comme « preuve de correction » exigée pour la validation.
+   */
+  static async _refusSousTraitant(reserve, utilisateurId, role) {
+    if (role !== 'SousTraitant') return null;
+    const estAssigne = String(reserve.assigneA) === String(utilisateurId)
+      || (await ReserveAffectation.count({ where: { reserveId: reserve.id, utilisateurId } })) > 0;
+    return estAssigne ? null : 'Cette réserve ne vous est pas assignée.';
+  }
 
   // -------------------- VÉRIFICATIONS D'APPARTENANCE --------------------
   static async _verifierReserve(organisationId, reserveId) {
@@ -139,6 +197,10 @@ class MediaService {
       return { success: false, message: 'Fichier média manquant' };
     }
 
+    const controle = _metaMedia(type, meta);
+    if (!controle.ok) return { success: false, message: controle.message };
+    meta = controle.meta;
+
     // ── Rejeu d'un envoi deja abouti ──────────────────────────────────────
     //
     // Le mobile met les photos prises hors ligne dans une file d'attente. Si
@@ -192,14 +254,14 @@ class MediaService {
         type,
         url,
         thumbnail_url: thumbnailUrl,
-        latitude: meta.latitude || null,
-        longitude: meta.longitude || null,
-        largeur: meta.largeur || null,
-        hauteur: meta.hauteur || null,
-        duree: meta.duree || null,
+        latitude: meta.latitude,
+        longitude: meta.longitude,
+        largeur: meta.largeur,
+        hauteur: meta.hauteur,
+        duree: meta.duree,
         checksum,
         uploaderId,
-        pris_le: meta.pris_le ? new Date(meta.pris_le) : new Date(),
+        pris_le: meta.pris_le || new Date(),
       });
     } catch (err) {
       // Le fichier est déjà sur le disque : si la ligne n'a pas pu être créée,
@@ -213,9 +275,11 @@ class MediaService {
   }
 
   // -------------------- AJOUTER UN MÉDIA SUR UNE RÉSERVE --------------------
-  static async ajouterMedia(organisationId, reserveId, type, fichier, meta = {}, uploaderId = null) {
+  static async ajouterMedia(organisationId, reserveId, type, fichier, meta = {}, uploaderId = null, role = null) {
     const reserve = await MediaService._verifierReserve(organisationId, reserveId);
     if (!reserve) return { success: false, message: 'Réserve introuvable dans cette organisation' };
+    const refus = await MediaService._refusSousTraitant(reserve, uploaderId, role);
+    if (refus) return { success: false, message: refus };
     return MediaService._enregistrer(reserveId, null, type, fichier, meta, uploaderId);
   }
 

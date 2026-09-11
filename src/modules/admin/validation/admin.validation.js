@@ -1,13 +1,16 @@
 'use strict';
 
 const Joi = require('joi');
-const { uuid, ROLE_UTILISATEUR } = require('../../../validations/common.js');
+const { uuid, ROLE_UTILISATEUR, motDePasse } = require('../../../validations/common.js');
 
 const creerUtilisateurAdminSchema = Joi.object({
   nom: Joi.string().trim().min(2).max(50).required(),
   prenom: Joi.string().trim().min(2).max(50).required(),
   email: Joi.string().trim().email().lowercase().required(),
-  mot_de_passe: Joi.string().min(8).max(128).optional(),
+  // Même politique que partout ailleurs (majuscule, minuscule, chiffre) : un
+  // mot de passe fixé par l'administration n'a aucune raison d'être plus
+  // faible que celui qu'un utilisateur se choisit.
+  mot_de_passe: motDePasse.optional(),
   telephone: Joi.string().pattern(/^\+?[0-9\s\-\.]{7,20}$/).optional().allow('', null),
   fonction: Joi.string().trim().max(100).optional().allow('', null),
   role: Joi.string().valid(...ROLE_UTILISATEUR).optional(),

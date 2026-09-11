@@ -65,7 +65,17 @@ app.use(cors(corsConfig));
 app.use(cookieParser());
 
 // ── Logging des requêtes entrantes ─────────────────────────────────────────
-app.use(morgan(isProd ? 'combined' : 'dev', {
+// Formats `combined` / `dev` réécrits avec l'URL et le référent MASQUÉS : le
+// lien de partage d'un rapport (/r/:token) et certains jetons passés en
+// paramètre sont des secrets, que les journaux conservaient en clair (audit
+// sécurité — voir utils/masquerUrl.js).
+const masquerUrl = require('./utils/masquerUrl.js');
+morgan.token('url-masquee', (req) => masquerUrl(req.originalUrl || req.url));
+morgan.token('referent-masque', (req) => masquerUrl(req.headers.referer || req.headers.referrer || ''));
+const FORMAT_JOURNAL = isProd
+  ? ':remote-addr - :remote-user [:date[clf]] ":method :url-masquee HTTP/:http-version" :status :res[content-length] ":referent-masque" ":user-agent"'
+  : ':method :url-masquee :status :response-time ms - :res[content-length]';
+app.use(morgan(FORMAT_JOURNAL, {
   stream: { write: (msg) => logger.info(msg.trim()) }
 }));
 
@@ -111,6 +121,13 @@ app.use(rateLimit(rateLimitConfig));
  * déposés avant la bascule restent lisibles sans migration de données.
  */
 const relayerFichier = async (req, res, next) => {
+  // Lecture SEULEMENT — CORRECTIF (audit sécurité, contournement du contrôle
+  // d'accès). `checkFileAccess` laisse filer les méthodes autres que
+  // GET/HEAD sans rien vérifier (il les croyait destinées au 404), mais ce
+  // relais servait le fichier QUELLE QUE SOIT la méthode : un simple
+  // `POST /uploads/…` livrait n'importe quel fichier de n'importe quelle
+  // organisation à tout compte actif.
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
   try {
     const contenu = await ouvrirFichier(decodeURIComponent(req.path));
     if (!contenu) return next(); // → 404 du gestionnaire final
@@ -181,6 +198,8 @@ const documentRoutes     = require('./modules/document/route/document.route.js')
 const notificationRoutes = require('./modules/notification/route/notification.route.js');
 const partenaireRoutes   = require('./modules/organisation/route/partenaire.route.js');
 const rapportRoutes      = require('./modules/rapport/route/rapport.route.js');
+// Module Rapports du cahier des charges (§ 9) — /api/v1/reports/…
+const reportsRoutes      = require('./modules/rapport/route/reports.route.js');
 const dashboardRoutes    = require('./modules/dashboard/route/dashboard.route.js');
 const corpsEtatRoutes    = require('./modules/corpsEtat/route/corpsEtat.route.js');
 const referentielRoutes  = require('./modules/referentiel/route/referentiel.route.js');
@@ -198,6 +217,7 @@ const suppressionCompteRoutes = require('./modules/suppressionCompte/route/suppr
 const adminSuppressionRoutes  = require('./modules/suppressionCompte/route/adminSuppressionCompte.route.js');
 const subscriptionRoutes = require('./modules/subscription/route/subscription.route.js');
 const paytechRoutes = require('./modules/paytech/route/paytech.route.js');
+const supportRoutes = require('./modules/support/route/support.route.js');
 
 // Journal d'audit générique (audit — élargissement du périmètre) : montée
 // une seule fois, avant toutes les routes mutantes de l'API — voir le
@@ -225,6 +245,19 @@ app.use('/api/v1', reserveRoutes);
 app.use('/api/v1', inspectionRoutes);
 app.use('/api/v1', documentRoutes);
 app.use('/api/v1', rapportRoutes);
+app.use('/api/v1', reportsRoutes);
+
+// Synchronisation hors ligne INCRÉMENTALE du mobile (audit synchronisation) :
+// changements et suppressions de réserves depuis un curseur. Lecture seule,
+// aucune dépendance aux routes ci-dessus.
+const syncRoutes = require('./modules/sync/route/sync.route.js');
+app.use('/api/v1', syncRoutes);
+
+// Lien de partage d'un rapport, sous sa forme COURTE — cahier des charges
+// Rapports § 14 : « widjila.app/r/{token_securise} ». La forme longue
+// (/api/v1/r/:token) est servie par le routeur ci-dessus ; celle-ci existe
+// pour le jour où le domaine principal pointe sur l'API.
+app.get('/r/:token', ...reportsRoutes.lienPublic);
 
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1', partenaireRoutes);
@@ -246,6 +279,9 @@ app.use('/api/v1/dashboard',     dashboardRoutes);
 
 // ── Abonnement (accessible même sans abonnement pour /plans et /webhook) ──────
 app.use('/api/v1/abonnement',    subscriptionRoutes);
+
+// ── Contact du support (accessible même sans abonnement) ──────────────────────
+app.use('/api/v1/support',       supportRoutes);
 
 // ── Filet de sécurité — PAS la garde principale ──────────────────────────────
 //

@@ -2,6 +2,7 @@
 
 const models = require('../models/index.js');
 const { NotFoundError } = require('../errors/AppError.js');
+const { GESTION } = require('../config/roles.js');
 
 /**
  * Organisation dans laquelle une requête opère.
@@ -39,9 +40,73 @@ const CHAINE = {
   inspectionId: { modele: 'Inspection', colonne: 'chantierId', vers: 'chantierId', libelle: 'Inspection' },
   rapportId:    { modele: 'Rapport',    colonne: 'chantierId', vers: 'chantierId', libelle: 'Rapport' },
   pieceJointeId: { modele: 'PieceJointe', colonne: 'reserveId', vers: 'reserveId', libelle: 'Pièce jointe' },
+  // Média de RÉSERVE. Un média d'inspection (reserveId nul) s'arrête là : son
+  // cadrage reste celui du service, par organisation.
+  mediaId:      { modele: 'Media',      colonne: 'reserveId',  vers: 'reserveId',  libelle: 'Média' },
 };
 
 const estSuperAdmin = (user) => user?.role === 'Admin';
+
+/** Chantier dont dépend une ressource — même table de remontée, arrêtée au chantier. */
+async function _chantierDe(type, id) {
+  if (type === 'chantierId') return id;
+  const etape = CHAINE[type];
+  if (!etape) return null;
+  const ligne = await models[etape.modele].findByPk(id, { attributes: [etape.colonne], paranoid: false });
+  const valeur = ligne ? ligne[etape.colonne] : null;
+  return valeur ? _chantierDe(etape.vers, valeur) : null;
+}
+
+/**
+ * Cloisonnement des chantiers AU SEIN d'une organisation.
+ *
+ * Un chantier issu du circuit de demande (`demandeurId` renseigné) n'est
+ * visible que de son demandeur, des rôles de GESTION et de ses membres —
+ * règle posée par `ChantierService._filtreCloisonnement` (liste) et
+ * `_peutVoir` (détail). Elle n'était appliquée QUE là : les réserves,
+ * documents, inspections, plans, médias, rapports et le tableau de bord d'un
+ * chantier caché restaient lisibles et modifiables par tout membre de
+ * l'organisation qui en connaissait l'identifiant (il fuit par les listes
+ * transversales).
+ *
+ * Tous ces contrôleurs passent par `organisationCible` : la règle est posée
+ * ici, une fois. S'y ajoute, par rapport à la liste, l'AFFECTATION à une
+ * réserve du chantier — un sous-traitant assigné doit pouvoir atteindre la
+ * réserve qu'on lui confie sans être membre du chantier.
+ *
+ * « Introuvable » plutôt qu'« interdit » : même réponse que le détail, qui ne
+ * confirme pas l'existence du chantier d'un tiers.
+ */
+async function _verifierCloisonnement(user, cible) {
+  if (!user || !user.id || estSuperAdmin(user) || GESTION.includes(user.role)) return;
+
+  const entree = Object.entries(cible).find(([type, id]) => id && (type === 'chantierId' || CHAINE[type]));
+  if (!entree) return;
+
+  const chantierId = await _chantierDe(entree[0], entree[1]);
+  if (!chantierId) return;
+
+  const chantier = await models.Chantier.findByPk(chantierId, {
+    attributes: ['id', 'organisationId', 'demandeurId'],
+    paranoid: false,
+  });
+  // Chantier absent ou d'une autre organisation : le service répondra
+  // « introuvable » avec son propre filtre, rien à ajouter ici.
+  if (!chantier || String(chantier.organisationId) !== String(user.organisationId)) return;
+  if (!chantier.demandeurId || String(chantier.demandeurId) === String(user.id)) return;
+
+  const membre = await models.ChantierMembre.count({ where: { chantierId, utilisateurId: user.id } });
+  if (membre > 0) return;
+
+  const assigne = await models.Reserve.count({ where: { chantierId, assigneA: user.id } })
+    || await models.ReserveAffectation.count({
+      where: { utilisateurId: user.id },
+      include: [{ model: models.Reserve, as: 'reserve', where: { chantierId }, attributes: [] }],
+    });
+  if (assigne > 0) return;
+
+  throw new NotFoundError('Chantier introuvable');
+}
 
 /** Remonte la chaîne jusqu'à l'`organisationId` du chantier propriétaire. */
 async function _remonter(type, id) {
@@ -66,7 +131,10 @@ async function _remonter(type, id) {
  * @returns {Promise<string|null>} organisationId à passer au service
  */
 async function organisationCible(req, cible = {}) {
-  if (!estSuperAdmin(req.user)) return req.user.organisationId;
+  if (!estSuperAdmin(req.user)) {
+    await _verifierCloisonnement(req.user, cible);
+    return req.user.organisationId;
+  }
 
   // Déjà chargée par checkOrganisation sur les routes qui l'utilisent :
   // on évite une seconde lecture.
@@ -86,4 +154,6 @@ module.exports = {
   estSuperAdmin,
   organisationCible,
   organisationDuChantier,
+  // Exposé pour les services qui reçoivent un chantier hors de `organisationCible`.
+  verifierCloisonnement: _verifierCloisonnement,
 };

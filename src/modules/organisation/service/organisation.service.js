@@ -3,7 +3,7 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
-const { Utilisateur, Organisation, Equipe } = require('../../../models/index.js');
+const { Utilisateur, Organisation, Equipe, RefreshToken } = require('../../../models/index.js');
 const { bcryptConfig } = require('../../../config/security.js');
 const { storeFile } = require('../../../infrastructure/storage.service.js');
 const logger = require('../../../utils/logger.js');
@@ -20,6 +20,31 @@ const ROLES_IMPORT = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entr
 // Rôles qu'un membre peut attribuer/modifier au sein de son organisation
 // (le rôle 'Admin' = super-admin plateforme, jamais assignable ici).
 const ROLES_ORGANISATION = ['ChefProjet', 'ConducteurTravaux', 'BureauControle', 'Entreprise', 'Client', 'MaitreOuvrage', 'MaitreOeuvre', 'Pilote', 'SousTraitant'];
+
+/**
+ * RANG d'un rôle dans l'organisation — base des gardes d'élévation.
+ *
+ *   Admin (super-admin plateforme)  4  — jamais gérable depuis une organisation
+ *   Entreprise (titulaire)          3  — ouvre l'organisation, la paie (roles.js)
+ *   ChefProjet, MaitreOuvrage       2  — gestion de l'organisation
+ *   tous les autres                 1
+ *
+ * CORRECTIF (audit sécurité) : la garde précédente ne raisonnait qu'en
+ * « dans GESTION / hors GESTION ». Depuis que GESTION_MEMBRES vaut GESTION,
+ * TOUT appelant de ces routes est dans GESTION : la garde ne refusait plus
+ * jamais rien. Un chef de projet pouvait rétrograder, désactiver ou supprimer
+ * le titulaire qui l'a invité, ou se créer un compte `Entreprise` et
+ * récupérer ses droits.
+ *
+ * Règle : on n'attribue pas un rôle de rang SUPÉRIEUR au sien, et on n'agit
+ * pas sur un compte de rang supérieur au sien. À rang égal, rien ne change
+ * (deux chefs de projet se gèrent l'un l'autre, comme avant).
+ */
+const RANG_ROLE = { Admin: 4, Entreprise: 3, ChefProjet: 2, MaitreOuvrage: 2 };
+const rangRole = (role) => RANG_ROLE[role] || 1;
+
+/** Rôles qui gèrent l'organisation — GESTION sans le super-admin plateforme. */
+const ROLES_GESTIONNAIRES = GESTION.filter((r) => r !== 'Admin');
 
 /**
  * Envoie ses identifiants au nouveau membre, SANS jamais faire échouer sa
@@ -90,7 +115,12 @@ class OrganisationService {
     }
 
     const updates = {};
-    for (const champ of ['nom', 'raison_sociale', 'siret', 'num_tva', 'rccm', 'ninea', 'telephone', 'email', 'adresse', 'ville', 'pays', 'abonnement']) {
+    // `abonnement` n'est PLUS recopié (audit sécurité — mass assignment) :
+    // c'est le libellé de formule que lisent les statistiques et les filtres
+    // du super-admin. Une organisation se déclarait « Enterprise » d'une
+    // requête. La formule réelle vient des souscriptions (droits.service.js)
+    // et ne se modifie que par le paiement ou le super-admin.
+    for (const champ of ['nom', 'raison_sociale', 'siret', 'num_tva', 'rccm', 'ninea', 'telephone', 'email', 'adresse', 'ville', 'pays']) {
       if (data[champ] !== undefined) updates[champ] = data[champ];
     }
     if (updates.email) updates.email = updates.email.toLowerCase();
@@ -133,29 +163,53 @@ class OrganisationService {
   }
 
   /**
-   * Interdit d'attribuer un rôle plus puissant que le sien.
-   *
-   * Depuis que `GESTION_MEMBRES` ouvre la gestion des membres au rôle
-   * `Entreprise` (parité avec le mobile), bloquer le seul rôle `Admin` ne
-   * suffit plus : une entreprise pouvait se créer un compte `ChefProjet` ou
-   * `MaitreOuvrage`, en choisir le mot de passe, s'y connecter — et se
-   * retrouver avec les réglages de l'organisation, les filiales et les
-   * équipes, dont `roles.js` dit précisément qu'elle n'a rien à y faire.
-   *
-   * Les appelants DÉJÀ dans GESTION ne sont pas concernés : attribuer un rôle
-   * de gestion quand on en a un n'est pas une élévation.
+   * Interdit d'attribuer un rôle de rang SUPÉRIEUR au sien (voir `RANG_ROLE`).
    *
    * @param {string} roleAuteur — rôle du demandeur (`req.user.role`)
    * @param {string} roleVise   — rôle qu'il cherche à attribuer
    */
   static _refusElevation(roleAuteur, roleVise) {
     if (roleVise === undefined || roleVise === null) return null;
-    if (GESTION.includes(roleAuteur)) return null;
-    if (!GESTION.includes(roleVise)) return null;
+    if (rangRole(roleVise) <= rangRole(roleAuteur)) return null;
     return {
       success: false,
-      message: 'Vous ne pouvez pas attribuer un rôle de gestion de l’organisation.',
+      message: 'Vous ne pouvez pas attribuer un rôle de gestion de l’organisation supérieur au vôtre.',
     };
+  }
+
+  /**
+   * Interdit d'agir sur un compte hors de portée : un super-admin plateforme
+   * (quelle que soit l'organisation à laquelle il est rattaché), ou un compte
+   * de rang supérieur à celui du demandeur.
+   *
+   * @param {string|null} roleAuteur — rôle du demandeur ; absent (appel
+   *   interne) : seul le super-admin reste protégé.
+   * @param {{ role: string }} cible
+   */
+  static _refusSurCible(roleAuteur, cible) {
+    if (cible.role === 'Admin') {
+      return {
+        success: false,
+        message: "Ce compte est celui d'un administrateur de la plateforme : il ne se gère pas depuis une organisation.",
+      };
+    }
+    if (roleAuteur && rangRole(cible.role) > rangRole(roleAuteur)) {
+      return { success: false, message: 'Vous ne pouvez pas modifier ou retirer un compte de rang supérieur au vôtre.' };
+    }
+    return null;
+  }
+
+  /**
+   * Reste-t-il un AUTRE gestionnaire actif que `exclureId` dans l'organisation ?
+   *
+   * Désactiver, rétrograder ou supprimer le dernier laisse une organisation
+   * que plus personne ne peut administrer — ni inviter, ni payer.
+   */
+  static async _autreGestionnaireActif(organisationId, exclureId) {
+    const n = await Utilisateur.count({
+      where: { organisationId, statut: 'actif', role: ROLES_GESTIONNAIRES, id: { [Op.ne]: exclureId } },
+    });
+    return n > 0;
   }
 
   /**
@@ -263,6 +317,12 @@ class OrganisationService {
     });
     if (!utilisateur) return { success: false, message: 'Membre introuvable dans cette organisation' };
 
+    // Super-admin plateforme, ou compte de rang supérieur : hors de portée.
+    // Sans cette garde, un gestionnaire rétrogradait en `Client` un compte
+    // `Admin` rattaché à son organisation (seul le rôle VISÉ était contrôlé).
+    const refusCible = OrganisationService._refusSurCible(roleAuteur, utilisateur);
+    if (refusCible) return refusCible;
+
     // Même élévation par un autre chemin : promouvoir un membre existant vers
     // un rôle de gestion vaut création d'un tel compte.
     if (roleAuteur) {
@@ -291,22 +351,76 @@ class OrganisationService {
       if (telExist) return { success: false, message: 'Ce numéro de téléphone est déjà utilisé' };
     }
 
+    // Le dernier gestionnaire actif ne se désactive ni ne se rétrograde.
+    const perdLaGestion = utilisateur.statut === 'actif' && ROLES_GESTIONNAIRES.includes(utilisateur.role)
+      && ((data.statut !== undefined && data.statut !== 'actif')
+        || (data.role !== undefined && !ROLES_GESTIONNAIRES.includes(data.role)));
+    if (perdLaGestion && !(await OrganisationService._autreGestionnaireActif(organisationId, utilisateur.id))) {
+      return {
+        success: false,
+        message: "Ce compte est le dernier gestionnaire actif de l'organisation : nommez-en un autre avant de le retirer.",
+      };
+    }
+
+    // Réactiver consomme un siège : les comptes désactivés n'en occupent pas
+    // (droits.service.js#_compter). Sans ce contrôle, désactiver puis
+    // réactiver contournait le plafond d'utilisateurs de la formule.
+    if (data.statut === 'actif' && utilisateur.statut !== 'actif' && roleAuteur !== 'Admin') {
+      const DroitsService = require('../../subscription/service/droits.service.js');
+      const places = await DroitsService.verifierLimite(organisationId, 'utilisateurs', 1);
+      if (!places.autorise) {
+        return { success: false, message: "Réactivation impossible : le plafond d'utilisateurs actifs de votre abonnement est atteint." };
+      }
+    }
+
     const updates = {};
     for (const champ of ['nom', 'prenom', 'telephone', 'fonction', 'role', 'statut', 'permissions']) {
       if (data[champ] !== undefined) updates[champ] = data[champ];
     }
 
     await utilisateur.update(updates);
+
+    // Un compte désactivé perd ses sessions : le contrôle par requête
+    // (auth.middleware) le bloquait déjà, ceci retire en plus les refresh
+    // tokens devenus sans objet.
+    if (updates.statut !== undefined && updates.statut !== 'actif') {
+      await RefreshToken.update(
+        { revoked: true },
+        { where: { utilisateurId: utilisateur.id, revoked: false } }
+      );
+    }
     return { success: true, message: 'Membre mis à jour avec succès', utilisateur };
   }
 
-  static async supprimerMembre(organisationId, membreId) {
+  /**
+   * @param {string} organisationId
+   * @param {string} membreId
+   * @param {object|null} [auteur] — compte appelant (`req.user`) : sert aux
+   *   gardes de rang et d'auto-suppression. Absent (appel interne) : seul le
+   *   super-admin reste protégé.
+   */
+  static async supprimerMembre(organisationId, membreId, auteur = null) {
+    // Sa propre suppression passe par le profil (DELETE /account/delete-account),
+    // qui est le chemin RGPD prévu pour cela — pas par la gestion des membres.
+    if (auteur && String(auteur.id) === String(membreId)) {
+      return { success: false, message: 'Pour supprimer votre propre compte, passez par votre profil.' };
+    }
+
     const utilisateur = await Utilisateur.findOne({
       where: { id: membreId, organisationId },
     });
     if (!utilisateur) return { success: false, message: 'Membre introuvable dans cette organisation' };
     if (utilisateur.role === 'Admin') {
       return { success: false, message: 'Impossible de supprimer un compte Admin' };
+    }
+    const refusCible = OrganisationService._refusSurCible(auteur ? auteur.role : null, utilisateur);
+    if (refusCible) return refusCible;
+    if (utilisateur.statut === 'actif' && ROLES_GESTIONNAIRES.includes(utilisateur.role)
+      && !(await OrganisationService._autreGestionnaireActif(organisationId, utilisateur.id))) {
+      return {
+        success: false,
+        message: "Ce compte est le dernier gestionnaire actif de l'organisation : nommez-en un autre avant de le retirer.",
+      };
     }
 
     // RGPD art. 17 — ce chemin ne faisait qu'un `destroy()` paranoid : nom,
@@ -505,7 +619,28 @@ class OrganisationService {
    * Colonnes attendues : prenom, nom, email, telephone, fonction, role.
    * Les emails déjà existants sont ignorés (best-effort par ligne).
    */
-  static async importContacts(organisationId, buffer, roleDefaut = 'Client') {
+  /**
+   * @param {string} organisationId
+   * @param {Buffer} buffer
+   * @param {string} [roleDefaut] — rôle des lignes sans rôle reconnu. Vient
+   *   d'un champ multipart que AUCUN schéma ne valide.
+   * @param {object|null} [auteur] — compte appelant (`req.user`), pour la
+   *   garde de rang.
+   */
+  static async importContacts(organisationId, buffer, roleDefaut = 'Client', auteur = null) {
+    // CORRECTIF (audit sécurité — CRITIQUE) : `roleDefaut` était repris tel
+    // quel du formulaire. `role=Admin` dans la requête d'import créait autant
+    // de super-administrateurs PLATEFORME que de lignes du fichier — un
+    // gestionnaire d'organisation s'ouvrait toutes les organisations clientes.
+    if (!ROLES_IMPORT.includes(roleDefaut)) {
+      return { success: false, message: 'Rôle par défaut invalide pour un import de contacts.' };
+    }
+    const roleAuteur = auteur ? auteur.role : null;
+    if (roleAuteur) {
+      const refus = OrganisationService._refusElevation(roleAuteur, roleDefaut);
+      if (refus) return refus;
+    }
+
     let records;
     try {
       const { parse } = require('csv-parse/sync');
@@ -534,7 +669,23 @@ class OrganisationService {
       };
     }
 
+    // Sièges restants de la formule. La route ne vérifie que « un de plus »
+    // (le nombre de lignes n'est connu qu'ici) : sans ce budget, un seul
+    // import créait jusqu'à 500 comptes au-delà du plafond payé.
+    let placesRestantes = Infinity;
+    if (roleAuteur !== 'Admin') {
+      const DroitsService = require('../../subscription/service/droits.service.js');
+      const places = await DroitsService.verifierLimite(organisationId, 'utilisateurs', 0);
+      if (places.raison === 'SUBSCRIPTION_REQUIRED') {
+        return { success: false, message: 'Aucun abonnement actif. Souscrivez une formule pour importer des contacts.' };
+      }
+      if (places.limite !== null && places.limite !== undefined) {
+        placesRestantes = Math.max(0, places.limite - places.courant);
+      }
+    }
+
     const results = [];
+    let crees = 0;
     for (const row of records) {
       const email = (row.email || '').trim().toLowerCase();
       const nom = (row.nom || '').trim();
@@ -551,6 +702,16 @@ class OrganisationService {
       }
 
       const role = ROLES_IMPORT.includes(row.role) ? row.role : roleDefaut;
+      // Même règle de rang ligne par ligne : le fichier ne donne pas plus de
+      // droits que le formulaire d'ajout d'un membre.
+      if (roleAuteur && OrganisationService._refusElevation(roleAuteur, role)) {
+        results.push({ nom, prenom, email, statut: 'erreur', erreur: 'rôle supérieur au vôtre' });
+        continue;
+      }
+      if (crees >= placesRestantes) {
+        results.push({ nom, prenom, email, statut: 'erreur', erreur: "plafond d'utilisateurs de l'abonnement atteint" });
+        continue;
+      }
       const motDePasseTemporaire = crypto.randomBytes(6).toString('hex');
 
       await Utilisateur.create({
@@ -567,6 +728,7 @@ class OrganisationService {
         email_verifie: true,  // importé par un acteur de confiance de l'organisation
       });
 
+      crees += 1;
       results.push({ nom, prenom, email, role, statut: 'importe', motDePasseTemporaire });
     }
 

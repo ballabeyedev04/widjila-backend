@@ -11,10 +11,14 @@ const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
 const { OPERATIONNEL, PILOTAGE } = require('../../../config/roles.js');
 const validate = require('../../../middlewares/validate.middleware.js');
+const { envoiRapportRateLimit } = require('../../../middlewares/rateLimit.middleware.js');
 const { genererRapportSchema, envoyerRapportSchema } = require('../validation/rapport.validation.js');
 
 // Le chantierId est porté par l'URL → injecté dans le body avant validation Joi
 const injectChantierId = (req, res, next) => {
+  // Express 5 ne crée pas `req.body` pour une requête sans corps : l'écriture
+  // levait une TypeError, soit une 500 au lieu de la 422 de validation.
+  req.body = req.body || {};
   req.body.chantierId = req.params.chantierId;
   next();
 };
@@ -63,6 +67,7 @@ router.post(
   checkActiveUser,
   checkSubscription,
   requireRole(...PILOTAGE),
+  envoiRapportRateLimit,
   validate(envoyerRapportSchema),
   rapportController.envoyerRapport,
 );

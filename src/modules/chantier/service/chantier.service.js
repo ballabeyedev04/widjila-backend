@@ -261,6 +261,24 @@ class ChantierService {
     return Boolean(auteur && auteur.id && auteur.role !== 'Admin');
   }
 
+  /**
+   * Refus de trancher SA PROPRE demande.
+   *
+   * `ChefProjet` et `MaitreOuvrage` sont à la fois déposants et valideurs :
+   * sans cette garde, ils déposaient une demande puis la validaient eux-mêmes
+   * dans la foulée — le circuit ne contrôlait plus rien. Le super-admin
+   * plateforme n'est pas concerné : ses chantiers ne naissent jamais en
+   * attente (voir `_naitEnAttente`).
+   *
+   * @returns {string|null} Motif du refus, ou null si le verdict est permis.
+   */
+  static _refusVerdictSurSaDemande(chantier, valideur) {
+    if (!valideur || valideur.role === 'Admin') return null;
+    if (!chantier.demandeurId) return null;
+    if (String(chantier.demandeurId) !== String(valideur.id)) return null;
+    return 'Vous ne pouvez pas trancher votre propre demande de chantier : un autre valideur doit s’en charger.';
+  }
+
   // -------------------- VALIDER / REJETER UNE DEMANDE --------------------
   /**
    * Accepte une demande : le chantier devient réellement utilisable.
@@ -277,6 +295,9 @@ class ChantierService {
     if (!STATUT_CHANTIER_EN_DEMANDE.includes(chantier.statut)) {
       return { success: false, message: 'Ce chantier n’est pas en attente de validation' };
     }
+
+    const refus = ChantierService._refusVerdictSurSaDemande(chantier, valideur);
+    if (refus) return { success: false, message: refus };
 
     await chantier.update({
       statut: 'en_preparation',
@@ -356,6 +377,9 @@ class ChantierService {
     if (chantier.statut !== 'en_attente_validation') {
       return { success: false, message: 'Ce chantier n’est pas en attente de validation' };
     }
+
+    const refus = ChantierService._refusVerdictSurSaDemande(chantier, valideur);
+    if (refus) return { success: false, message: refus };
 
     await chantier.update({
       statut: 'rejete',
@@ -1145,6 +1169,34 @@ class ChantierService {
     return { success: true, membres: chantier.membres };
   }
 
+  /**
+   * Membres de l'organisation qui peuvent encore être affectés au chantier :
+   * comptes ACTIFS, pas encore affectés.
+   *
+   * Route dédiée plutôt que `GET /organisation/membres` : celle-ci est
+   * réservée à GESTION_MEMBRES, dont le maître d'œuvre ne fait pas partie —
+   * alors que c'est lui qui affecte les équipes à ses chantiers.
+   */
+  static async listCandidatsMembres(organisationId, chantierId) {
+    const chantier = await Chantier.findOne({
+      where: { id: chantierId, organisationId },
+      include: [{ model: Utilisateur, as: 'membres', attributes: ['id'], through: { attributes: [] } }],
+    });
+    if (!chantier) return { success: false, message: 'Chantier introuvable' };
+
+    const dejaAffectes = (chantier.membres || []).map((m) => m.id);
+    const candidats = await Utilisateur.findAll({
+      where: {
+        organisationId,
+        statut: 'actif',
+        ...(dejaAffectes.length ? { id: { [Op.notIn]: dejaAffectes } } : {}),
+      },
+      attributes: ['id', 'nom', 'prenom', 'role', 'photoProfil', 'fonction'],
+      order: [['nom', 'ASC'], ['prenom', 'ASC']],
+    });
+    return { success: true, candidats };
+  }
+
   /** Retire un membre d'un chantier. */
   static async retirerMembreChantier(organisationId, chantierId, membreId) {
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
@@ -1176,8 +1228,15 @@ class ChantierService {
    * Copie le chantier et toute sa décomposition (bâtiments → étages → zones,
    * lots). Les réserves, plans et documents ne sont PAS dupliqués
    * (chaque réserve est liée à une position et une version de plan).
+   *
+   * La copie est une CRÉATION de chantier : elle suit donc le même circuit que
+   * `creerChantier`. Elle naissait « en_preparation », sans demandeur — une
+   * entreprise obtenait ainsi un chantier actif en dupliquant sa propre
+   * demande, sans validation ni notification des valideurs.
+   *
+   * @param {object} [auteur]  Compte appelant, d'après le jeton.
    */
-  static async dupliquerChantier(organisationId, chantierId, { nom = null } = {}) {
+  static async dupliquerChantier(organisationId, chantierId, { nom = null } = {}, auteur = null) {
     const chantier = await Chantier.findOne({
       where: { id: chantierId, organisationId },
       include: [
@@ -1188,7 +1247,18 @@ class ChantierService {
         { model: Lot, as: 'lots' },
       ],
     });
-    if (!chantier) return { success: false, message: 'Chantier introuvable' };
+    // Même cloisonnement que le détail : on ne copie pas ce qu'on ne peut pas ouvrir.
+    if (!chantier || !ChantierService._peutVoir(chantier, auteur)) {
+      return { success: false, message: 'Chantier introuvable' };
+    }
+
+    // Une demande non tranchée n'est pas encore un chantier : la dupliquer
+    // produirait une seconde demande sans que la première ait été examinée.
+    if (STATUT_CHANTIER_EN_DEMANDE.includes(chantier.statut)) {
+      return { success: false, message: 'Une demande de chantier ne peut pas être dupliquée tant qu’elle n’a pas été validée.' };
+    }
+
+    const enAttente = ChantierService._naitEnAttente(auteur);
 
     // CORRECTIF (audit § 2) — duplication atomique.
     // Sans transaction, un échec au 3ᵉ bâtiment (contrainte, coupure DB…)
@@ -1210,7 +1280,8 @@ class ChantierService {
         date_fin: chantier.date_fin,
         responsableId: chantier.responsableId,
         budget: chantier.budget,
-        statut: 'en_preparation',
+        statut: enAttente ? 'en_attente_validation' : 'en_preparation',
+        demandeurId: enAttente ? auteur.id : null,
       }, { transaction: t });
 
       // Bâtiments → étages → zones
@@ -1247,7 +1318,29 @@ class ChantierService {
       throw err;
     }
 
-    return { success: true, message: 'Chantier dupliqué avec succès', chantier: nouveauChantier };
+    if (!enAttente) {
+      return { success: true, message: 'Chantier dupliqué avec succès', chantier: nouveauChantier };
+    }
+
+    // Même notification que `creerChantier`, après l'enregistrement.
+    const organisation = await Organisation.findByPk(organisationId, { attributes: ['id', 'nom'] });
+    const valideurs = await _valideursDe(organisationId);
+    await Promise.all(valideurs.map((v) => _notifier({
+      to: v.email,
+      variante: 'demande',
+      destinataire: v.prenom || v.nom || '',
+      chantierNom: nouveauChantier.nom,
+      chantierCode: nouveauChantier.code,
+      demandeurNom: [auteur.prenom, auteur.nom].filter(Boolean).join(' ') || '',
+      organisationNom: organisation?.nom || '',
+      chantierId: nouveauChantier.id,
+    })));
+
+    return {
+      success: true,
+      message: 'Copie du chantier envoyée — elle attend une validation',
+      chantier: nouveauChantier,
+    };
   }
 
   // -------------------- PHASES & PLANNING (module 3) --------------------

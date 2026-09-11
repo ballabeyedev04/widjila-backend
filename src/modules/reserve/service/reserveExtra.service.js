@@ -9,7 +9,10 @@ const {
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
+const nomFichierOriginal = require('../../../utils/nomFichierUpload.js');
+const { contentType } = require('../../../infrastructure/r2.service.js');
 const ReserveService = require('./reserve.service.js');
+const { PILOTAGE } = require('../../../config/roles.js');
 
 /**
  * Réserves — extensions module 5 : pièces jointes, affectations multiples,
@@ -46,14 +49,19 @@ class ReserveExtraService {
     const reserve = await ReserveExtraService._verifierReserve(organisationId, reserveId);
     if (!reserve) return { success: false, message: 'Réserve introuvable dans cette organisation' };
 
-    const url = await storeFile(fichier.buffer, fichier.originalname, 'reserves/pieces');
+    // Nom tel que l'utilisateur l'a vu — multer le lit en latin1 et abîmait
+    // les accents (voir utils/nomFichierUpload.js).
+    const nomFichier = nomFichierOriginal(fichier.originalname);
+    const url = await storeFile(fichier.buffer, nomFichier, 'reserves/pieces');
     let piece;
     try {
       piece = await PieceJointe.create({
         reserveId,
-        nom_fichier: fichier.originalname,
+        nom_fichier: nomFichier,
         fichier_url: url,
-        mime_type: fichier.mimetype || null,
+        // Type du fichier STOCKÉ (extension issue des magic bytes), pas celui
+        // annoncé par le client — même principe que la GED.
+        mime_type: contentType(url) !== 'application/octet-stream' ? contentType(url) : (fichier.mimetype || null),
         taille: fichier.size || null,
         uploaderId,
         checksum: crypto.createHash('sha256').update(fichier.buffer).digest('hex'),
@@ -108,9 +116,33 @@ class ReserveExtraService {
   }
 
   // -------------------- SIGNATURES (électroniques) --------------------
-  static async signer(organisationId, reserveId, { donnees, type = 'signature' }, utilisateurId) {
+  static async signer(organisationId, reserveId, { donnees, type = 'signature' }, utilisateurId, role = null) {
     const reserve = await ReserveExtraService._verifierReserve(organisationId, reserveId);
     if (!reserve) return { success: false, message: 'Réserve introuvable dans cette organisation' };
+
+    // Une signature de type « validation » ou « refus » est un VERDICT. Elle
+    // suit la même règle que le changement de statut (`STATUTS_CONTROLE`,
+    // reserve.service.js) : seuls les rôles de PILOTAGE le prononcent. Sans ce
+    // contrôle, un client, un pilote ou un sous-traitant apposait un « refus »
+    // ou une « validation » probante sur n'importe quelle réserve.
+    // La signature simple (prise de connaissance, levée constatée) reste
+    // ouverte à tous — c'est l'usage prévu pour le client.
+    if (type !== 'signature' && role && role !== 'Admin' && !PILOTAGE.includes(role)) {
+      return { success: false, message: 'Votre rôle ne permet pas de signer une validation ou un refus.' };
+    }
+
+    // Une personne ne signe qu'une fois un même type DANS L'ÉTAT COURANT de la
+    // réserve (double envoi, rafale). Borné à la dernière modification de la
+    // réserve : les cycles légitimes (refusée → corrigée → refusée à nouveau,
+    // validée → rouverte → validée) exigent une nouvelle signature.
+    const { Op } = require('sequelize');
+    const dejaSigne = await Signature.count({
+      where: {
+        cibleType: 'reserve', cibleId: reserveId, utilisateurId, type,
+        ...(reserve.updatedAt ? { createdAt: { [Op.gte]: reserve.updatedAt } } : {}),
+      },
+    });
+    if (dejaSigne > 0) return { success: false, message: 'Vous avez déjà signé cette réserve.' };
 
     // Signature + trace d'historique atomiques (audit § 2 / § 3) : une
     // signature électronique sans trace de qui l'a apposée et quand n'a aucune

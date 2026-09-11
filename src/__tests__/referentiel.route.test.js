@@ -37,6 +37,7 @@ jest.mock('../middlewares/rateLimit.middleware.js', () => {
     adminRateLimit: passe,
     otpEmailRateLimit: passe,
     authenticatedRateLimit: passe,
+    envoiRapportRateLimit: passe,
   };
 });
 

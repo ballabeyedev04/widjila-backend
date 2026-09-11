@@ -19,7 +19,7 @@ const {
   creerBatimentSchema, creerEtageSchema, creerZoneSchema, creerLotSchema,
   modifierBatimentSchema, modifierEtageSchema, modifierZoneSchema,
   dupliquerChantierSchema, creerPhaseSchema, modifierPhaseSchema,
-  rejeterChantierSchema,
+  rejeterChantierSchema, assignerMembresSchema,
 } = require('../validation/chantier.validation.js');
 
 // ── Chantiers ────────────────────────────────────────────────────────────────
@@ -126,6 +126,8 @@ router.post(
   checkSubscription,
   checkOrganisation(Chantier, 'organisationId'),
   requireRole(...OPERATIONNEL),
+  // Une copie est un chantier de plus : même plafond de formule que la création.
+  verifierLimite('chantiers'),
   validate(dupliquerChantierSchema),
   chantierController.dupliquerChantier
 );
@@ -273,12 +275,25 @@ router.get('/:id/lots', auth, checkActiveUser, checkSubscription, paginate(), ch
 // ── Affectation des membres au chantier (module 1) ───────────────────────────
 router.get('/:id/membres', auth, checkActiveUser, checkSubscription, paginate(), chantierController.listerMembresChantier);
 
+// Qui peut encore être affecté — mêmes rôles que l'affectation elle-même.
+// Sans cette route, le maître d'œuvre pouvait affecter mais pas voir qui :
+// la liste des membres de l'organisation est réservée à GESTION_MEMBRES.
+router.get(
+  '/:id/membres/candidats',
+  auth,
+  checkActiveUser,
+  checkSubscription,
+  requireRole('ChefProjet', 'MaitreOeuvre', TITULAIRE),
+  chantierController.listerCandidatsMembres
+);
+
 router.post(
   '/:id/membres',
   auth,
   checkActiveUser,
   checkSubscription,
   requireRole('ChefProjet', 'MaitreOeuvre', TITULAIRE),
+  validate(assignerMembresSchema),
   chantierController.assignerMembres
 );
 

@@ -173,9 +173,13 @@ class ReserveService {
       if (!e) return 'Étage non rattaché à ce chantier';
     }
     if (zoneId) {
+      // `required: true` sur l'étage — CORRECTIF (audit sécurité) : sans lui,
+      // le filtre `chantierId` ne portait que sur une jointure EXTERNE
+      // (`LEFT JOIN (etages INNER JOIN batiments …)`) et toute zone de la
+      // plateforme était acceptée, y compris celle d'une autre organisation.
       const z = await Zone.findOne({
         where: { id: zoneId },
-        include: [{ model: Etage, as: 'etage', include: [{ model: Batiment, as: 'batiment', where: { chantierId }, attributes: [] }] }],
+        include: [{ model: Etage, as: 'etage', required: true, attributes: [], include: [{ model: Batiment, as: 'batiment', where: { chantierId }, attributes: [] }] }],
       });
       if (!z) return 'Zone non rattachée à ce chantier';
     }
@@ -415,7 +419,74 @@ class ReserveService {
     // formaient trois écritures indépendantes : un échec sur la 2ᵉ laissait une
     // réserve sans position ni trace d'historique, en violation de la règle
     // « toute modification est historisée ».
-    const reserve = await _avecReessaiNumero(async () => {
+    let reserve;
+    try {
+      reserve = await ReserveService._creerDansTransaction(data, utilisateurId);
+    } catch (err) {
+      // CORRECTIF (audit synchronisation) — course entre deux envois du MÊME
+      // identifiant client. Le contrôle d'idempotence plus haut lit AVANT
+      // d'écrire : si la première requête n'a pas encore validé sa
+      // transaction, la seconde ne voit rien et heurte la clé primaire.
+      // L'erreur remontait en 409 ; le mobile la classait en refus définitif
+      // et effaçait de son cache une réserve pourtant bien créée.
+      const rejeu = await ReserveService._resoudreCollisionIdentifiant(err, data, organisationId);
+      if (!rejeu) throw err;
+      return rejeu;
+    }
+
+    // Notification métier (module 8) : HORS transaction, best-effort — une
+    // notification en échec ne doit jamais annuler la création de la réserve.
+    if (reserve.assigneA) {
+      await NotificationService.notifier({
+        utilisateurId: reserve.assigneA,
+        type: 'reserve.affectee',
+        titre: 'Réserve affectée',
+        message: `La réserve ${reserve.numero} « ${reserve.titre} » vous a été affectée sur ${chantier.nom}.`,
+        donnees: { reserveId: reserve.id, chantierId: chantier.id },
+      });
+    }
+
+    return { success: true, message: 'Réserve créée avec succès', reserve };
+  }
+
+  /**
+   * Collision d'unicité pendant une création : rejeu légitime, ou vraie erreur ?
+   *
+   * Ne répond un résultat QUE si l'appelant a fourni son propre identifiant et
+   * que la collision porte sur lui (clé primaire) — c'est la signature d'un
+   * rejeu hors ligne. Tout autre cas renvoie `null` : l'erreur d'origine doit
+   * alors remonter telle quelle, jamais être maquillée en succès.
+   *
+   * @returns {Promise<object|null>} Résultat de service, ou `null`.
+   */
+  static async _resoudreCollisionIdentifiant(err, data, organisationId) {
+    if (!data.id || !(err instanceof UniqueConstraintError) || _estCollisionNumero(err)) return null;
+
+    // `paranoid: false` : une réserve supprimée depuis garde sa ligne (et
+    // donc sa clé primaire). Sans cette option, on ne la verrait pas et on
+    // ne saurait pas expliquer le refus.
+    const existante = await Reserve.findOne({
+      where: { id: data.id },
+      paranoid: false,
+      include: [{ model: Chantier, as: 'chantier', attributes: ['organisationId'], paranoid: false }],
+    });
+    if (!existante) return null;
+
+    // Même règle que le contrôle d'idempotence : jamais de confirmation d'un
+    // identifiant appartenant à une autre organisation.
+    if (existante.chantier?.organisationId !== organisationId) {
+      return { success: false, message: 'Identifiant de reserve deja utilise' };
+    }
+    if (existante.deletedAt) {
+      return { success: false, message: 'Cette réserve a été supprimée entre-temps : elle ne peut pas être recréée.' };
+    }
+    logger.info(`[reserve] Création rejouée en concurrence (id ${data.id}) — réserve existante renvoyée`);
+    return { success: true, message: 'Reserve deja enregistree', reserve: existante, rejeu: true };
+  }
+
+  /** Réserve + position + historique, dans UNE transaction (avec réessai de numéro). */
+  static async _creerDansTransaction(data, utilisateurId) {
+    return _avecReessaiNumero(async () => {
       const t = await sequelize.transaction();
       try {
         const numero = await ReserveService._prochainNumero(data.chantierId, t);
@@ -452,6 +523,11 @@ class ReserveService {
             x: data.position.x,
             y: data.position.y,
             zoom: data.position.zoom ?? 1,
+            // CORRECTIF (audit synchronisation) — la page était validée par
+            // Joi puis IGNORÉE ici : toute réserve posée sur la page 7 d'un
+            // PDF était enregistrée sur la page 1. Le mobile, lui, gardait la
+            // page 7 : local et serveur divergeaient dès la création.
+            page: data.position.page ?? 1,
           }, { transaction: t });
         }
 
@@ -470,20 +546,6 @@ class ReserveService {
         throw err;
       }
     });
-
-    // Notification métier (module 8) : HORS transaction, best-effort — une
-    // notification en échec ne doit jamais annuler la création de la réserve.
-    if (reserve.assigneA) {
-      await NotificationService.notifier({
-        utilisateurId: reserve.assigneA,
-        type: 'reserve.affectee',
-        titre: 'Réserve affectée',
-        message: `La réserve ${reserve.numero} « ${reserve.titre} » vous a été affectée sur ${chantier.nom}.`,
-        donnees: { reserveId: reserve.id, chantierId: chantier.id },
-      });
-    }
-
-    return { success: true, message: 'Réserve créée avec succès', reserve };
   }
 
   // -------------------- CRÉER DES RÉSERVES EN SÉRIE (module 5) --------------------
@@ -756,11 +818,20 @@ class ReserveService {
    *   cela la liste transversale des réserves lui répondait toujours vide, la
    *   jointure filtrant sur son propre `organisationId` — c'est-à-dire `null`.
    *   Posé par le contrôleur d'après le rôle, JAMAIS d'après un paramètre client.
+   * @param {object|null} [auteur]  Compte appelant (`req.user`). Restreint la
+   *   liste aux chantiers qu'il a le droit d'ouvrir — voir
+   *   `ChantierService.filtreCloisonnement`. Sans lui (audit sécurité), un
+   *   sous-traitant ou un client listait les réserves, et le nom, de chantiers
+   *   demandés par d'autres qu'il ne pouvait pourtant pas ouvrir.
    */
   static async listToutesReserves(organisationId, {
     page = 1, limit = 20, statut, severite, priorite, chantierId, entrepriseId, assigneA, search,
     phaseId, corpsEtatId, partenaireId,
-  } = {}, { toutesOrganisations = false } = {}) {
+  } = {}, { toutesOrganisations = false } = {}, auteur = null) {
+    const cloisonnement = require('../../chantier/service/chantier.service.js').filtreCloisonnement(auteur);
+    const whereChantier = (toutesOrganisations && !organisationId) ? {} : { organisationId };
+    if (cloisonnement) Object.assign(whereChantier, cloisonnement);
+
     const where = {};
     if (statut) where.statut = statut;
     if (severite) where.severite = severite;
@@ -788,8 +859,9 @@ class ReserveService {
       include: [
         {
           model: Chantier, as: 'chantier', required: true, attributes: ['id', 'nom', 'code'],
-          // Filtre facultatif quand le super-admin cible une organisation précise.
-          where: (toutesOrganisations && !organisationId) ? {} : { organisationId },
+          // Organisation (facultative pour le super-admin qui cible une
+          // organisation précise) + cloisonnement par chantier de l'appelant.
+          where: whereChantier,
           include: [{ model: Organisation, as: 'organisation', attributes: ['id', 'nom'] }],
         },
         { model: Batiment, as: 'batiment', attributes: ['id', 'nom'] },
@@ -1023,6 +1095,16 @@ class ReserveService {
       if (!estAssigne) {
         return { success: false, message: 'Cette réserve ne vous est pas assignée.' };
       }
+    }
+
+    // CORRECTIF (audit synchronisation) — rejeu d'un changement DÉJÀ appliqué.
+    // Le mobile renvoie l'action quand la réponse s'est perdue ; le serveur
+    // voyait « corrigée → corrigée », hors matrice, et répondait 400. Le mobile
+    // en faisait un échec définitif pour un changement pourtant enregistré.
+    // Placé APRÈS les contrôles de droits : un rejeu ne contourne rien.
+    // Aucune écriture, aucun historique, aucune notification : rien n'a changé.
+    if (reserve.statut === statut) {
+      return { success: true, message: `Statut déjà à jour : ${statut}`, reserve, rejeu: true };
     }
 
     const statutsAutorises = TRANSITIONS[reserve.statut] || [];

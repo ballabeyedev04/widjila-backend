@@ -1,9 +1,13 @@
 'use strict';
 
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { Op } = require('sequelize');
-const { Utilisateur, Organisation } = require('../../../models/index.js');
+const { Utilisateur, Organisation, RefreshToken } = require('../../../models/index.js');
 const { bcryptConfig } = require('../../../config/security.js');
+const { sendNouveauMembreEmail } = require('../../../infrastructure/emailService.js');
+const { libelleRole } = require('../../../utils/libelleRole.js');
+const logger = require('../../../utils/logger.js');
 const AuditLogService = require('./auditLog.service.js');
 const AccountService = require('../../account/service/account.service.js');
 const { SAFE_USER_ATTRIBUTES } = require('../../../utils/formatUser.js');
@@ -82,9 +86,27 @@ class GestionUtilisateurService {
       return { success: false, message: "Sélectionnez une organisation : seul le rôle Admin (super-admin plateforme) peut exister sans organisation." };
     }
 
+    let org = null;
     if (data.organisationId) {
-      const org = await Organisation.findByPk(data.organisationId);
+      org = await Organisation.findByPk(data.organisationId);
       if (!org) return { success: false, message: 'Organisation introuvable' };
+    }
+
+    // Mot de passe : celui choisi par l'administrateur, sinon un mot de passe
+    // temporaire ALÉATOIRE, transmis une fois (courriel + réponse).
+    //
+    // CORRECTIF (audit sécurité) : le repli était une valeur LITTÉRALE écrite
+    // dans ce fichier. L'écran de la plateforme envoyait sa saisie sous une
+    // clé que le schéma ne connaît pas : elle était retirée par la validation,
+    // et chaque compte créé depuis l'interface — `Admin` compris — recevait ce
+    // même mot de passe public. `mdp_temporaire` n'étant qu'une indication
+    // pour les clients, connaître l'adresse d'un tel compte suffisait à s'y
+    // connecter.
+    let motDePasse = data.mot_de_passe;
+    let motDePasseTemporaire = null;
+    if (!motDePasse) {
+      motDePasseTemporaire = crypto.randomBytes(12).toString('base64url');
+      motDePasse = motDePasseTemporaire;
     }
 
     const utilisateur = await Utilisateur.create({
@@ -92,7 +114,7 @@ class GestionUtilisateurService {
       nom: data.nom,
       prenom: data.prenom,
       email: data.email,
-      mot_de_passe: await bcrypt.hash(data.mot_de_passe || 'Temp1234!', bcryptConfig.saltRounds),
+      mot_de_passe: await bcrypt.hash(motDePasse, bcryptConfig.saltRounds),
       telephone: data.telephone || null,
       fonction: data.fonction || null,
       role: roleCible,
@@ -103,16 +125,55 @@ class GestionUtilisateurService {
       // qu'on valide une demande qui n'existe pas.
       statut: data.statut || 'actif',
       permissions: data.permissions || null,
-      mdp_temporaire: true,   // mot de passe par défaut → rotation obligatoire au 1er login
+      mdp_temporaire: true,   // connu de l'administrateur → à changer au 1er login
       email_verifie: true,    // créé par un acteur de confiance (super-admin)
     });
 
+    // Le compte existe : une panne d'envoi ne doit pas le faire échouer (même
+    // règle que l'invitation d'un membre, organisation.service.js). Le
+    // résultat est renvoyé pour que l'écran sache s'il doit transmettre le
+    // mot de passe lui-même.
+    let emailEnvoye = false;
+    if (motDePasseTemporaire) {
+      try {
+        const envoi = await sendNouveauMembreEmail({
+          to: utilisateur.email,
+          prenom: utilisateur.prenom,
+          nom: utilisateur.nom,
+          auteurNom: [admin?.prenom, admin?.nom].filter(Boolean).join(' ').trim() || "L'administration",
+          organisationNom: org?.nom || 'SuivieChantier',
+          role: libelleRole(utilisateur.role),
+          motDePasse: motDePasseTemporaire,
+        });
+        emailEnvoye = envoi !== null;
+      } catch (err) {
+        logger.error(`[admin] Identifiants du nouveau compte non envoyés : ${err.message}`);
+      }
+    }
+
     await AuditLogService.logAction({
       admin, action: 'utilisateur.creation', cibleType: 'utilisateur',
-      cibleId: utilisateur.id, details: { email: utilisateur.email }, ip,
+      cibleId: utilisateur.id, details: { email: utilisateur.email, role: utilisateur.role }, ip,
     });
 
-    return { success: true, message: 'Utilisateur créé avec succès', utilisateur };
+    return {
+      success: true, message: 'Utilisateur créé avec succès', utilisateur, motDePasseTemporaire, emailEnvoye,
+    };
+  }
+
+  /**
+   * Reste-t-il un AUTRE administrateur plateforme actif que `exclureId` ?
+   *
+   * Le rôle `Admin` est le seul à valider les inscriptions, tarifer les
+   * formules et administrer les comptes. Désactiver, rétrograder ou supprimer
+   * le dernier ferme la plateforme à tout le monde — sans autre issue qu'une
+   * intervention directe en base.
+   */
+  static async _autreAdminActif(exclureId) {
+    const n = await Utilisateur.count({
+      where: { role: 'Admin', statut: 'actif', id: { [Op.ne]: exclureId } },
+    });
+    return n > 0;
   }
 
   // -------------------- MODIFIER UN UTILISATEUR --------------------
@@ -120,19 +181,66 @@ class GestionUtilisateurService {
     const utilisateur = await Utilisateur.findByPk(utilisateurId);
     if (!utilisateur) return { success: false, message: 'Utilisateur introuvable' };
 
+    // Un champ ne compte que s'il CHANGE : l'écran renvoie le formulaire
+    // complet (statut, organisation, email) même quand on ne corrige qu'un nom.
+    const normaliser = (v) => (v === '' || v === undefined ? null : v);
+    const change = (champ) => data[champ] !== undefined
+      && JSON.stringify(normaliser(data[champ])) !== JSON.stringify(normaliser(utilisateur[champ]));
+    const emailChange = Boolean(data.email) && data.email.trim().toLowerCase() !== utilisateur.email;
+
+    // ── Sur son propre compte ────────────────────────────────────────────
+    // `changerRole` et `supprimerUtilisateur` refusaient déjà d'agir sur soi ;
+    // cette route, non. Un admin pouvait s'y désactiver (seul admin : la
+    // plateforme n'a plus personne pour l'administrer), se rattacher à une
+    // organisation, ou changer son mot de passe et son adresse SANS fournir
+    // le mot de passe actuel — le premier geste d'une session volée qui veut
+    // s'installer. Ces changements passent par le profil (/account/*), qui
+    // exige le mot de passe actuel et ferme les autres sessions.
+    if (String(utilisateur.id) === String(admin?.id)) {
+      const sensibles = ['statut', 'permissions', 'organisationId'].filter(change);
+      if (sensibles.length || data.mot_de_passe || emailChange) {
+        return {
+          success: false,
+          message: 'Vous ne pouvez pas modifier votre propre statut, organisation, permissions, email ou mot de passe '
+            + "depuis l'administration. Utilisez votre profil.",
+        };
+      }
+    }
+
+    // ── Le dernier admin actif ───────────────────────────────────────────
+    if (utilisateur.role === 'Admin' && utilisateur.statut === 'actif' && change('statut')
+      && data.statut !== 'actif' && !(await GestionUtilisateurService._autreAdminActif(utilisateur.id))) {
+      return { success: false, message: 'Impossible de désactiver le dernier administrateur actif de la plateforme.' };
+    }
+
     const updates = {};
     for (const champ of ['nom', 'prenom', 'telephone', 'fonction', 'statut', 'permissions', 'organisationId']) {
       if (data[champ] !== undefined) updates[champ] = data[champ];
     }
-    if (data.email && data.email.trim().toLowerCase() !== utilisateur.email) {
+    if (emailChange) {
       const emailClean = data.email.trim().toLowerCase();
       const exist = await Utilisateur.findOne({ where: { email: emailClean } });
       if (exist) return { success: false, message: 'Cet email est déjà utilisé' };
       updates.email = emailClean;
     }
+
+    // ── Sessions de la cible ─────────────────────────────────────────────
+    // Redéfinir un mot de passe, c'est presque toujours reprendre la main sur
+    // un compte compromis. Les jetons déjà émis restaient pourtant valables :
+    // une heure pour l'accès, sept jours RENOUVELABLES pour le refresh. Même
+    // traitement que `account.service#resetPassword` : `token_version` périme
+    // les jetons d'accès, la révocation des refresh tokens empêche d'en
+    // obtenir d'autres. Une désactivation ferme aussi les sessions — le
+    // contrôle par requête (`auth.middleware`) la rendait déjà effective,
+    // ceci retire en plus les refresh tokens devenus sans objet.
+    let fermerSessions = false;
     if (data.mot_de_passe) {
       updates.mot_de_passe = await bcrypt.hash(data.mot_de_passe, bcryptConfig.saltRounds);
+      updates.mdp_temporaire = true; // connu de l'administrateur → à changer
+      updates.token_version = (utilisateur.token_version || 0) + 1;
+      fermerSessions = true;
     }
+    if (updates.statut !== undefined && updates.statut !== 'actif') fermerSessions = true;
 
     // Cet écran est la SECONDE porte d'entrée vers un compte actif : le
     // super-admin peut y débloquer une inscription en attente sans passer par
@@ -146,6 +254,12 @@ class GestionUtilisateurService {
     const t = await sequelize.transaction();
     try {
       await utilisateur.update(updates, { transaction: t });
+      if (fermerSessions) {
+        await RefreshToken.update(
+          { revoked: true },
+          { where: { utilisateurId: utilisateur.id, revoked: false }, transaction: t }
+        );
+      }
       if (activation) {
         // APRÈS l'écriture, à dessein : cet écran permet aussi de déplacer un
         // compte d'une organisation à l'autre. L'instance porte alors déjà la
@@ -160,7 +274,8 @@ class GestionUtilisateurService {
     }
 
     // Ne jamais journaliser le mot de passe (ni même son hash) dans l'audit
-    const { mot_de_passe: _ignore, ...detailsSurs } = updates;
+    const { mot_de_passe: _ignore, token_version: _tv, ...detailsSurs } = updates;
+    if (data.mot_de_passe) detailsSurs.motDePasseRedefini = true;
     await AuditLogService.logAction({
       admin, action: 'utilisateur.modification', cibleType: 'utilisateur',
       cibleId: utilisateur.id, details: detailsSurs, ip,
@@ -176,12 +291,20 @@ class GestionUtilisateurService {
     if (utilisateur.id === admin.id) {
       return { success: false, message: 'Vous ne pouvez pas modifier votre propre rôle' };
     }
+    if (utilisateur.role === 'Admin' && role !== 'Admin' && utilisateur.statut === 'actif'
+      && !(await GestionUtilisateurService._autreAdminActif(utilisateur.id))) {
+      return { success: false, message: 'Impossible de rétrograder le dernier administrateur actif de la plateforme.' };
+    }
 
+    // Lu AVANT l'écriture : l'audit inscrivait `utilisateur.role` APRÈS
+    // `update`, c'est-à-dire le nouveau rôle dans « ancien » — le journal
+    // disait « Admin → Admin » pour une promotion.
+    const ancienRole = utilisateur.role;
     await utilisateur.update({ role });
 
     await AuditLogService.logAction({
       admin, action: 'utilisateur.role.change', cibleType: 'utilisateur',
-      cibleId: utilisateur.id, details: { ancien: utilisateur.role, nouveau: role }, ip,
+      cibleId: utilisateur.id, details: { ancien: ancienRole, nouveau: role }, ip,
     });
 
     return { success: true, message: 'Rôle modifié avec succès', utilisateur };
@@ -208,6 +331,10 @@ class GestionUtilisateurService {
     if (!utilisateur) return { success: false, message: 'Utilisateur introuvable' };
     if (utilisateur.id === admin.id) {
       return { success: false, message: 'Vous ne pouvez pas supprimer votre propre compte' };
+    }
+    if (utilisateur.role === 'Admin' && utilisateur.statut === 'actif'
+      && !(await GestionUtilisateurService._autreAdminActif(utilisateur.id))) {
+      return { success: false, message: 'Impossible de supprimer le dernier administrateur actif de la plateforme.' };
     }
 
     // RGPD art. 17 — ce chemin ne faisait qu'un `destroy()` paranoid : nom,

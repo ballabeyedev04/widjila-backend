@@ -26,7 +26,15 @@ exports.creerUtilisateur = asyncHandler(async (req, res) => {
   res.status(201).json({
     success: true,
     message: result.message,
-    data: { utilisateur: formatUser(result.utilisateur) },
+    data: {
+      utilisateur: formatUser(result.utilisateur),
+      // Présents seulement quand le serveur a GÉNÉRÉ le mot de passe
+      // (aucun fourni) : seule occasion de le lire si le courriel n'est pas
+      // parti. Même contrat que l'ajout d'un membre d'organisation.
+      ...(result.motDePasseTemporaire
+        ? { motDePasseTemporaire: result.motDePasseTemporaire, emailEnvoye: result.emailEnvoye }
+        : {}),
+    },
   });
 });
 

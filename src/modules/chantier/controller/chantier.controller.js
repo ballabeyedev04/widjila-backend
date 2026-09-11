@@ -229,6 +229,13 @@ exports.listerMembresChantier = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: 'Membres récupérés', data: { membres: result.membres } });
 });
 
+/** Membres de l'organisation qu'on peut encore affecter à ce chantier. */
+exports.listerCandidatsMembres = asyncHandler(async (req, res) => {
+  const result = await ChantierService.listCandidatsMembres(await orgDuChantier(req), req.params.id);
+  if (!result.success) throw new BadRequestError(result.message);
+  res.status(200).json({ success: true, message: 'Candidats récupérés', data: { candidats: result.candidats } });
+});
+
 exports.retirerMembreChantier = asyncHandler(async (req, res) => {
   const result = await ChantierService.retirerMembreChantier(
     await orgDuChantier(req),
@@ -247,7 +254,8 @@ exports.listerMesChantiers = asyncHandler(async (req, res) => {
 
 // -------------------- MODULE 3 : DUPLICATION / PHASES / CALENDRIER --------------------
 exports.dupliquerChantier = asyncHandler(async (req, res) => {
-  const result = await ChantierService.dupliquerChantier(await orgDuChantier(req), req.params.id, req.body);
+  // L'auteur vient du JETON : la copie suit le circuit de validation, comme une création.
+  const result = await ChantierService.dupliquerChantier(await orgDuChantier(req), req.params.id, req.body, req.user);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(201).json({ success: true, message: result.message, data: { chantier: result.chantier } });
 });

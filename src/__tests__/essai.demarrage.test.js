@@ -33,7 +33,9 @@
 jest.mock('../models/index.js', () => ({
   Utilisateur: { findOne: jest.fn(), findByPk: jest.fn(), create: jest.fn(), count: jest.fn() },
   Organisation: { findOne: jest.fn(), findByPk: jest.fn(), create: jest.fn(), update: jest.fn() },
-  RefreshToken: { create: jest.fn(), destroy: jest.fn(), count: jest.fn() },
+  // `update` : une désactivation depuis l'écran « Utilisateurs » ferme
+  // désormais les sessions du compte (gestionUtilisateur.service.js).
+  RefreshToken: { create: jest.fn(), destroy: jest.fn(), count: jest.fn(), update: jest.fn() },
   MfaChallenge: {},
 }));
 

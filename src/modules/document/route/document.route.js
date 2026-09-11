@@ -27,8 +27,12 @@ router.post(
   checkActiveUser,
   checkSubscription,
   requireRole(...OPERATIONNEL_CONTROLE),
-  upload.single('fichier'),
-  upload.validateMagicBytes,
+  // Instance dédiée aux documents plutôt que `upload.single` : la GED reçoit
+  // aussi des formats bureautiques et DAO (Word, Excel, PowerPoint, DWG) et
+  // les vidéos déposées depuis le mobile, que le plafond de 5 Mo et la liste
+  // blanche globale refusaient. Contrôle par magic bytes + plafond par format.
+  upload.document('fichier'),
+  upload.validateDocument,
   injectChantierId,
   validate(uploadDocumentSchema),
   // Le type n'est plus une liste figée : il est vérifié contre le

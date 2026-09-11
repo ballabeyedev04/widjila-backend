@@ -5,6 +5,7 @@ const { Plan, Chantier, Annotation, Reserve, ReservePosition, Media, Organisatio
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
+const nomFichierOriginal = require('../../../utils/nomFichierUpload.js');
 const { OPERATIONNEL_CONTROLE } = require('../../../config/roles.js');
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -163,9 +164,30 @@ async function _dossierDuPlan(chantierId, rattachement) {
 }
 
 /**
- * Compte, pour une liste de plans, les DEUX nombres dont la navigation par
- * niveau a besoin : combien de sous-plans directs, et combien de réserves
- * posées.
+ * Statuts d'une réserve LEVÉE — la règle du rapport (`rapport.service.js`) et
+ * du tableau de bord : validée ou clôturée. Tout le reste — créée, affectée,
+ * en cours, refusée, rouverte, en retard… — reste à traiter.
+ */
+const STATUTS_LEVES = ['validee', 'cloturee'];
+
+/**
+ * Compte, pour une liste de plans, les nombres dont la navigation par niveau
+ * a besoin : combien de sous-plans directs, combien de réserves posées, et
+ * combien de celles-ci restent À TRAITER.
+ *
+ * ── Pourquoi « à traiter » à côté du total ────────────────────────────────
+ *
+ * Le total seul alarme pour rien : un appartement dont les dix réserves sont
+ * levées afficherait « 10 réserves », comme celui où tout reste à faire. Les
+ * deux nombres sortent de la MÊME requête (`COUNT(*) FILTER`), sans
+ * aller-retour de plus.
+ *
+ * ── Par VERSION ───────────────────────────────────────────────────────────
+ *
+ * Une réserve appartient à la version sur laquelle elle a été posée : un
+ * nouveau dépôt ne la déplace pas (`deposerVersion`). Chaque version porte
+ * donc SES compteurs — ceux de la version courante sont exactement les
+ * repères qu'on voit en l'ouvrant.
  *
  * ── Pourquoi le serveur, et pas le client ─────────────────────────────────
  *
@@ -195,19 +217,23 @@ async function _compterEnfants(plans) {
       { replacements: { ids }, type: QueryTypes.SELECT }
     ),
     sequelize.query(
-      'SELECT plan_id AS "planId", COUNT(*)::int AS total FROM reserves '
+      'SELECT plan_id AS "planId", COUNT(*)::int AS total, '
+      + 'COUNT(*) FILTER (WHERE statut NOT IN (:leves))::int AS "aTraiter" FROM reserves '
       + 'WHERE deleted_at IS NULL AND plan_id IN (:ids) GROUP BY plan_id',
-      { replacements: { ids }, type: QueryTypes.SELECT }
+      { replacements: { ids, leves: STATUTS_LEVES }, type: QueryTypes.SELECT }
     ),
   ]);
 
-  const parPlan = (lignes) => new Map(lignes.map((l) => [String(l.planId), Number(l.total) || 0]));
+  const parPlan = (lignes, champ = 'total') =>
+    new Map(lignes.map((l) => [String(l.planId), Number(l[champ]) || 0]));
   const nbSousPlans = parPlan(sousPlans);
   const nbReserves = parPlan(reserves);
+  const nbATraiter = parPlan(reserves, 'aTraiter');
 
   for (const plan of plans) {
     plan.dataValues.nombre_sous_plans = nbSousPlans.get(String(plan.id)) || 0;
     plan.dataValues.nombre_reserves = nbReserves.get(String(plan.id)) || 0;
+    plan.dataValues.nombre_reserves_a_traiter = nbATraiter.get(String(plan.id)) || 0;
   }
   return plans;
 }
@@ -448,7 +474,8 @@ class PlanService {
             type_plan: data.type_plan || null,
             date_plan: data.date_plan || null,
             page_count: data.page_count || null,
-            fichier_nom: fichier.originalname || null,
+            // Accents rétablis — multer lit le nom en latin1 (utils/nomFichierUpload.js).
+            fichier_nom: fichier.originalname ? nomFichierOriginal(fichier.originalname) : null,
             uploaderId: data.uploaderId || null,
             statut: statutPlan,
             // Le nouveau dépôt devient la version courante (cahier § 15).
@@ -499,6 +526,10 @@ class PlanService {
       include: [...INCLUDE_LOCALISATION, INCLUDE_HOTSPOTS],
       order: [['nom', 'ASC'], ['version', 'DESC']],
     });
+    // Les compteurs de réserves — « 5 réserves · 2 à traiter » — que le mobile
+    // affiche à côté de chaque plan de l'arborescence du plan global. Deux
+    // agrégats pour toute la liste, jamais une requête par plan.
+    await _compterEnfants(plans);
     return { success: true, plans };
   }
 
@@ -589,13 +620,19 @@ class PlanService {
    *   sur son propre `organisationId` — c'est-à-dire `null`. Posé par le
    *   contrôleur d'après le rôle, JAMAIS d'après un paramètre de requête.
    */
-  static async listTousPlans(organisationId, { chantierId } = {}, { toutesOrganisations = false } = {}) {
+  static async listTousPlans(organisationId, { chantierId } = {}, { toutesOrganisations = false, auteur = null } = {}) {
     const where = {};
     if (chantierId) where.chantierId = chantierId;
 
     // Filtre facultatif quand le super-admin cible une organisation précise.
     const whereChantier = {};
     if (!toutesOrganisations || organisationId) whereChantier.organisationId = organisationId;
+
+    // Même visibilité que la liste des chantiers. Require local : le service
+    // des chantiers dépend lui-même de modules qui chargent celui-ci.
+    // eslint-disable-next-line global-require
+    const cloisonnement = require('../../chantier/service/chantier.service.js').filtreCloisonnement(auteur);
+    if (cloisonnement) Object.assign(whereChantier, cloisonnement);
 
     const plans = await Plan.findAll({
       where,

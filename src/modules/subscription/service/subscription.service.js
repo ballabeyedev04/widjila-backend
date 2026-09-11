@@ -413,12 +413,36 @@ class SubscriptionService {
         organisationId: objet?.metadata?.organisationId || null,
       });
     } catch (err) {
-      if (err instanceof UniqueConstraintError) {
-        // Déjà reçu : on répond 2xx pour que le fournisseur cesse de réémettre.
-        logger.info(`[${fournisseur}] Événement déjà traité, ignoré : ${evenementId}`);
+      if (!(err instanceof UniqueConstraintError)) throw err;
+
+      // Déjà REÇU n'est pas déjà TRAITÉ. Un premier passage qui a ÉCHOUÉ
+      // (coupure base, verrou) laisse la ligne avec `traite_le` nul et
+      // `erreur` renseignée, puis répond 500 ; le fournisseur réémet — et
+      // cette réémission était classée « doublon » : le client avait payé,
+      // l'abonnement ne s'activait jamais.
+      //
+      // La reprise est RÉCLAMÉE atomiquement : seule la réémission qui efface
+      // l'erreur (UPDATE conditionnel, verrou de ligne) retraite. Un premier
+      // passage encore EN COURS n'a pas d'erreur — sa réémission concurrente
+      // est donc un doublon, et non un second traitement qui expirerait la
+      // souscription tout juste créée par le premier.
+      const [reprises] = await EvenementPaiement.update(
+        { erreur: null },
+        {
+          where: {
+            fournisseur,
+            evenement_id: evenementId,
+            traite_le: null,
+            erreur: { [require('sequelize').Op.ne]: null },
+          },
+        }
+      );
+      if (!reprises) {
+        logger.info(`[${fournisseur}] Événement déjà traité ou en cours, ignoré : ${evenementId}`);
         return { success: true, received: true, duplicate: true };
       }
-      throw err;
+      journal = await EvenementPaiement.findOne({ where: { fournisseur, evenement_id: evenementId } });
+      logger.warn(`[${fournisseur}] Événement ${evenementId} en échec précédemment — nouveau traitement`);
     }
 
     try {
@@ -452,12 +476,20 @@ class SubscriptionService {
         break;
 
       case 'invoice.paid':
-      case 'customer.subscription.updated':
         // Renouvellement d'un abonnement récurrent. Rattaché par le CLIENT
         // Stripe : contrairement au PaymentIntent, une facture ne porte pas
         // les métadonnées posées à la création — s'y fier laissait cette
         // branche sans effet.
+        //
+        // SEULE la facture payée prolonge. `customer.subscription.updated`
+        // partageait cette branche : un renouvellement ajoutait DEUX périodes
+        // (les deux événements arrivent), et un simple changement de carte ou
+        // de métadonnées prolongeait l'abonnement sans aucun encaissement.
         await SubscriptionService._prolongerParClient(objet.customer, objet.subscription || null);
+        break;
+
+      case 'customer.subscription.updated':
+        logger.info(`[paiement] Mise à jour d'abonnement Stripe reçue (sans effet sur la période) : ${objet.id}`);
         break;
 
       case 'customer.subscription.deleted':

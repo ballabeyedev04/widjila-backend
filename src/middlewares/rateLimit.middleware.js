@@ -72,7 +72,23 @@ const authenticatedRateLimit = rateLimit({
   keyGenerator: (req, res) => req.user?.id || ipKeyGenerator(req, res),
 });
 
+// Envoi de rapports par courriel — 10 envois / heure par UTILISATEUR.
+// Chaque envoi part jusqu'à 100 destinataires (50 À + 50 Cc) sous l'adresse
+// de la plateforme, avec objet et message libres : sans plafond dédié, seul le
+// filet global (1000 req / 15 min / IP) bornait un usage en relais de spam ou
+// d'hameçonnage. À placer APRÈS `auth`.
+const envoiRapportRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: parseInt(process.env.ENVOI_RAPPORT_MAX_HEURE || '10', 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: sharedStore('envoi-rapport'),
+  keyGenerator: (req, res) => req.user?.id || ipKeyGenerator(req, res),
+  message: { success: false, message: 'Trop d’envois de rapports. Réessayez dans une heure.' },
+});
+
 module.exports = {
   authRateLimit, sessionRateLimit, mutationRateLimit,
   adminRateLimit, otpEmailRateLimit, authenticatedRateLimit,
+  envoiRapportRateLimit,
 };

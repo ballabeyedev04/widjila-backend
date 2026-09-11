@@ -5,6 +5,8 @@ const { Document, Chantier, Signature, Utilisateur } = require('../../../models/
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
+const { contentType } = require('../../../infrastructure/r2.service.js');
+const nomFichierOriginal = require('../../../utils/nomFichierUpload.js');
 const escapeLike = require('../../../utils/escapeLike.js');
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -65,18 +67,29 @@ class DocumentService {
     const chantier = await Chantier.findOne({ where: { id: chantierId, organisationId } });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
+    // Nom tel que l'utilisateur l'a vu (accents rétablis, longueur bornée) —
+    // voir utils/nomFichierUpload.js. Il sert aussi de clé de versionnement.
+    const nomFichier = nomFichierOriginal(fichier.originalname);
+
     // Écriture disque avant la transaction ; fichier orphelin nettoyé si la
     // base refuse l'enregistrement (audit § 5).
-    const fichier_url = await storeFile(fichier.buffer, fichier.originalname, 'documents');
+    const fichier_url = await storeFile(fichier.buffer, nomFichier, 'documents');
+
+    // Type MIME du fichier STOCKÉ — son extension vient des magic bytes —
+    // plutôt que celui annoncé par le client : le mobile range ses onglets
+    // (photos, vidéos, documents) sur cette valeur, et un type générique
+    // envoyé par un téléphone aurait classé une vidéo parmi les documents.
+    const typeStocke = contentType(fichier_url);
+    const mime_type = typeStocke !== 'application/octet-stream' ? typeStocke : (fichier.mimetype || null);
 
     try {
       const document = await _avecReessaiVersion(async () => {
         const t = await sequelize.transaction();
         try {
-          await _verrouillerVersion(chantierId, fichier.originalname, t);
+          await _verrouillerVersion(chantierId, nomFichier, t);
 
           const max = await Document.max('version', {
-            where: { chantierId, nom_fichier: fichier.originalname },
+            where: { chantierId, nom_fichier: nomFichier },
             paranoid: false, // l'index unique compte aussi les versions supprimées
             transaction: t,
           });
@@ -85,9 +98,9 @@ class DocumentService {
           const cree = await Document.create({
             chantierId,
             type: data.type || 'autre',
-            nom_fichier: fichier.originalname,
+            nom_fichier: nomFichier,
             fichier_url,
-            mime_type: fichier.mimetype || null,
+            mime_type,
             taille: fichier.size || null,
             version,
             uploaderId: uploaderId || null,
@@ -161,6 +174,21 @@ class DocumentService {
     });
     if (!document) return { success: false, message: 'Document introuvable dans cette organisation' };
 
+    // Un document archivé est figé : le signer après coup fabriquerait une
+    // signature postérieure à sa mise hors circuit.
+    if (document.statut === 'archive') {
+      return { success: false, message: 'Un document archivé ne peut pas être signé.' };
+    }
+
+    // Une personne signe UNE fois. Sans ce contrôle, chaque appel ajoutait une
+    // signature (jusqu'à 512 Ko de tracé) — et surtout réécrivait le signataire.
+    const dejaSigne = await Signature.count({
+      where: { cibleType: 'document', cibleId: documentId, utilisateurId },
+    });
+    if (dejaSigne > 0) {
+      return { success: false, message: 'Vous avez déjà signé ce document.' };
+    }
+
     // CORRECTIF (audit § 2) — atomicité. `Signature.create` puis
     // `document.update` étaient deux écritures indépendantes : si la seconde
     // échouait, le document affichait « non signé » alors qu'une signature
@@ -178,10 +206,16 @@ class DocumentService {
         donnees: donnees || null,
       }, { transaction: t });
 
-      await document.update(
-        { signataireId: utilisateurId, signe_le: new Date() },
-        { transaction: t }
-      );
+      // Le PREMIER signataire reste celui du document. Il était écrasé à chaque
+      // nouvelle signature : n'importe quel membre remplaçait le signataire
+      // enregistré d'un PV ou d'un contrat déjà signé. Les signatures
+      // suivantes restent visibles dans la liste des signatures.
+      if (!document.signataireId) {
+        await document.update(
+          { signataireId: utilisateurId, signe_le: new Date() },
+          { transaction: t }
+        );
+      }
 
       await t.commit();
     } catch (err) {

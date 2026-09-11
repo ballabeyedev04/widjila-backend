@@ -121,6 +121,11 @@ class AccountService {
 
     const utilisateur = await Utilisateur.findOne({ where: { email: email.toLowerCase() } });
     if (!utilisateur || utilisateur.role === 'Admin') {
+      // Même COÛT que le chemin nominal (audit sécurité — énumération par
+      // durée). Le message était déjà identique, mais un compte existant
+      // déclenchait un hachage bcrypt (~250 ms) que l'absence de compte
+      // sautait : chronométrer la réponse suffisait à distinguer les deux.
+      await bcrypt.hash(AccountService._generateOtp(6), bcryptConfig.saltRounds);
       return { message: MESSAGE_GENERIQUE };
     }
 
@@ -131,7 +136,15 @@ class AccountService {
     await UserOtp.destroy({ where: { utilisateurId: utilisateur.id } });
     await UserOtp.create({ utilisateurId: utilisateur.id, otpHash, expiresAt });
 
-    await sendOtpEmail({ to: utilisateur.email, nom: utilisateur.prenom, otp });
+    // Envoi NON attendu (audit sécurité — énumération par erreur et par durée).
+    //
+    // Attendu, il posait deux problèmes : sa durée réseau ne s'appliquait
+    // qu'aux comptes existants, et son ÉCHEC — fournisseur de courriel en
+    // panne — faisait répondre 500 pour un compte existant contre 200 pour un
+    // compte inconnu. L'échec est journalisé côté serveur ; la réponse, elle,
+    // ne dit plus rien de l'existence du compte.
+    sendOtpEmail({ to: utilisateur.email, nom: utilisateur.prenom, otp })
+      .catch((err) => logger.error(`[forgotPassword] envoi du code impossible : ${err.message}`));
 
     return { message: MESSAGE_GENERIQUE };
   }
@@ -413,12 +426,22 @@ class AccountService {
     return { success: true, message: 'Session révoquée' };
   }
 
-  /** Révoque toutes les sessions de l'utilisateur. */
+  /**
+   * Révoque toutes les sessions de l'utilisateur.
+   *
+   * Révoquer les refresh tokens ne coupait que le RENOUVELLEMENT : un jeton
+   * d'accès volé restait valable jusqu'à son expiration (JWT_EXPIRES_IN),
+   * alors que « déconnecter tous les appareils » est précisément le geste
+   * d'un utilisateur qui soupçonne un vol. `token_version` périme à l'instant
+   * tous les jetons d'accès déjà signés (voir auth.middleware.js) — l'appareil
+   * courant compris, dont le refresh token vient de toute façon d'être révoqué.
+   */
   static async revokeAllSessions(userId) {
     await RefreshToken.update(
       { revoked: true },
       { where: { utilisateurId: userId, revoked: false } }
     );
+    await Utilisateur.increment('token_version', { where: { id: userId } });
     return { success: true, message: 'Toutes les sessions ont été révoquées' };
   }
 
