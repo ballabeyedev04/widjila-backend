@@ -18,6 +18,14 @@ const creerPaymentIntentSchema = Joi.object({
   planId: Joi.string().trim().pattern(/^[a-zA-Z0-9-]{1,36}$/).required(),
 });
 
+// Référence de session Checkout (`cs_test_…` / `cs_live_…`) ou de
+// PaymentIntent (`pi_…`), facultative. Bornée : c'est un identifiant Stripe,
+// pas un texte libre.
+const etatPaiementSchema = Joi.object({
+  reference: Joi.string().trim().pattern(/^(cs|pi)_[A-Za-z0-9_]{1,120}$/).optional(),
+});
+
 module.exports = {
   creerPaymentIntentSchema,
+  etatPaiementSchema,
 };

@@ -1,6 +1,6 @@
 'use strict';
 
-const { creerPaymentIntentSchema } = require('../modules/subscription/validation/subscription.validation.js');
+const { creerPaymentIntentSchema, etatPaiementSchema } = require('../modules/subscription/validation/subscription.validation.js');
 
 /**
  * Le schéma de `POST /abonnement/payment-intent` figeait trois codes
@@ -33,5 +33,19 @@ describe('creerPaymentIntentSchema — identifiant OU code de formule', () => {
     expect(creerPaymentIntentSchema.validate({ planId: 'a'.repeat(37) }).error).toBeDefined();
     expect(creerPaymentIntentSchema.validate({ planId: 'pro; DROP TABLE' }).error).toBeDefined();
     expect(creerPaymentIntentSchema.validate({}).error).toBeDefined();
+  });
+});
+
+describe('etatPaiementSchema — la référence de session est un identifiant Stripe, pas un texte libre', () => {
+  it.each(['cs_test_a1B2c3D4e5', 'cs_live_x9', 'pi_3Nabc123'])('accepte %s', (reference) => {
+    expect(etatPaiementSchema.validate({ reference }).error).toBeUndefined();
+  });
+
+  it('accepte l’absence de référence (dernier paiement de l’organisation)', () => {
+    expect(etatPaiementSchema.validate({}).error).toBeUndefined();
+  });
+
+  it.each(['', 'abc', "cs_test_1' OR 1=1", 'cs_' + 'a'.repeat(200), 'sub_123'])('refuse « %s »', (reference) => {
+    expect(etatPaiementSchema.validate({ reference }).error).toBeDefined();
   });
 });

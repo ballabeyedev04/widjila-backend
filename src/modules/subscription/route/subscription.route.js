@@ -9,7 +9,7 @@ const { rawBodyMiddleware } = require('../../../middlewares/rawBody.middleware.j
 const validate = require('../../../middlewares/validate.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const { FACTURATION } = require('../../../config/roles.js');
-const { creerPaymentIntentSchema } = require('../validation/subscription.validation.js');
+const { creerPaymentIntentSchema, etatPaiementSchema } = require('../validation/subscription.validation.js');
 
 // ── Page d'abonnement (accessible même sans abonnement) ─────────────────────────
 // Plans publics
@@ -48,6 +48,30 @@ router.post(
   requireRole(...FACTURATION),
   validate(creerPaymentIntentSchema),
   subscriptionController.creerPaymentIntent
+);
+
+// ── Session Stripe Checkout (page de paiement hébergée) ─────────────────────────
+// Le parcours du web — et du mobile, qui ouvre le web. Même groupe que la
+// PaymentIntent : engager une dépense relève de la facturation.
+router.post(
+  '/checkout-session',
+  auth,
+  checkActiveUser,
+  requireRole(...FACTURATION),
+  validate(creerPaymentIntentSchema),
+  subscriptionController.creerCheckoutSession
+);
+
+// ── État d'un paiement (retour de Stripe) ───────────────────────────────────────
+// Lecture seule, cloisonnée à l'organisation du jeton. Ouverte à tout membre
+// actif : savoir si « la formule est passée » intéresse toute l'équipe, et la
+// réponse ne contient rien de plus que `/droits`.
+router.get(
+  '/paiement/etat',
+  auth,
+  checkActiveUser,
+  validate(etatPaiementSchema, 'query'),
+  subscriptionController.getEtatPaiement
 );
 
 // ── Changement de plan (abonnement existant) ────────────────────────────────────

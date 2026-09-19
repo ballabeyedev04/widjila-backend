@@ -24,10 +24,12 @@ const DroitsService = require('./droits.service.js');
  * ici depuis la base. Un prix modifié dans le navigateur n'a aucun effet.
  *
  * ── Le paiement n'active rien à lui seul ──────────────────────────────────
- * `creerPaymentIntent` n'écrit qu'une souscription `en_attente`. Seul le
- * WEBHOOK, dont la signature est vérifiée, la fait passer à `active`. Un
- * client qui abandonne le paiement — ou qui appelle l'API directement — ne
- * s'attribue donc rien.
+ * `creerCheckoutSession` (page Stripe hébergée — le parcours du web et du
+ * mobile) comme `creerPaymentIntent` n'écrivent qu'une souscription
+ * `en_attente`. Seul le WEBHOOK, dont la signature est vérifiée, la fait
+ * passer à `active`, après avoir comparé le montant encaissé au prix figé.
+ * Un client qui abandonne le paiement, qui revient sur la page de succès
+ * sans avoir payé, ou qui appelle l'API directement, ne s'attribue rien.
  */
 
 /**
@@ -315,6 +317,118 @@ class SubscriptionService {
    * Stripe les collecte directement depuis le client via le `clientSecret`.
    */
   static async creerPaymentIntent(organisationId, planId, utilisateurId = null) {
+    const preparation = await SubscriptionService._preparerPaiement(organisationId, planId);
+    if (!preparation.success) return preparation;
+    const { plan, org, customerId, prix, montant } = preparation;
+    const stripe = requireStripe();
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: montant,
+      currency: (plan.devise || 'EUR').toLowerCase(),
+      customer: customerId,
+      automatic_payment_methods: { enabled: true },
+      // Ces métadonnées sont ce que le webhook relira : sans elles, un
+      // paiement confirmé n'aurait plus de destinataire.
+      metadata: {
+        organisationId: org.id,
+        planId: plan.id,
+        planCode: plan.code,
+      },
+    });
+
+    await SubscriptionService._creerSouscriptionEnAttente({
+      org, plan, prix, customerId, utilisateurId, reference: paymentIntent.id,
+    });
+
+    return {
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      montant,
+      devise: plan.devise,
+      plan: vuePublique(plan),
+    };
+  }
+
+  /**
+   * Crée une session Stripe CHECKOUT pour une formule — la page de paiement
+   * hébergée par Stripe.
+   *
+   * C'est le parcours du web et, à travers lui, du mobile. Aucune donnée de
+   * carte ne transite ni par le backend ni par nos pages : Stripe collecte
+   * tout sur sa propre page, avec ses propres protections (3-D Secure,
+   * détection de fraude, moyens de paiement locaux).
+   *
+   * Comme pour la PaymentIntent, RIEN n'est accordé ici : la souscription
+   * naît `en_attente`, référencée par l'identifiant de session (`cs_…`), et
+   * seul le webhook `checkout.session.completed` — signé, avec le montant
+   * réellement encaissé — la fera passer à `active`. Le retour de
+   * l'utilisateur sur `success_url` n'est pas une preuve de paiement et
+   * n'active rien ; la page ne fait qu'interroger l'état.
+   *
+   * @returns {{ url: string, sessionId: string }} l'adresse vers laquelle
+   *   rediriger l'utilisateur, et la référence à interroger au retour.
+   */
+  static async creerCheckoutSession(organisationId, planId, utilisateurId = null) {
+    const preparation = await SubscriptionService._preparerPaiement(organisationId, planId);
+    if (!preparation.success) return preparation;
+    const { plan, org, customerId, prix, montant } = preparation;
+    const stripe = requireStripe();
+
+    const base = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const metadata = { organisationId: org.id, planId: plan.id, planCode: plan.code };
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      customer: customerId,
+      client_reference_id: org.id,
+      line_items: [{
+        quantity: 1,
+        price_data: {
+          currency: (plan.devise || 'EUR').toLowerCase(),
+          unit_amount: montant,
+          product_data: {
+            name: `Widjila — ${plan.nom}`,
+            description: plan.periode === 'an' ? 'Abonnement annuel' : 'Abonnement mensuel',
+          },
+        },
+      }],
+      metadata,
+      // Recopiées sur la PaymentIntent : le reçu Stripe et le tableau de
+      // bord Stripe montrent à qui et pour quoi.
+      payment_intent_data: { metadata },
+      // `{CHECKOUT_SESSION_ID}` est remplacé par Stripe : la page de retour
+      // sait ainsi QUEL paiement interroger, sans rien déduire elle-même.
+      success_url: `${base}/abonnement?paiement=retour&session={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${base}/abonnement?paiement=annule`,
+      // 35 minutes : une session abandonnée expire vite et sa souscription en
+      // attente est classée par le webhook `expired`. Stripe exige AU MOINS
+      // 30 minutes au moment où il reçoit la requête — 30 pile, moins le
+      // temps de trajet, serait refusé.
+      expires_at: Math.floor(Date.now() / 1000) + 35 * 60,
+      locale: 'auto',
+    });
+
+    await SubscriptionService._creerSouscriptionEnAttente({
+      org, plan, prix, customerId, utilisateurId, reference: session.id,
+    });
+
+    return {
+      success: true,
+      url: session.url,
+      sessionId: session.id,
+      montant,
+      devise: plan.devise,
+      plan: vuePublique(plan),
+    };
+  }
+
+  /**
+   * Ce qu'ont en commun les deux parcours de paiement : la formule (relue en
+   * base — le client n'envoie qu'un identifiant), l'organisation, son client
+   * Stripe et le montant dans l'unité de la devise.
+   */
+  static async _preparerPaiement(organisationId, planId) {
     // On accepte l'identifiant OU le code : le mobile et le web manipulent
     // naturellement `essentiel`/`pro`, l'administration des UUID.
     const plan = await PlanAbonnement.findOne({
@@ -356,22 +470,12 @@ class SubscriptionService {
     // franc CFA (voir DEVISES_SANS_DECIMALE).
     const montant = montantStripe(prix, plan.devise);
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: montant,
-      currency: (plan.devise || 'EUR').toLowerCase(),
-      customer: customerId,
-      automatic_payment_methods: { enabled: true },
-      // Ces métadonnées sont ce que le webhook relira : sans elles, un
-      // paiement confirmé n'aurait plus de destinataire.
-      metadata: {
-        organisationId: org.id,
-        planId: plan.id,
-        planCode: plan.code,
-      },
-    });
+    return { success: true, plan, org, customerId, prix, montant };
+  }
 
-    // Souscription EN ATTENTE : trace du parcours engagé, sans aucun droit.
-    await AbonnementSouscrit.create({
+  /** Souscription EN ATTENTE : trace du parcours engagé, sans aucun droit. */
+  static _creerSouscriptionEnAttente({ org, plan, prix, customerId, utilisateurId, reference }) {
+    return AbonnementSouscrit.create({
       organisationId: org.id,
       planAbonnementId: plan.id,
       plan_code: plan.code,
@@ -383,7 +487,7 @@ class SubscriptionService {
       periode: plan.periode,
       statut: 'en_attente',
       fournisseur: 'stripe',
-      reference_paiement: paymentIntent.id,
+      reference_paiement: reference,
       stripe_customer_id: customerId,
       // Qui engage la dépense : c'est à LUI que partira le reçu, pas à une
       // adresse générique. Sans cette trace, le justificatif ne pouvait aller
@@ -391,14 +495,48 @@ class SubscriptionService {
       // relève.
       activee_par: utilisateurId || null,
     });
+  }
 
+  /**
+   * État d'UN paiement, pour la page de retour et le mobile.
+   *
+   * Sans référence : la souscription la plus récente de l'organisation —
+   * c'est ce que le mobile interroge au retour du navigateur, lui qui n'a
+   * jamais vu l'identifiant de session. La réponse dit ce que le SERVEUR
+   * sait, et rien d'autre : `en_attente` tant que le webhook n'est pas passé,
+   * `active` ensuite, `echec` ou `annulee` sinon. Les droits courants
+   * l'accompagnent : c'est avec eux que l'écran se redessine.
+   *
+   * Cloisonnée : une référence d'une autre organisation est « introuvable ».
+   */
+  static async getEtatPaiement(organisationId, reference = null) {
+    if (!organisationId) return { success: false, message: 'Paiement introuvable', statusCode: 404 };
+
+    const souscription = await AbonnementSouscrit.findOne({
+      where: reference
+        ? { organisationId, reference_paiement: reference }
+        : { organisationId, fournisseur: 'stripe' },
+      order: [['createdAt', 'DESC']],
+    });
+    if (reference && !souscription) {
+      return { success: false, message: 'Paiement introuvable', statusCode: 404 };
+    }
+
+    const droits = await DroitsService.getDroits(organisationId);
     return {
       success: true,
-      clientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
-      montant,
-      devise: plan.devise,
-      plan: vuePublique(plan),
+      paiement: souscription ? {
+        reference: souscription.reference_paiement,
+        statut: souscription.statut,
+        planCode: souscription.plan_code,
+        planNom: souscription.plan_nom,
+        prix: souscription.prix_paye === null ? null : Number(souscription.prix_paye),
+        devise: souscription.devise,
+        creeLe: souscription.createdAt,
+        dateDebut: souscription.date_debut,
+        dateFin: souscription.date_fin,
+      } : null,
+      droits,
     };
   }
 
@@ -538,6 +676,40 @@ class SubscriptionService {
         await SubscriptionService._marquerEchec(objet.id);
         break;
 
+      // ── Stripe Checkout (page de paiement hébergée) ────────────────────
+      // La souscription est référencée par l'identifiant de SESSION. Le
+      // montant vérifié est `amount_total`, ce que Stripe a réellement
+      // encaissé pour cette session — et non ce que la page a demandé.
+      //
+      // `completed` arrive dès la fin du parcours ; pour un moyen de paiement
+      // différé (virement, prélèvement), `payment_status` y vaut encore
+      // `unpaid` et c'est `async_payment_succeeded` qui confirme plus tard.
+      // Activer sur `completed` sans regarder `payment_status` ouvrirait la
+      // formule avant l'encaissement.
+      case 'checkout.session.completed':
+      case 'checkout.session.async_payment_succeeded':
+        if (objet.payment_status === 'paid') {
+          await SubscriptionService._activerDepuisPaiement(
+            objet.id,
+            objet.customer,
+            { montantRecu: objet.amount_total, devise: objet.currency }
+          );
+        } else {
+          logger.info(`[paiement] Session Checkout ${objet.id} terminée, paiement ${objet.payment_status} — en attente`);
+        }
+        break;
+
+      case 'checkout.session.async_payment_failed':
+        await SubscriptionService._marquerEchec(objet.id);
+        break;
+
+      // Session abandonnée (30 min sans paiement) : la souscription en attente
+      // est classée, pour que « en attente » ne veuille jamais dire « peut-être
+      // payée ». Une souscription déjà active n'est pas touchée.
+      case 'checkout.session.expired':
+        await SubscriptionService._marquerAbandon(objet.id);
+        break;
+
       case 'invoice.paid':
         // Renouvellement d'un abonnement récurrent. Rattaché par le CLIENT
         // Stripe : contrairement au PaymentIntent, une facture ne porte pas
@@ -583,7 +755,11 @@ class SubscriptionService {
     });
 
     if (!souscription) {
-      logger.warn(`[paiement] Aucune souscription pour la référence ${referencePaiement}`);
+      // Cas normal avec Checkout : la souscription est référencée par la
+      // SESSION, et `payment_intent.succeeded` arrive aussi pour sa
+      // PaymentIntent. Ce n'est une anomalie que pour une référence d'un
+      // autre parcours.
+      logger.info(`[paiement] Aucune souscription pour la référence ${referencePaiement} — ignoré`);
       return;
     }
     // ── Le montant encaissé doit correspondre à la formule activée ─────────
@@ -716,6 +892,16 @@ class SubscriptionService {
     // renouvellement ne doit pas effacer le mois déjà payé.
     if (souscription && souscription.statut === 'en_attente') {
       await souscription.update({ statut: 'echec' });
+    }
+  }
+
+  /** Session Checkout expirée sans paiement : la souscription en attente est annulée. */
+  static async _marquerAbandon(referencePaiement) {
+    const souscription = await AbonnementSouscrit.findOne({
+      where: { reference_paiement: referencePaiement },
+    });
+    if (souscription && souscription.statut === 'en_attente') {
+      await souscription.update({ statut: 'annulee', note: 'Session de paiement expirée sans règlement.' });
     }
   }
 

@@ -75,7 +75,7 @@ describe('le groupe FACTURATION', () => {
 describe('les routes de facturation', () => {
   // Payer est le geste qui lève le mur de fin d'essai : c'est celui dont le
   // refus coûte le plus cher.
-  const routes = ['/historique', '/payment-intent', '/change-plan', '/cancel'];
+  const routes = ['/historique', '/payment-intent', '/checkout-session', '/change-plan', '/cancel'];
 
   it.each(routes)('%s est gardée par FACTURATION', (chemin) => {
     const bloc = blocDeRoute(chemin);
@@ -89,6 +89,16 @@ describe('les routes de facturation', () => {
     const bloc = blocDeRoute(chemin);
     expect(bloc).toContain('auth');
     expect(bloc).toContain('checkActiveUser');
+  });
+
+  it("l'état d'un paiement se lit avec un compte actif, sans rôle de facturation", () => {
+    // Savoir si « la formule est passée » intéresse toute l'équipe, et la
+    // réponse n'en dit pas plus que `/droits` — mais jamais sans session.
+    const bloc = blocDeRoute('/paiement/etat');
+    expect(bloc).not.toBeNull();
+    expect(bloc).toContain('auth');
+    expect(bloc).toContain('checkActiveUser');
+    expect(bloc).toContain("validate(etatPaiementSchema, 'query')");
   });
 
   it('le webhook Stripe reste hors de toute garde de rôle', () => {
@@ -109,8 +119,8 @@ describe('cloisonnement', () => {
     // n'importe quoi, et le test se croirait vert. Sans expression
     // rationnelle : une découpe simple se relit sans effort.
     const methodes = [
-      'getHistorique', 'creerPaymentIntent', 'changerPlan',
-      'annulerAbonnement', 'getStatus', 'getPlanDetails',
+      'getHistorique', 'creerPaymentIntent', 'creerCheckoutSession', 'getEtatPaiement',
+      'changerPlan', 'annulerAbonnement', 'getStatus', 'getPlanDetails',
     ];
 
     const appels = [];
@@ -124,7 +134,7 @@ describe('cloisonnement', () => {
       }
     }
 
-    expect(appels.length).toBeGreaterThanOrEqual(5);
+    expect(appels.length).toBeGreaterThanOrEqual(7);
     for (const appel of appels) {
       expect(appel).toContain('req.user.organisationId');
       expect(appel).not.toContain('req.body.organisationId');

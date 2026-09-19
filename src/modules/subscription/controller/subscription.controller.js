@@ -45,6 +45,56 @@ exports.creerPaymentIntent = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Session Stripe Checkout — la page de paiement hébergée par Stripe.
+ *
+ * Répond l'ADRESSE vers laquelle rediriger, et la référence de session que
+ * la page de retour interrogera. Rien d'autre : ni secret, ni montant à
+ * confirmer côté client.
+ */
+exports.creerCheckoutSession = asyncHandler(async (req, res) => {
+  const { planId } = req.body;
+  if (!planId) throw new BadRequestError('Plan requis');
+
+  const result = await SubscriptionService.creerCheckoutSession(
+    req.user.organisationId, planId, req.user.id
+  );
+  if (!result.success) throw new BadRequestError(result.message);
+
+  res.status(200).json({
+    success: true,
+    message: 'Session de paiement créée',
+    data: {
+      url: result.url,
+      sessionId: result.sessionId,
+      montant: result.montant,
+      devise: result.devise,
+    },
+  });
+});
+
+/**
+ * État d'un paiement — ce que le SERVEUR en sait, alimenté par le webhook.
+ *
+ * `?reference=cs_…` : la session dont la page de retour porte l'identifiant.
+ * Sans référence : le dernier paiement engagé par l'organisation, pour le
+ * mobile qui revient du navigateur. La réponse n'affirme jamais qu'un
+ * paiement a réussi tant que Stripe ne l'a pas confirmé.
+ */
+exports.getEtatPaiement = asyncHandler(async (req, res) => {
+  const result = await SubscriptionService.getEtatPaiement(
+    req.user.organisationId, req.query.reference || null
+  );
+  if (!result.success) {
+    return res.status(result.statusCode || 400).json({ success: false, message: result.message });
+  }
+  res.status(200).json({
+    success: true,
+    message: 'État du paiement',
+    data: { paiement: result.paiement, droits: result.droits },
+  });
+});
+
 exports.changerPlan = asyncHandler(async (req, res) => {
   const { planId } = req.body;
   if (!planId) throw new BadRequestError('Plan requis');
