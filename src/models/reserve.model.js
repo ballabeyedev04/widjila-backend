@@ -1,4 +1,4 @@
-const { DataTypes } = require('sequelize');
+const { DataTypes, Op } = require('sequelize');
 const sequelize = require('../config/db.js');
 
 /**
@@ -29,6 +29,17 @@ const Reserve = sequelize.define('Reserve', {
   numero: {
     type: DataTypes.STRING(20),
     allowNull: false
+  },
+  // Numéro PROPRE AU PLAN (1, 2, 3…) — attribué par le service à la création
+  // quand la réserve est posée sur un plan, nul sinon. C'est lui que le plan
+  // affiche sur chaque repère : `R-0031` ne dit pas à l'utilisateur laquelle
+  // des réserves de CE plan a été relevée en premier, « 3 » oui.
+  // Jamais réattribué (les lignes supprimées restent dans l'index unique), et
+  // jamais modifié par un changement de statut ou de contenu : il n'est
+  // recalculé que si la réserve change de plan. Voir l'index partiel plus bas.
+  numeroPlan: {
+    type: DataTypes.INTEGER,
+    allowNull: true
   },
   chantierId: {
     type: DataTypes.UUID,
@@ -108,7 +119,7 @@ const Reserve = sequelize.define('Reserve', {
     defaultValue: 'autre'
   },
   statut: {
-    type: DataTypes.ENUM('creee', 'affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier', 'validee', 'refusee', 'rouverte', 'en_retard', 'cloturee'),
+    type: DataTypes.ENUM('creee', 'affectee', 'prise_en_charge', 'en_cours', 'a_surveiller', 'a_echeance', 'corrigee', 'traitee', 'a_verifier', 'validee', 'levee', 'refusee', 'rouverte', 'en_retard', 'cloturee'),
     allowNull: false,
     defaultValue: 'creee'
   },
@@ -173,7 +184,15 @@ const Reserve = sequelize.define('Reserve', {
     { fields: ['corps_etat_id'] },
     { fields: ['phase_id'] },
     // Un numéro est unique DANS son chantier, pas dans toute la base.
-    { name: 'reserves_chantier_numero_unique', unique: true, fields: ['chantier_id', 'numero'] }
+    { name: 'reserves_chantier_numero_unique', unique: true, fields: ['chantier_id', 'numero'] },
+    // Un numéro de plan est unique DANS son plan. Partiel : les réserves sans
+    // plan n'y entrent pas.
+    {
+      name: 'reserves_plan_numero_plan_unique',
+      unique: true,
+      fields: ['plan_id', 'numero_plan'],
+      where: { plan_id: { [Op.ne]: null }, numero_plan: { [Op.ne]: null } }
+    }
   ]
 });
 

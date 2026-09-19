@@ -28,8 +28,8 @@ describe('§ 4 — les cinq statuts du rapport', () => {
   });
 
   it('traduit une sélection vers les statuts réels', () => {
-    expect(R.statutsReservePour(['A_CONTROLER'])).toEqual(['corrigee', 'a_verifier']);
-    expect(R.statutsReservePour(['LEVEE', 'CLOTUREE'])).toEqual(['validee', 'cloturee']);
+    expect(R.statutsReservePour(['A_CONTROLER'])).toEqual(['corrigee', 'traitee', 'a_verifier']);
+    expect(R.statutsReservePour(['LEVEE', 'CLOTUREE'])).toEqual(['validee', 'levee', 'cloturee']);
     // Une valeur inconnue n'élargit rien.
     expect(R.statutsReservePour(['INCONNU'])).toEqual([]);
   });

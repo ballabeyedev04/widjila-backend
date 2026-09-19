@@ -252,6 +252,14 @@ router.post(
 
 router.get('/reserves/:id/commentaires', auth, checkActiveUser, checkSubscription, paginate(), reserveController.listerCommentaires);
 
+// ── Historique des changements ───────────────────────────────────────────────
+// Chaque changement de statut est une ligne PERSISTÉE de `reserve_historiques`,
+// écrite dans la même transaction que le changement (voir
+// `ReserveService.changerStatut`). Cette route la sert normalisée : ancien
+// statut, nouveau statut, date serveur, auteur en nom complet — du plus
+// récent au plus ancien. Le client ne reconstruit rien depuis le statut courant.
+router.get('/reserves/:id/historique', auth, checkActiveUser, checkSubscription, reserveController.listerHistorique);
+
 // ── Médias (photo / vidéo / note vocale) ─────────────────────────────────────
 // Chaque média est horodaté (pris_le) et rattaché à sa réserve.
 //

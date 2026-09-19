@@ -96,7 +96,8 @@ describe('statsGlobales', () => {
 
     expect(stats.reserves).toEqual({ total: 10, ouvertes: 8, validees: 2, refusees: 1, enRetard: 4 });
     // « En retard » exclut les réserves fermées : les 2 échues validées ne comptent pas.
-    expect(stats.parStatut).toEqual({ creee: 3, validee: 2, refusee: 1, en_cours: 4 });
+    // Tous les statuts du catalogue sont servis, à zéro quand absents.
+    expect(stats.parStatut).toMatchObject({ creee: 3, validee: 2, refusee: 1, en_cours: 4, levee: 0, traitee: 0 });
     expect(stats.parSeverite).toEqual({ haute: 7, faible: 2, moyenne: 1 });
     expect(stats.parChantier).toEqual([
       { id: 'c1', nom: 'Tour A', code: 'TA', statut: 'en_cours', reserves: { total: 5, ouvertes: 3 }, batiments: 2 },
@@ -137,7 +138,8 @@ describe('statsChantier', () => {
     const { stats } = await DashboardService.statsChantier('org-1', 'c1');
 
     expect(stats.reserves).toEqual({ total: 10, ouvertes: 8, validees: 2, enRetard: 4 });
-    expect(stats.parStatut).toEqual({ creee: 3, validee: 2, refusee: 1, en_cours: 4 });
+    // Tous les statuts du catalogue sont servis, à zéro quand absents.
+    expect(stats.parStatut).toMatchObject({ creee: 3, validee: 2, refusee: 1, en_cours: 4, levee: 0, traitee: 0 });
     expect(stats.parSeverite).toEqual({ haute: 7, faible: 2, moyenne: 1 });
     expect(stats).toEqual(expect.objectContaining({ batiments: 2, plans: 5, inspections: 2, documents: 9 }));
   });

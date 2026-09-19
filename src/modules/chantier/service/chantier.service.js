@@ -10,7 +10,7 @@ const sequelize = require('../../../config/db.js');
 const NotificationService = require('../../notification/service/notification.service.js');
 const escapeLike = require('../../../utils/escapeLike.js');
 const { GESTION } = require('../../../config/roles.js');
-const { STATUT_CHANTIER_EN_DEMANDE } = require('../../../config/enums.js');
+const { STATUT_CHANTIER_EN_DEMANDE, STATUTS_RESERVE_FERMES } = require('../../../config/enums.js');
 const { sendChantierValidationEmail } = require('../../../infrastructure/emailService.js');
 const logger = require('../../../utils/logger.js');
 
@@ -44,8 +44,9 @@ async function _supprimerHotspotsDeLaStructure({ batimentIds, etageIds, zoneIds 
 // tant qu'il reste des réserves ouvertes (cf. changerStatut).
 const STATUTS_FERMETURE = ['cloture', 'archive'];
 
-// Statuts de réserve considérés comme soldés.
-const RESERVE_SOLDEE = ['validee', 'cloturee'];
+// Statuts de réserve considérés comme soldés — définition unique dans
+// `config/enums.js`.
+const RESERVE_SOLDEE = STATUTS_RESERVE_FERMES;
 
 /**
  * Restreint la visibilité aux chantiers qu'un compte a le droit de voir.
@@ -528,7 +529,7 @@ class ChantierService {
       const n = Number(c.n) || 0;
       statsMap[c.chantierId] = statsMap[c.chantierId] || { total: 0, ouvertes: 0, validees: 0 };
       statsMap[c.chantierId].total += n;
-      if (['validee', 'cloturee'].includes(c.statut)) statsMap[c.chantierId].validees += n;
+      if (RESERVE_SOLDEE.includes(c.statut)) statsMap[c.chantierId].validees += n;
       else statsMap[c.chantierId].ouvertes += n;
     }
 

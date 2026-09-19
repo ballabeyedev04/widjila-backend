@@ -6,6 +6,7 @@ const { Media, Reserve, Inspection, Chantier, ReserveAffectation } = require('..
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
 const logger = require('../../../utils/logger.js');
 const sequelize = require('../../../config/db.js');
+const { STATUTS_RESERVE_FERMES } = require('../../../config/enums.js');
 
 /**
  * Suppression de fichier « au mieux » : un nettoyage raté ne doit jamais
@@ -87,7 +88,7 @@ async function _dossierDuMedia(type, reserveId, inspectionId) {
 const TYPES_MEDIA = ['photo', 'video', 'audio'];
 
 // Statuts de réserve après verdict : leurs preuves sont figées.
-const STATUTS_RESERVE_FIGES = ['validee', 'cloturee'];
+const STATUTS_RESERVE_FIGES = STATUTS_RESERVE_FERMES;
 
 /** Nombre borné, ou null si absent ; `undefined` signale une valeur invalide. */
 function _nombre(valeur, min, max) {

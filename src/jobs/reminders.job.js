@@ -6,6 +6,7 @@ const { Reserve, Chantier, Utilisateur } = require('../models/index.js');
 const NotificationService = require('../modules/notification/service/notification.service.js');
 const logger = require('../utils/logger.js');
 const { envelopperJob } = require('../utils/executerJob.js');
+const { STATUTS_RESERVE_FERMES } = require('../config/enums.js');
 
 const HORIZON_J3_MS = 3 * 24 * 60 * 60 * 1000; // relance échéance à J-3
 const ESCALADE_J7_MS = 7 * 24 * 60 * 60 * 1000; // escalade après 7 j en retard
@@ -25,7 +26,7 @@ async function relancerEcheances() {
 
   const reserves = await Reserve.findAll({
     where: {
-      statut: { [Op.notIn]: ['validee', 'cloturee', 'refusee'] },
+      statut: { [Op.notIn]: [...STATUTS_RESERVE_FERMES, 'refusee'] },
       date_limite: {
         [Op.between]: [maintenant, j3], // échéance dans les 3 prochains jours
       },

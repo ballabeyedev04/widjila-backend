@@ -13,13 +13,17 @@ const escapeLike = require('../../../utils/escapeLike.js');
 const { PILOTAGE } = require('../../../config/roles.js');
 // Statuts du CIRCUIT de validation : un chantier qui les porte n'existe pas
 // encore comme chantier.
-const { STATUT_CHANTIER_EN_DEMANDE } = require('../../../config/enums.js');
+const {
+  STATUT_CHANTIER_EN_DEMANDE, STATUT_RESERVE, STATUTS_RESERVE_LEVEES, STATUTS_RESERVE_FERMES,
+  LIBELLE_STATUT_RESERVE,
+} = require('../../../config/enums.js');
 
 // ─── Statuts que le sous-traitant peut lui-même déclarer ───────────────────────
 // Il ne peut ni affecter (déjà fait par un rôle de pilotage), ni prononcer de
 // verdict (bloqué plus bas par STATUTS_CONTROLE), ni rouvrir. Seule sa propre
 // progression sur SA réserve assignée : accusé de réception, démarrage, fin.
-const STATUTS_SOUS_TRAITANT = ['prise_en_charge', 'en_cours', 'corrigee'];
+// `traitee` : même déclaration que `corrigee`, dans le vocabulaire du client.
+const STATUTS_SOUS_TRAITANT = ['prise_en_charge', 'en_cours', 'corrigee', 'traitee'];
 
 // ─── Transitions relevant du contrôle qualité ─────────────────────────────────
 // Le cahier des charges (tableau RBAC) réserve « Valider une réserve » à
@@ -35,39 +39,47 @@ const STATUTS_SOUS_TRAITANT = ['prise_en_charge', 'en_cours', 'corrigee'];
 // complet du cloisonnement ci-dessus. La réouverture est un acte de contrôle
 // (elle conteste une décision), pas un acte d'exécution : les actes légitimes
 // de l'entreprise restent `en_cours`, `corrigee` et `a_verifier`.
-const STATUTS_CONTROLE = ['validee', 'refusee', 'cloturee', 'rouverte'];
+//
+// `levee` est un verdict au même titre que `validee` : mêmes rôles.
+const STATUTS_CONTROLE = ['validee', 'levee', 'refusee', 'cloturee', 'rouverte'];
 
 // ─── Matrice des transitions de statut autorisées ──────────────────────────────
 // Cycle de vie (cahier des charges, module 5) :
 // creee → affectee → en_cours → corrigee → a_verifier → validee / refusee
 //       → (rouverte) → cloturee
-const TRANSITIONS = {
-  creee:           ['affectee', 'en_cours', 'rouverte'],
-  // `prise_en_charge` : étape optionnelle (accusé de réception du sous-traitant).
-  // `affectee → en_cours`/`corrigee` restent légaux pour les rôles qui ne
-  // l'utilisent pas — voir le commentaire de classe dans reserve.model.js.
-  affectee:        ['prise_en_charge', 'en_cours', 'corrigee', 'rouverte'],
-  prise_en_charge: ['en_cours', 'corrigee', 'rouverte'],
-  en_cours:        ['corrigee', 'a_verifier', 'rouverte'],
-  corrigee:        ['a_verifier', 'validee', 'refusee', 'rouverte'],
-  a_verifier:      ['validee', 'refusee', 'en_cours', 'rouverte'],
-  validee:         ['cloturee', 'rouverte'],
-  refusee:         ['en_cours', 'corrigee', 'rouverte'],
-  rouverte:        ['affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier'],
-  // Positionné automatiquement par le job (module 5) ; reprise du cycle normal.
-  //
-  // Ni `validee` ni `refusee` : le job ne marque en retard que du travail
-  // NON ENCORE déclaré fait (voir markReservesEnRetard.job.js). Un verdict
-  // direct depuis ce statut validait une réserve jamais corrigée — la photo de
-  // constat prise à la création suffisait comme « preuve ». La réserve repasse
-  // par `corrigee` / `a_verifier`, comme toutes les autres.
-  en_retard:       ['affectee', 'prise_en_charge', 'en_cours', 'corrigee', 'a_verifier', 'rouverte'],
-  cloturee:        [],
-};
+//
+// ── DÉCISION CLIENT (après recette) : le choix du statut est LIBRE ──────────
+// La matrice d'origine n'autorisait que l'étape suivante du cycle : depuis
+// « créée », l'écran n'offrait que trois statuts, et le client — qui suit ses
+// réserves par état (en retard, à surveiller, à échéance, traitée, refusée,
+// levée…) — ne retrouvait pas les siens. Toute réserve EN COURS DE VIE peut
+// désormais recevoir n'importe quel statut.
+//
+// Ce qui reste gardé, parce que ce sont des règles d'intégrité et non de
+// parcours :
+//   - `creee` n'est jamais une destination : c'est l'état initial ;
+//   - `cloturee` est TERMINAL et irréversible — on n'y entre qu'après un
+//     verdict positif (`validee` / `levee`), jamais par un choix malheureux
+//     dans une liste ;
+//   - un verdict positif ne se défait que par une RÉOUVERTURE explicite ;
+//   - les RÔLES (STATUTS_CONTROLE, STATUTS_SOUS_TRAITANT), les PREUVES exigées
+//     pour `validee` / `levee` et le MOTIF exigé pour `refusee` sont contrôlés
+//     dans `changerStatut`, indépendamment de cette matrice.
+//
+// `en_retard` reste posé chaque soir par le job des échéances, mais peut
+// aussi être choisi à la main.
+const STATUTS_DESTINATION_LIBRE = STATUT_RESERVE.filter((s) => s !== 'creee' && s !== 'cloturee');
+
+const TRANSITIONS = Object.fromEntries(STATUT_RESERVE.map((statut) => {
+  if (statut === 'cloturee') return [statut, []];
+  if (statut === 'validee') return [statut, ['levee', 'cloturee', 'rouverte']];
+  if (statut === 'levee') return [statut, ['cloturee', 'rouverte']];
+  return [statut, STATUTS_DESTINATION_LIBRE.filter((s) => s !== statut)];
+}));
 
 // Statuts figés : la réserve a reçu son verdict, elle n'est plus modifiable
 // (aligné sur la règle déjà appliquée par supprimerReserve).
-const STATUTS_FIGES = ['validee', 'cloturee'];
+const STATUTS_FIGES = STATUTS_RESERVE_FERMES;
 
 // Champs qu'une MODIFICATION peut écrire — et seuls ceux-là peuvent entrer en
 // conflit (voir `_conflitsModification`).
@@ -170,6 +182,50 @@ class ReserveService {
   static async _prochainNumero(chantierId, transaction) {
     const [numero] = await ReserveService._prochainsNumeros(chantierId, 1, transaction);
     return numero;
+  }
+
+  // -------------------- NUMÉRO PAR PLAN (1, 2, 3…) --------------------
+  /**
+   * Réserve `quantite` numéros consécutifs sur UN plan — le numéro que le
+   * plan affiche sur chaque repère.
+   *
+   * Indépendant par plan : le plan B repart à 1 quel que soit le nombre de
+   * réserves du plan A. Même mécanique que `_prochainsNumeros` (verrou
+   * consultatif porté par la transaction, SQL brut qui voit les lignes
+   * supprimées comme l'index unique `reserves_plan_numero_plan_unique`), pour
+   * les mêmes raisons : deux créations simultanées sur le même plan ne
+   * doivent pas lire le même MAX, et supprimer la dernière réserve ne doit
+   * pas faire retomber le calcul sur un numéro que l'index connaît encore.
+   *
+   * Conséquence assumée : un numéro n'est JAMAIS réattribué. Si la n°2 est
+   * supprimée, le plan garde 1, 3, 4 et la suivante prend 5. C'est ce qui
+   * rend le numéro fiable comme identifiant sur le terrain — « la 3 » reste
+   * la 3 sur le PV, dans les photos et dans les échanges.
+   *
+   * DOIT être appelé dans une transaction. Rend `[]` sans plan.
+   */
+  static async _prochainsNumerosPlan(planId, quantite = 1, transaction) {
+    if (!planId) return [];
+
+    await sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:cle)) AS verrou', {
+      replacements: { cle: `reserve:numeroPlan:${planId}` },
+      type: QueryTypes.SELECT,
+      transaction,
+    });
+
+    const [ligne] = await sequelize.query(
+      'SELECT COALESCE(MAX(numero_plan), 0) AS max FROM reserves WHERE plan_id = :planId',
+      { replacements: { planId }, type: QueryTypes.SELECT, transaction }
+    );
+
+    const max = Number(ligne && ligne.max) || 0;
+    return Array.from({ length: quantite }, (_, i) => max + 1 + i);
+  }
+
+  /** Raccourci — un seul numéro de plan, ou `null` sans plan. */
+  static async _prochainNumeroPlan(planId, transaction) {
+    const [numero] = await ReserveService._prochainsNumerosPlan(planId, 1, transaction);
+    return numero ?? null;
   }
 
   // -------------------- VÉRIFICATION DE COHÉRENCE DE LOCALISATION --------------------
@@ -527,12 +583,14 @@ class ReserveService {
       const t = await sequelize.transaction();
       try {
         const numero = await ReserveService._prochainNumero(data.chantierId, t);
+        const numeroPlan = await ReserveService._prochainNumeroPlan(data.planId, t);
 
         const creee = await Reserve.create({
           // `undefined` (et non `null`) quand le client n'en fournit pas :
           // Sequelize applique alors son `defaultValue: UUIDV4`.
           id: data.id || undefined,
           numero,
+          numeroPlan,
           chantierId: data.chantierId,
           batimentId: data.batimentId || null,
           etageId: data.etageId || null,
@@ -633,10 +691,12 @@ class ReserveService {
       const t = await sequelize.transaction();
       try {
         const numeros = await ReserveService._prochainsNumeros(data.chantierId, titres.length, t);
+        const numerosPlan = await ReserveService._prochainsNumerosPlan(data.planId, titres.length, t);
 
         const creees = await Reserve.bulkCreate(
           titres.map((titre, i) => ({
             numero: numeros[i],
+            numeroPlan: numerosPlan[i] ?? null,
             chantierId: data.chantierId,
             batimentId: data.batimentId || null,
             etageId: data.etageId || null,
@@ -725,8 +785,12 @@ class ReserveService {
       const t = await sequelize.transaction();
       try {
         const numero = await ReserveService._prochainNumero(reserve.chantierId, t);
+        // La copie est une NOUVELLE réserve du plan : elle prend le numéro
+        // suivant, l'originale garde le sien.
+        const numeroPlan = await ReserveService._prochainNumeroPlan(reserve.planId, t);
         const nouvelle = await Reserve.create({
           numero,
+          numeroPlan,
           chantierId: reserve.chantierId,
           batimentId: reserve.batimentId,
           etageId: reserve.etageId,
@@ -1157,37 +1221,51 @@ class ReserveService {
     // CORRECTIF (audit § 2) — modification + position + historique atomiques :
     // sans transaction, une réserve pouvait être modifiée sans que la trace
     // correspondante existe.
-    const t = await sequelize.transaction();
-    try {
-      await reserve.update(updates, { transaction: t });
+    // Le numéro de plan suit la réserve tant qu'elle reste sur son plan : ni
+    // le statut, ni le titre, ni la position ne le touchent. Seul un
+    // DÉPLACEMENT vers un autre plan en attribue un nouveau — sur le plan
+    // d'arrivée, à la suite des siens — et retirer la réserve de tout plan
+    // l'efface. Le réessai couvre la collision avec une création simultanée
+    // sur le plan d'arrivée.
+    const changeDePlan = updates.planId !== undefined
+      && String(updates.planId || '') !== String(reserve.planId || '');
 
-      // Position — mise à jour ou création
-      if (data.position) {
-        const [position] = await ReservePosition.findOrCreate({
-          where: { reserveId: reserve.id },
-          defaults: { x: data.position.x, y: data.position.y, zoom: data.position.zoom ?? 1 },
-          transaction: t,
-        });
-        await position.update(
-          { x: data.position.x, y: data.position.y, zoom: data.position.zoom ?? 1 },
-          { transaction: t }
-        );
+    await _avecReessaiNumero(async () => {
+      const t = await sequelize.transaction();
+      try {
+        if (changeDePlan) {
+          updates.numeroPlan = await ReserveService._prochainNumeroPlan(updates.planId, t);
+        }
+        await reserve.update(updates, { transaction: t });
+
+        // Position — mise à jour ou création
+        if (data.position) {
+          const [position] = await ReservePosition.findOrCreate({
+            where: { reserveId: reserve.id },
+            defaults: { x: data.position.x, y: data.position.y, zoom: data.position.zoom ?? 1 },
+            transaction: t,
+          });
+          await position.update(
+            { x: data.position.x, y: data.position.y, zoom: data.position.zoom ?? 1 },
+            { transaction: t }
+          );
+        }
+
+        // Historique de modification
+        await ReserveHistorique.create({
+          reserveId: reserve.id,
+          utilisateurId,
+          action: 'modification',
+          anciennes_valeurs: anciennes,
+          nouvelles_valeurs: updates,
+        }, { transaction: t });
+
+        await t.commit();
+      } catch (err) {
+        await t.rollback();
+        throw err;
       }
-
-      // Historique de modification
-      await ReserveHistorique.create({
-        reserveId: reserve.id,
-        utilisateurId,
-        action: 'modification',
-        anciennes_valeurs: anciennes,
-        nouvelles_valeurs: updates,
-      }, { transaction: t });
-
-      await t.commit();
-    } catch (err) {
-      await t.rollback();
-      throw err;
-    }
+    });
 
     return {
       success: true,
@@ -1200,10 +1278,10 @@ class ReserveService {
   /**
    * Règles métier appliquées :
    *   - transitions contrôlées par la matrice TRANSITIONS ;
-   *   - verdict (validee / refusee / cloturee / rouverte) réservé aux rôles de
-   *     pilotage ;
-   *   - passage à 'validee' : preuves de correction requises (médias),
-   *     enregistre validePar + date_validation ;
+   *   - verdict (validee / levee / refusee / cloturee / rouverte) réservé aux
+   *     rôles de pilotage ;
+   *   - passage à 'validee' ou 'levee' (STATUTS_RESERVE_LEVEES) : preuves de
+   *     correction requises (médias), enregistre validePar + date_validation ;
    *   - passage à 'refusee' : motif obligatoire.
    */
   static async changerStatut(organisationId, reserveId, statut, { motif }, utilisateurId, role) {
@@ -1264,8 +1342,11 @@ class ReserveService {
 
     let ancienStatut = reserve.statut;
     const updates = { statut };
+    // `validee` et `levee` sont le MÊME verdict positif (le second dans le
+    // vocabulaire du client) : mêmes preuves, même trace, mêmes compteurs.
+    const estLevee = STATUTS_RESERVE_LEVEES.includes(statut);
 
-    if (statut === 'validee') {
+    if (estLevee) {
       // Les preuves de correction sont exigées plus bas, SOUS LE VERROU : c'est
       // l'état au moment de l'écriture qui compte, pas celui d'une lecture
       // antérieure.
@@ -1281,7 +1362,7 @@ class ReserveService {
       updates.date_validation = null;
     }
 
-    if (statut !== 'validee' && statut !== 'refusee') {
+    if (!estLevee && statut !== 'refusee') {
       updates.validePar = null;
       updates.date_validation = null;
       updates.motif_refus = null;
@@ -1328,7 +1409,7 @@ class ReserveService {
         ancienStatut = verrouillee.statut;
       }
 
-      if (statut === 'validee') {
+      if (estLevee) {
         // Preuves de correction obligatoires — comptées dans la transaction.
         const preuves = await Media.count({ where: { reserveId: reserve.id }, transaction: t });
         if (preuves === 0) {
@@ -1345,9 +1426,11 @@ class ReserveService {
       await ReserveHistorique.create({
         reserveId: reserve.id,
         utilisateurId,
-        action: statut === 'refusee' ? 'refus' : statut === 'validee' ? 'validation' : 'statut',
+        action: statut === 'refusee' ? 'refus' : estLevee ? 'validation' : 'statut',
         anciennes_valeurs: { statut: ancienStatut },
-        nouvelles_valeurs: { statut },
+        // Le motif d'un refus fait partie de la décision : il se lit dans
+        // l'historique, pas seulement sur la fiche tant qu'elle reste refusée.
+        nouvelles_valeurs: statut === 'refusee' ? { statut, motif } : { statut },
       }, { transaction: t });
 
       await t.commit();
@@ -1363,7 +1446,7 @@ class ReserveService {
       await NotificationService.notifier({
         utilisateurId: dest,
         type: 'reserve.statut',
-        titre: `Réserve ${statut === 'validee' ? 'validée' : statut === 'refusee' ? 'refusée' : statut}`,
+        titre: `Réserve ${LIBELLE_STATUT_RESERVE[statut] || statut}`,
         message: `La réserve ${reserve.numero} « ${reserve.titre} » est passée au statut « ${statut} ».`,
         donnees: { reserveId: reserve.id, statut },
       });
@@ -1421,6 +1504,77 @@ class ReserveService {
       order: [['createdAt', 'ASC']],
     });
     return { success: true, commentaires };
+  }
+
+  // -------------------- HISTORIQUE DES CHANGEMENTS --------------------
+  /**
+   * L'historique d'une réserve, NORMALISÉ pour l'affichage.
+   *
+   * La table `reserve_historiques` est la trace de chaque écriture (règle
+   * « toute modification est historisée » : création, changement de statut,
+   * commentaire, affectation…), écrite dans la MÊME transaction que le
+   * changement qu'elle décrit. Elle stocke ses valeurs en JSON libre
+   * (`anciennes_valeurs` / `nouvelles_valeurs`) : le client devait fouiller
+   * chaque ligne pour savoir s'il s'agissait d'un changement de statut, et de
+   * quel statut vers lequel. Cette réponse tranche pour lui :
+   *
+   *   - `changementStatut` : vrai quand la ligne fait passer la réserve d'un
+   *     statut à un autre — création comprise (statut initial, sans ancien),
+   *     verdicts et passages automatiques en retard (auteur `null`) compris ;
+   *   - `ancienStatut` / `nouveauStatut` : les deux bornes du changement ;
+   *   - `utilisateur.nomComplet` : le nom lisible, « Balla BEYE », jamais un
+   *     identifiant ; `null` pour une action du système (job des échéances).
+   *
+   * Du plus récent au plus ancien : la dernière modification se lit en tête.
+   * Une ligne « statut → même statut » n'existe pas (rejeu idempotent, voir
+   * `changerStatut`) ; par sécurité elle ne serait de toute façon pas
+   * signalée comme changement.
+   */
+  static async listHistorique(organisationId, reserveId) {
+    const reserve = await Reserve.findByPk(reserveId, {
+      include: [{ model: Chantier, as: 'chantier', where: { organisationId } }],
+    });
+    if (!reserve) return { success: false, message: 'Réserve introuvable dans cette organisation' };
+
+    const lignes = await ReserveHistorique.findAll({
+      where: { reserveId },
+      include: [{ model: Utilisateur, as: 'utilisateur', attributes: ['id', 'nom', 'prenom'], required: false }],
+      order: [['createdAt', 'DESC'], ['id', 'DESC']],
+    });
+
+    const historique = lignes.map((l) => ReserveService._normaliserHistorique(l));
+    return { success: true, reserveId, historique };
+  }
+
+  /** Une ligne d'historique → l'entrée servie par `GET /reserves/:id/historique`. */
+  static _normaliserHistorique(ligne) {
+    const anciennes = ligne.anciennes_valeurs || {};
+    const nouvelles = ligne.nouvelles_valeurs || {};
+    const nouveauStatut = typeof nouvelles.statut === 'string' ? nouvelles.statut : null;
+    const ancienStatut = typeof anciennes.statut === 'string' ? anciennes.statut : null;
+    const changementStatut = nouveauStatut !== null && nouveauStatut !== ancienStatut;
+
+    const u = ligne.utilisateur;
+    const utilisateur = u
+      ? {
+        id: u.id,
+        nom: u.nom || '',
+        prenom: u.prenom || '',
+        nomComplet: [u.prenom, u.nom].filter(Boolean).join(' ').trim(),
+      }
+      : null;
+
+    return {
+      id: ligne.id,
+      action: ligne.action,
+      date: ligne.createdAt,
+      utilisateur,
+      changementStatut,
+      ancienStatut: changementStatut ? ancienStatut : null,
+      nouveauStatut: changementStatut ? nouveauStatut : null,
+      // Le motif d'un refus, ou celui posé par le job des échéances.
+      motif: typeof nouvelles.motif === 'string' ? nouvelles.motif : null,
+    };
   }
 
   // -------------------- SUPPRIMER UNE RÉSERVE --------------------

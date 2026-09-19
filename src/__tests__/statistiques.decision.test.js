@@ -123,7 +123,7 @@ describe('définitions', () => {
     await StatistiquesService.statsPlateforme();
 
     expect(whereDe(Reserve, RANG.reserveOuvertes).statut).toEqual({
-      [Op.notIn]: ['validee', 'cloturee'],
+      [Op.notIn]: ['validee', 'levee', 'cloturee'],
     });
   });
 });

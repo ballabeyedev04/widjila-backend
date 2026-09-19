@@ -150,11 +150,14 @@ describe('ReserveService.changerStatut — statut "prise_en_charge" dans la matr
     expect(result.success).toBe(true);
   });
 
-  test('une transition non prévue par la matrice reste refusée (ex: creee → prise_en_charge)', async () => {
+  // Depuis la décision client (choix de statut LIBRE), `creee →
+  // prise_en_charge` est légal. Ce qui reste hors matrice, ce sont les règles
+  // d'INTÉGRITÉ : la clôture n'est atteignable qu'après un verdict positif.
+  test('une transition hors matrice reste refusée (ex: creee → cloturee)', async () => {
     Reserve.findByPk.mockResolvedValue(fakeReserve({ statut: 'creee' }));
 
     const result = await ReserveService.changerStatut(
-      'org-1', 'reserve-1', 'prise_en_charge', {}, 'user-1', 'ChefProjet'
+      'org-1', 'reserve-1', 'cloturee', {}, 'user-1', 'ChefProjet'
     );
 
     expect(result.success).toBe(false);

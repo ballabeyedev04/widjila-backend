@@ -23,7 +23,9 @@
  * classé ici ferait disparaître des réserves du rapport, silencieusement.
  */
 
-const { STATUT_RESERVE, SEVERITE_PRIORITE } = require('../../../config/enums.js');
+const {
+  STATUT_RESERVE, SEVERITE_PRIORITE, STATUTS_RESERVE_LEVEES, STATUTS_RESERVE_TRAITEES,
+} = require('../../../config/enums.js');
 
 /* ══════════════════════════════════════════════════════════════════════════
    § 4 — Statuts du rapport
@@ -36,12 +38,18 @@ const { STATUT_RESERVE, SEVERITE_PRIORITE } = require('../../../config/enums.js'
  * `refusee` et `rouverte` sont rangés dans « À traiter » : dans les deux cas
  * la correction est à refaire, et personne n'y travaille à cet instant.
  * `en_retard` y est aussi — c'est un « à traiter » qui a dépassé sa date, pas
- * un état d'avancement.
+ * un état d'avancement. `a_surveiller` et `a_echeance` suivent la même
+ * logique : ils qualifient l'ÉCHÉANCE d'une réserve encore à traiter, pas son
+ * avancement.
+ *
+ * « À contrôler » et « Levée » reprennent les listes de `config/enums.js`
+ * (`traitee` rejoint `corrigee`, `levee` rejoint `validee`) : une seule
+ * définition, partagée avec les compteurs du tableau de bord.
  */
 const STATUTS_RAPPORT = {
   A_TRAITER: {
     libelle: 'À traiter',
-    statuts: ['creee', 'affectee', 'refusee', 'rouverte', 'en_retard'],
+    statuts: ['creee', 'affectee', 'a_surveiller', 'a_echeance', 'refusee', 'rouverte', 'en_retard'],
   },
   EN_COURS: {
     libelle: 'En cours',
@@ -49,11 +57,11 @@ const STATUTS_RAPPORT = {
   },
   A_CONTROLER: {
     libelle: 'À contrôler',
-    statuts: ['corrigee', 'a_verifier'],
+    statuts: STATUTS_RESERVE_TRAITEES,
   },
   LEVEE: {
     libelle: 'Levée',
-    statuts: ['validee'],
+    statuts: STATUTS_RESERVE_LEVEES,
   },
   CLOTUREE: {
     libelle: 'Clôturée',
@@ -175,7 +183,7 @@ const LIBELLE_ACTION_RESERVE = {
  * C'est le pivot du § 17 : la date à laquelle la réserve passe dans l'un de
  * ces statuts sépare les photos « avant » des photos « après ».
  */
-const STATUTS_CORRECTION = ['corrigee', 'a_verifier'];
+const STATUTS_CORRECTION = STATUTS_RESERVE_TRAITEES;
 
 /* ══════════════════════════════════════════════════════════════════════════
    § 5 — Modèles de rapport

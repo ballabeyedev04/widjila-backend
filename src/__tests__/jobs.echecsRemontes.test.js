@@ -92,13 +92,13 @@ describe('relances d’échéance (J-3)', () => {
     expect(NotificationService.notifier).not.toHaveBeenCalled();
   });
 
-  it('ignore les réserves déjà tranchées (validée, clôturée, refusée)', async () => {
+  it('ignore les réserves déjà tranchées (validée, levée, clôturée, refusée)', async () => {
     Reserve.findAll.mockResolvedValue([]);
 
     await relancerEcheances();
 
     const { where } = Reserve.findAll.mock.calls[0][0];
-    expect(where.statut[Op.notIn]).toEqual(['validee', 'cloturee', 'refusee']);
+    expect(where.statut[Op.notIn]).toEqual(['validee', 'levee', 'cloturee', 'refusee']);
   });
 
   it('un échec REMONTE — la pile n’est plus perdue', async () => {

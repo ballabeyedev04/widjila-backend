@@ -2,7 +2,10 @@
 
 const { Op, fn, col, literal } = require('sequelize');
 const sequelize = require('../../../config/db.js');
-const { STATUT_CHANTIER_EN_DEMANDE } = require('../../../config/enums.js');
+const {
+  STATUT_CHANTIER_EN_DEMANDE, STATUT_RESERVE, STATUTS_RESERVE_LEVEES, STATUTS_RESERVE_FERMES,
+  STATUTS_RESERVE_TRAITEES,
+} = require('../../../config/enums.js');
 const ExcelJS = require('exceljs');
 const {
   Chantier, Reserve, ReserveHistorique, Batiment, Plan, Inspection, Document, Utilisateur, Organisation,
@@ -10,7 +13,12 @@ const {
 const cache = require('../../../utils/cache.js');
 const ChantierService = require('../../chantier/service/chantier.service.js');
 
-const STATUTS_FERMES = ['validee', 'cloturee'];
+// Une seule définition (config/enums.js) : « fermée » et « levée » y sont
+// déclarées avec les statuts, et les compteurs d'ici les suivent.
+const STATUTS_FERMES = STATUTS_RESERVE_FERMES;
+
+/** `{ statut: 0 }` pour CHAQUE statut du catalogue, dans l'ordre du cycle. */
+const _parStatutVide = () => Object.fromEntries(STATUT_RESERVE.map((s) => [s, 0]));
 
 /**
  * Tous les compteurs de réserves en UNE requête — CORRECTIF (audit performance).
@@ -49,11 +57,16 @@ function _compterReserves(where, groupe) {
  * Déduit les compteurs des lignes groupées de `_compterReserves`.
  * « En retard » = échue ET non fermée — même définition que les anciens
  * `count()` séparés.
+ *
+ * `parStatut` porte TOUS les statuts du catalogue, à zéro quand aucune
+ * réserve ne l'a : les clients bâtissent leurs cartes et leurs légendes
+ * dessus, et une clé absente y devenait « statut inconnu » plutôt que « 0 ».
+ * « Validées » compte les deux verdicts positifs (`validee`, `levee`).
  */
 function _agregerReserves(lignes, fermes = STATUTS_FERMES) {
   const agregat = {
     total: 0, ouvertes: 0, validees: 0, refusees: 0, enRetard: 0,
-    parStatut: {}, parSeverite: {}, parChantier: new Map(),
+    parStatut: _parStatutVide(), parSeverite: {}, parChantier: new Map(),
   };
   for (const ligne of lignes) {
     const n = Number(ligne.n) || 0;
@@ -65,7 +78,7 @@ function _agregerReserves(lignes, fermes = STATUTS_FERMES) {
       agregat.ouvertes += n;
       agregat.enRetard += Number(ligne.echues) || 0;
     }
-    if (ligne.statut === 'validee') agregat.validees += n;
+    if (STATUTS_RESERVE_LEVEES.includes(ligne.statut)) agregat.validees += n;
     if (ligne.statut === 'refusee') agregat.refusees += n;
     if (ligne.chantierId !== undefined) {
       const parChantier = agregat.parChantier.get(ligne.chantierId) || { total: 0, ouvertes: 0 };
@@ -175,7 +188,7 @@ class DashboardService {
     let stats = {
       chantiers: chantiers.length,
       reserves: { total: 0, ouvertes: 0, validees: 0, refusees: 0, enRetard: 0 },
-      parStatut: {},
+      parStatut: _parStatutVide(),
       parSeverite: {},
       parChantier: [],
       plans: 0,
@@ -320,8 +333,8 @@ class DashboardService {
       }
       const e = map.get(cle);
       e.total += 1;
-      if (r.statut === 'validee') e.validees += 1;
-      if (!['validee', 'cloturee'].includes(r.statut)) e.ouvertes += 1;
+      if (STATUTS_RESERVE_LEVEES.includes(r.statut)) e.validees += 1;
+      if (!STATUTS_FERMES.includes(r.statut)) e.ouvertes += 1;
       if (r.statut === 'en_retard') e.enRetard += 1;
     }
 
@@ -348,8 +361,8 @@ class DashboardService {
         id: b.id,
         nom: b.nom,
         reserves: reserves.length,
-        ouvertes: reserves.filter((r) => !['validee', 'cloturee'].includes(r.statut)).length,
-        validees: reserves.filter((r) => r.statut === 'validee').length,
+        ouvertes: reserves.filter((r) => !STATUTS_FERMES.includes(r.statut)).length,
+        validees: reserves.filter((r) => STATUTS_RESERVE_LEVEES.includes(r.statut)).length,
         enRetard: reserves.filter((r) => r.statut === 'en_retard').length,
         parSeverite,
       };
@@ -429,7 +442,7 @@ class DashboardService {
     const where = { chantierId: chantierIds };
 
     const total = await Reserve.count({ where });
-    const validees = await Reserve.count({ where: { ...where, statut: 'validee' } });
+    const validees = await Reserve.count({ where: { ...where, statut: { [Op.in]: STATUTS_RESERVE_LEVEES } } });
     const enRetard = await Reserve.count({ where: { ...where, statut: 'en_retard' } });
 
     // Créations par mois (sur 6 derniers mois)
@@ -469,8 +482,24 @@ class DashboardService {
 
   // -------------------- ÉVOLUTION / COMPARAISON PÉRIODES (module 9) --------------------
   /**
-   * Évolution mensuelle des réserves créées/validées, plus comparaison
-   * avec la période précédente (glissement annuel).
+   * Évolution mensuelle des réserves — créées, traitées, levées — depuis le
+   * 1er janvier, plus comparaison avec l'année précédente.
+   *
+   * ── Source des séries ─────────────────────────────────────────────────────
+   * « Traitées » et « levées » se lisent dans l'HISTORIQUE, pas dans le statut
+   * courant : l'ancienne série comptait les réserves `validee` par mois de
+   * `updated_at`, donc une réserve validée puis rouverte disparaissait de la
+   * courbe, et une simple retouche de titre la déplaçait vers le mois de la
+   * retouche. L'historique, lui, porte la DATE de chaque passage : une ligne
+   * `validation` par levée (`validee` ou `levee`), une ligne `statut` par
+   * passage en correction déclarée (`STATUTS_RESERVE_TRAITEES`). Une réserve
+   * qui passe deux fois en correction le même mois n'est comptée qu'une fois
+   * (`COUNT(DISTINCT reserve_id)`).
+   *
+   * Chaque mois de la période est présent, même à zéro : une courbe sans
+   * trou se lit sans qu'un client ait à combler lui-même.
+   *
+   * `validees` reste servi, égal à `levees` : l'admin web le lit encore.
    */
   static async evolution(organisationId, chantierId = null, { toutesOrganisations = false } = {}) {
     const whereChantier = _whereOrganisation(organisationId, toutesOrganisations);
@@ -486,31 +515,50 @@ class DashboardService {
 
     const where = { chantierId: chantierIds };
 
-    const series = await Promise.all([
+    // Mois d'un événement d'historique, filtré sur la réserve JOINTE (la table
+    // d'historique n'a pas de `chantier_id` — voir `dureeTraitement`).
+    // Colonnes QUALIFIÉES par l'alias du modèle : la réserve jointe porte
+    // elle aussi un `created_at`, un nom nu serait ambigu.
+    const moisHistorique = fn('to_char', literal('"ReserveHistorique"."created_at"'), 'YYYY-MM');
+    const serieHistorique = (whereAction) => ReserveHistorique.findAll({
+      where: { ...whereAction, createdAt: { [Op.gte]: debutAnnee } },
+      include: [{ model: Reserve, as: 'reserve', attributes: [], where, required: true }],
+      attributes: [[moisHistorique, 'mois'], [literal('COUNT(DISTINCT "ReserveHistorique"."reserve_id")'), 'n']],
+      group: ['mois'],
+      order: [[literal('mois'), 'ASC']],
+      raw: true,
+    });
+    const statutsTraites = STATUTS_RESERVE_TRAITEES.map((s) => sequelize.escape(s)).join(', ');
+
+    const [creees, traitees, levees] = await Promise.all([
       Reserve.findAll({
         where: { ...where, createdAt: { [Op.gte]: debutAnnee } },
         attributes: [[fn('to_char', col('created_at'), 'YYYY-MM'), 'mois'], [fn('COUNT', col('id')), 'n']],
         group: ['mois'], order: [[fn('to_char', col('created_at'), 'YYYY-MM'), 'ASC']], raw: true,
-      }).then((rows) => rows.map((r) => ({ mois: r.mois, creees: Number(r.n) }))),
-      Reserve.findAll({
-        where: {
-          ...where,
-          statut: 'validee',
-          updatedAt: { [Op.gte]: debutAnnee },
-        },
-        attributes: [[fn('to_char', col('updated_at'), 'YYYY-MM'), 'mois'], [fn('COUNT', col('id')), 'n']],
-        group: ['mois'], order: [[fn('to_char', col('updated_at'), 'YYYY-MM'), 'ASC']], raw: true,
-      }).then((rows) => rows.map((r) => ({ mois: r.mois, validees: Number(r.n) }))),
+      }),
+      serieHistorique({
+        action: 'statut',
+        [Op.and]: [literal(`("ReserveHistorique"."nouvelles_valeurs"->>'statut') IN (${statutsTraites})`)],
+      }),
+      serieHistorique({ action: 'validation' }),
     ]);
 
-    const creees = series[0];
-    const validees = series[1];
+    // Tous les mois écoulés de l'année, à zéro par défaut.
     const moisMap = new Map();
-    for (const r of creees) moisMap.set(r.mois, { mois: r.mois, creees: r.creees, validees: 0 });
-    for (const r of validees) {
-      if (!moisMap.has(r.mois)) moisMap.set(r.mois, { mois: r.mois, creees: 0, validees: 0 });
-      moisMap.get(r.mois).validees = r.validees;
+    for (let m = 0; m <= now.getMonth(); m += 1) {
+      const cle = `${now.getFullYear()}-${String(m + 1).padStart(2, '0')}`;
+      moisMap.set(cle, { mois: cle, creees: 0, traitees: 0, levees: 0, validees: 0 });
     }
+    const poser = (lignes, champ) => {
+      for (const r of lignes) {
+        if (!moisMap.has(r.mois)) moisMap.set(r.mois, { mois: r.mois, creees: 0, traitees: 0, levees: 0, validees: 0 });
+        moisMap.get(r.mois)[champ] = Number(r.n) || 0;
+      }
+    };
+    poser(creees, 'creees');
+    poser(traitees, 'traitees');
+    poser(levees, 'levees');
+    for (const point of moisMap.values()) point.validees = point.levees;
     const timeline = Array.from(moisMap.values()).sort((a, b) => a.mois.localeCompare(b.mois));
 
     // Comparaison année en cours vs année précédente
@@ -526,7 +574,7 @@ class DashboardService {
       variationPct: precedente ? Math.round(((courante - precedente) / precedente) * 1000) / 10 : null,
     };
 
-    return { success: true, stats: { series: timeline, comparaison } };
+    return { success: true, stats: { granularite: 'mois', series: timeline, comparaison } };
   }
 
   // -------------------- EXPORT EXCEL DES KPI (module 9) --------------------

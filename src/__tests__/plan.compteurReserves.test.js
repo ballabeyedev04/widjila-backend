@@ -83,14 +83,14 @@ describe('la liste des plans d’un chantier porte ses compteurs', () => {
     );
   });
 
-  it('« à traiter » exclut les réserves validées et clôturées', async () => {
+  it('« à traiter » exclut les réserves validées, levées et clôturées', async () => {
     Plan.findAll.mockResolvedValue([plan('a001')]);
 
     await PlanService.listPlans(ORG, CHANTIER);
 
     const [[sql, options]] = requetesReserves();
     expect(sql).toContain('FILTER (WHERE statut NOT IN (:leves))');
-    expect(options.replacements.leves).toEqual(['validee', 'cloturee']);
+    expect(options.replacements.leves).toEqual(['validee', 'levee', 'cloturee']);
     // Une réserve supprimée ne compte ni dans le total ni dans le reste.
     expect(sql).toContain('deleted_at IS NULL');
   });

@@ -78,10 +78,57 @@ const STATUT_CHANTIER_EN_DEMANDE = ['en_attente_validation', 'rejete'];
 //
 // L'ORDRE compte : il correspond à la progression du cycle de vie et sert au
 // tri des colonnes de suivi. Ne pas réordonner sans vérifier les vues.
+//
+// Quatre statuts demandés par le client après la recette, sur le modèle de
+// son outil de suivi précédent :
+//   - `a_surveiller` : réserve ouverte placée sous surveillance ;
+//   - `a_echeance`   : réserve ouverte dont l'échéance arrive ;
+//   - `traitee`      : l'exécutant déclare la réserve traitée — même famille
+//                      que `corrigee`, elle attend le verdict du contrôle ;
+//   - `levee`        : verdict — la réserve est levée. Mêmes règles que
+//                      `validee` (rôle de pilotage, preuves exigées).
+// Les valeurs historiques gardent leur ordre relatif.
 const STATUT_RESERVE = [
-  'creee', 'affectee', 'prise_en_charge', 'en_cours', 'corrigee',
-  'a_verifier', 'validee', 'refusee', 'rouverte', 'en_retard', 'cloturee',
+  'creee', 'affectee', 'prise_en_charge', 'en_cours', 'a_surveiller',
+  'a_echeance', 'corrigee', 'traitee', 'a_verifier', 'validee', 'levee',
+  'refusee', 'rouverte', 'en_retard', 'cloturee',
 ];
+
+// Verdict POSITIF : la réserve est acceptée. Ce sont les « levées » des
+// compteurs (taux de résolution, KPI) et les statuts qui exigent des preuves.
+const STATUTS_RESERVE_LEVEES = ['validee', 'levee'];
+
+// Réserve SOLDÉE : elle ne compte plus parmi les ouvertes, et elle est figée
+// (ni modification, ni nouveau média). Une seule définition : elle existait en
+// six copies (`['validee', 'cloturee']`), et l'ajout de `levee` aurait demandé
+// de n'en oublier aucune.
+const STATUTS_RESERVE_FERMES = [...STATUTS_RESERVE_LEVEES, 'cloturee'];
+
+// Correction DÉCLARÉE par l'exécutant, en attente du verdict du contrôle.
+// `traitee` est le mot du client pour `corrigee` ; `a_verifier` est l'étape
+// suivante du même palier. Sert au rapport (« À contrôler ») et à la courbe
+// d'évolution (« traitées »).
+const STATUTS_RESERVE_TRAITEES = ['corrigee', 'traitee', 'a_verifier'];
+
+// Libellés français des statuts, pour les textes composés côté serveur
+// (notifications, exports). Les clients traduisent eux-mêmes les codes bruts.
+const LIBELLE_STATUT_RESERVE = Object.freeze({
+  creee: 'créée',
+  affectee: 'affectée',
+  prise_en_charge: 'prise en charge',
+  en_cours: 'en cours',
+  a_surveiller: 'à surveiller',
+  a_echeance: 'à échéance',
+  corrigee: 'corrigée',
+  traitee: 'traitée',
+  a_verifier: 'à vérifier',
+  validee: 'validée',
+  levee: 'levée',
+  refusee: 'refusée',
+  rouverte: 'rouverte',
+  en_retard: 'en retard',
+  cloturee: 'clôturée',
+});
 
 // Sévérité ET priorité partagent la même échelle, du plus faible au plus fort.
 // L'ordre est utilisé pour les tris et le calcul des retards.
@@ -173,6 +220,10 @@ module.exports = {
   STATUT_PLAN,
   TYPE_NIVEAU,
   STATUT_RESERVE,
+  STATUTS_RESERVE_LEVEES,
+  STATUTS_RESERVE_FERMES,
+  STATUTS_RESERVE_TRAITEES,
+  LIBELLE_STATUT_RESERVE,
   SEVERITE_PRIORITE,
   CATEGORIE_RESERVE,
   TYPE_INSPECTION,

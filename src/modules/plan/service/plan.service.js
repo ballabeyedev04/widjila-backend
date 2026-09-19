@@ -7,6 +7,7 @@ const logger = require('../../../utils/logger.js');
 const { storeFile, deleteFile } = require('../../../infrastructure/storage.service.js');
 const nomFichierOriginal = require('../../../utils/nomFichierUpload.js');
 const { OPERATIONNEL_CONTROLE } = require('../../../config/roles.js');
+const { STATUTS_RESERVE_FERMES } = require('../../../config/enums.js');
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  VERSIONNEMENT DES PLANS (audit § 6)
@@ -168,7 +169,7 @@ async function _dossierDuPlan(chantierId, rattachement) {
  * du tableau de bord : validée ou clôturée. Tout le reste — créée, affectée,
  * en cours, refusée, rouverte, en retard… — reste à traiter.
  */
-const STATUTS_LEVES = ['validee', 'cloturee'];
+const STATUTS_LEVES = STATUTS_RESERVE_FERMES;
 
 /**
  * Compte, pour une liste de plans, les nombres dont la navigation par niveau
@@ -765,7 +766,7 @@ class PlanService {
       // aller-retour par réserve au moment où l'utilisateur appuie sur un
       // point — geste qu'il répète sur chaque repère du plan.
       attributes: [
-        'id', 'numero', 'titre', 'description', 'statut', 'severite',
+        'id', 'numero', 'numeroPlan', 'titre', 'description', 'statut', 'severite',
         'date_limite', 'createdAt', 'updatedAt',
       ],
       include: [
@@ -781,7 +782,9 @@ class PlanService {
         },
         { model: Media, as: 'medias', attributes: ['id', 'url', 'thumbnail_url'], separate: true, limit: 1, order: [['createdAt', 'ASC']] },
       ],
-      order: [['numero', 'ASC']],
+      // Dans l'ordre où elles ont été relevées SUR CE PLAN : c'est le numéro
+      // que le repère affiche, et celui que l'utilisateur cherche des yeux.
+      order: [['numeroPlan', 'ASC'], ['numero', 'ASC']],
     });
     plan.dataValues.reserves = reserves;
 
@@ -849,7 +852,7 @@ class PlanService {
       // MÊME rendu de repère et la même fiche. Les faire diverger obligerait
       // le client à savoir de laquelle vient sa donnée.
       attributes: [
-        'id', 'numero', 'titre', 'description', 'statut', 'severite',
+        'id', 'numero', 'numeroPlan', 'titre', 'description', 'statut', 'severite',
         'date_limite', 'createdAt', 'updatedAt',
       ],
       include: [
@@ -857,7 +860,9 @@ class PlanService {
         { model: Utilisateur, as: 'createur', required: false, attributes: ['id', 'nom', 'prenom'] },
         { model: Media, as: 'medias', attributes: ['id', 'url', 'thumbnail_url'], separate: true, limit: 1, order: [['createdAt', 'ASC']] },
       ],
-      order: [['numero', 'ASC']],
+      // Dans l'ordre où elles ont été relevées SUR CE PLAN : c'est le numéro
+      // que le repère affiche, et celui que l'utilisateur cherche des yeux.
+      order: [['numeroPlan', 'ASC'], ['numero', 'ASC']],
     });
 
     return { success: true, reserves };

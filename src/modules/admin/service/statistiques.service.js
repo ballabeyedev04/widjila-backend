@@ -2,7 +2,7 @@
 
 const { fn, col, Op } = require('sequelize');
 const { Organisation, Utilisateur, Chantier, Reserve, Plan } = require('../../../models/index.js');
-const { STATUT_CHANTIER_EN_DEMANDE } = require('../../../config/enums.js');
+const { STATUT_CHANTIER_EN_DEMANDE, STATUTS_RESERVE_FERMES } = require('../../../config/enums.js');
 
 /** Statut commun a tout ce qui attend une decision. */
 const EN_ATTENTE = 'en_attente_validation';
@@ -54,7 +54,7 @@ class StatistiquesService {
 
       // Ce comptage etait `await`e APRES le Promise.all, donc en serie : un
       // aller-retour de plus vers la base pour rien.
-      Reserve.count({ where: { statut: { [Op.notIn]: ['validee', 'cloturee'] } } }),
+      Reserve.count({ where: { statut: { [Op.notIn]: STATUTS_RESERVE_FERMES } } }),
 
       // ── Ce qui attend une decision ────────────────────────────────────
       Utilisateur.count({ where: { statut: EN_ATTENTE } }),

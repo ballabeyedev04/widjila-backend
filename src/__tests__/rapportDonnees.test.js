@@ -128,8 +128,8 @@ describe('§ 23 — filtres appliqués à la lecture', () => {
   });
 
   it('Filtre statut : les statuts RÉELS exacts, ni plus ni moins', () => {
-    expect(where({ statuts: ['A_CONTROLER'] }).statut).toEqual({ [Op.in]: ['corrigee', 'a_verifier'] });
-    expect(where({ statuts: ['LEVEE'] }).statut).toEqual({ [Op.in]: ['validee'] });
+    expect(where({ statuts: ['A_CONTROLER'] }).statut).toEqual({ [Op.in]: ['corrigee', 'traitee', 'a_verifier'] });
+    expect(where({ statuts: ['LEVEE'] }).statut).toEqual({ [Op.in]: ['validee', 'levee'] });
   });
 
   it('Filtre gravité : « Majeure » vise la sévérité « haute »', () => {

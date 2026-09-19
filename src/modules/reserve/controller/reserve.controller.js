@@ -165,3 +165,14 @@ exports.listerCommentaires = asyncHandler(async (req, res) => {
     data: { commentaires: result.commentaires },
   });
 });
+
+// Historique des changements — voir `ReserveService.listHistorique`.
+exports.listerHistorique = asyncHandler(async (req, res) => {
+  const result = await ReserveService.listHistorique(await orgDeReserve(req), req.params.id);
+  if (!result.success) throw new NotFoundError(result.message);
+  res.status(200).json({
+    success: true,
+    message: 'Historique récupéré',
+    data: { reserveId: result.reserveId, historique: result.historique },
+  });
+});

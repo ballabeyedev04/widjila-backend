@@ -38,9 +38,14 @@ const { envelopperJob } = require('../utils/executerJob.js');
  * le compte dans les métriques et retente les erreurs passagères.
  */
 
-// Travail NON encore déclaré fait. `corrigee` et `a_verifier` sont exclus :
-// l'entreprise a rendu sa copie, le retard éventuel appartient au contrôle.
-const STATUTS_ELIGIBLES = ['creee', 'affectee', 'prise_en_charge', 'en_cours', 'rouverte'];
+// Travail NON encore déclaré fait. `corrigee`, `traitee` et `a_verifier` sont
+// exclus : l'entreprise a rendu sa copie, le retard éventuel appartient au
+// contrôle. `a_surveiller` et `a_echeance` (statuts du client) sont des
+// réserves ouvertes dont l'échéance approche : une fois la date passée, elles
+// sont en retard comme les autres.
+const STATUTS_ELIGIBLES = [
+  'creee', 'affectee', 'prise_en_charge', 'en_cours', 'a_surveiller', 'a_echeance', 'rouverte',
+];
 
 const CRON_TZ = process.env.CRON_TZ || 'Europe/Paris';
 
