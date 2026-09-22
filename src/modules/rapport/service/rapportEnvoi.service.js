@@ -14,6 +14,7 @@ const R = require('./rapportReferentiel.js');
 const donnees = require('./rapportDonnees.service.js');
 const RapportsService = require('./rapports.service.js');
 const RapportPartageService = require('./rapportPartage.service.js');
+const PartenaireService = require('../../organisation/service/partenaire.service.js');
 
 /**
  * Diffusion d'un rapport — § 13 du cahier des charges.
@@ -104,7 +105,7 @@ class RapportEnvoiService {
   static async _entreprises(rapport) {
     if (rapport.partenaireId) {
       const p = await Partenaire.findOne({
-        where: { id: rapport.partenaireId, chantierId: rapport.chantierId },
+        where: { id: rapport.partenaireId, ...(await PartenaireService.annuaireDuChantier(rapport.chantierId)) },
         attributes: ['id', 'nom', 'email', 'contact'],
       });
       return p ? [p] : [];
@@ -113,7 +114,10 @@ class RapportEnvoiService {
     const filtres = donnees.normaliserFiltres(rapport.filtres || rapport.parametres || {});
     if (filtres.entreprises.length) {
       return Partenaire.findAll({
-        where: { id: { [Op.in]: filtres.entreprises }, chantierId: rapport.chantierId },
+        where: {
+          id: { [Op.in]: filtres.entreprises },
+          ...(await PartenaireService.annuaireDuChantier(rapport.chantierId)),
+        },
         attributes: ['id', 'nom', 'email', 'contact'],
         order: [['nom', 'ASC']],
       });
@@ -157,9 +161,13 @@ class RapportEnvoiService {
    * n'est proposé, et rien d'autre ne sera accepté à l'envoi.
    */
   static async _candidats(chantierId) {
+    // L'annuaire ACCESSIBLE au chantier — ses fiches et celles de
+    // l'organisation : une entreprise de l'organisation peut porter des
+    // réserves de ce chantier, elle doit pouvoir en recevoir le rapport.
+    const annuaire = await PartenaireService.annuaireDuChantier(chantierId);
     const [partenaires, membres] = await Promise.all([
       Partenaire.findAll({
-        where: { chantierId },
+        where: annuaire,
         attributes: ['id', 'nom', 'email', 'type'],
         order: [['nom', 'ASC']],
       }),

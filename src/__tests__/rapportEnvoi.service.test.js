@@ -36,6 +36,7 @@ jest.mock('../infrastructure/emailService.js', () => ({
 
 jest.mock('../utils/logger.js', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
+const { Op } = require('sequelize');
 const modeles = require('../models/index.js');
 const { reinitialiser, instance } = require('./helpers/modelesRapportMock.js');
 const RapportEnvoiService = require('../modules/rapport/service/rapportEnvoi.service.js');
@@ -96,6 +97,7 @@ beforeEach(() => {
     { utilisateur: { id: 'u-cond', prenom: 'Awa', nom: 'Diop', email: 'awa@widjila.com', role: 'ConducteurTravaux' } },
   ]);
   modeles.Utilisateur.findByPk.mockResolvedValue({ id: AUTEUR, prenom: 'Balla', nom: 'Beye', email: 'balla@widjila.com' });
+  modeles.Chantier.findByPk.mockResolvedValue({ organisationId: ORG });
 
   mockOuvrirFichier.mockImplementation(async () => ({ stream: Readable.from([Buffer.from('%PDF-1.7 rapport')]) }));
   mockSendEmail.mockResolvedValue({ id: 'msg_1' });
@@ -152,9 +154,12 @@ describe('§ 13 — Widjila PROPOSE les destinataires, l’objet et le message',
     const { envoi } = await RapportEnvoiService.preparer('rap-1', ORG, AUTEUR);
 
     expect(envoi.destinataires).toEqual([{ id: 'p1', nom: 'SARL Toiture', email: 'toiture@ex.fr' }]);
-    // Cherché DANS le chantier : un identifiant d'un autre chantier ne doit pas
-    // devenir destinataire.
-    expect(modeles.Partenaire.findOne.mock.calls[0][0].where).toMatchObject({ id: 'p1', chantierId: CHANTIER });
+    // Cherché dans l'annuaire ACCESSIBLE au chantier — ses fiches et celles
+    // de l'organisation : un identifiant d'un autre chantier ou d'une autre
+    // organisation ne doit pas devenir destinataire.
+    const { where } = modeles.Partenaire.findOne.mock.calls[0][0];
+    expect(where).toMatchObject({ id: 'p1', organisationId: ORG });
+    expect(where[Op.or]).toEqual([{ chantierId: CHANTIER }, { chantierId: null }]);
   });
 
   it('un petit rapport part en PIÈCE JOINTE, un rapport lourd en LIEN', async () => {

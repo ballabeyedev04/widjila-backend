@@ -27,7 +27,7 @@ Les formules vivent en base (`plans_abonnement`), plus dans le code.
 
 | Code | Nom | Prix | Limite utilisateurs | Fonctionnalités |
 |---|---|---|---|---|
-| `essentiel` | Essentiel | 49 € / mois | 2 | `reserves`, `mobile`, `stockage`, `support_prioritaire` |
+| `essentiel` | Essentiel | 49 € / mois | 2 | `reserves`, `mobile`, `stockage`, `rapports` |
 | `pro` | Pro | 89 € / mois | 5 | socle + `suivi_equipe`, `rapports`, `annotations`, `api` |
 | `entreprise` | Entreprise | **sur devis** (`prix = NULL`) | illimité (`NULL`) | socle + avancées |
 
@@ -324,8 +324,9 @@ cd mobile && flutter test --concurrency=1
    abonnement ne doit apparaître, et `evenements_paiement` ne gagne aucune ligne.
 5. Carte refusée `4000 0000 0000 0002` : la souscription reste `en_attente`,
    aucun accès n'est ouvert.
-6. Depuis un compte **Essentiel**, tenter `POST /chantiers/:id/rapports/generer`
-   → 403 `SUBSCRIPTION_FEATURE_UNAVAILABLE`.
+6. Depuis un compte **Essentiel**, tenter `POST /plans/:id/annotations`
+   → 403 `SUBSCRIPTION_FEATURE_UNAVAILABLE` (les rapports PDF, eux, sont
+   ouverts à Essentiel depuis `20260922000001-essentiel-rapports-pdf.js`).
 7. Toujours en Essentiel, inviter un 3ᵉ utilisateur → 403
    `SUBSCRIPTION_LIMIT_REACHED`.
 8. Admin → « Prix abonnements » : passer Pro à 99 €. Vérifier que la

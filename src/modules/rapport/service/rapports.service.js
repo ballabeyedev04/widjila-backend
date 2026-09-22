@@ -18,6 +18,7 @@ const pdf = require('./rapportPdf.js');
 const plansPdf = require('./rapportPlans.js');
 const excel = require('./rapportExcel.js');
 const medias = require('./rapportMedias.js');
+const PartenaireService = require('../../organisation/service/partenaire.service.js');
 
 /**
  * SERVICE RAPPORTS — le « véritable service Reports séparé » du § 25 :
@@ -908,7 +909,9 @@ class RapportsService {
     // Les identifiants d'entreprise viennent des réserves elles-mêmes : c'est
     // le regroupement par `company_id` du § 15.
     const partenaires = await Partenaire.findAll({
-      where: { chantierId: source.chantierId },
+      // Annuaire ACCESSIBLE au chantier : une réserve peut viser une
+      // entreprise de l'organisation, pas seulement une fiche du chantier.
+      where: PartenaireService.whereAnnuaireChantier(organisationId, source.chantierId),
       attributes: ['id', 'nom', 'email', 'contact'],
     });
     const parNom = new Map(partenaires.map((p) => [p.nom, p]));
