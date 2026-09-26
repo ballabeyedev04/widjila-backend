@@ -333,7 +333,9 @@ describe('état du paiement — ce que le serveur sait, cloisonné', () => {
     const res = await SubscriptionService.getEtatPaiement(ORG);
     expect(res.success).toBe(true);
     expect(res.paiement.statut).toBe('en_attente');
-    expect(res.droits.source).toBe('aucun');
+    // Essai terminé et paiement pas encore confirmé : l'organisation retombe
+    // sur l'offre gratuite, jamais sur un mur (`config/offreGratuite.js`).
+    expect(res.droits.source).toBe('gratuit');
 
     AbonnementSouscrit.findOne.mockResolvedValue(null);
     const vide = await SubscriptionService.getEtatPaiement(ORG);

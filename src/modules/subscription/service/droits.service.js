@@ -4,6 +4,9 @@ const { Op } = require('sequelize');
 const {
   Organisation, PlanAbonnement, AbonnementSouscrit, Utilisateur, Chantier,
 } = require('../../../models/index.js');
+const {
+  CODE_GRATUIT, NOM_GRATUIT, LIMITE_CHANTIERS, LIMITE_UTILISATEURS,
+} = require('../../../config/offreGratuite.js');
 
 /**
  * Droits d'une organisation — LE point unique qui répond aux quatre questions :
@@ -58,7 +61,13 @@ class DroitsService {
    *   2. sinon, un essai en cours → TOUT est ouvert, sans limite de
    *      fonctionnalité (les limites de volume restent celles de l'essai :
    *      aucune, faute d'indication du client) ;
-   *   3. sinon → aucun droit.
+   *   3. sinon → l'OFFRE GRATUITE (voir `config/offreGratuite.js`) : un
+   *      chantier, deux utilisateurs, toutes les fonctionnalités. Plus
+   *      personne ne se retrouve devant un mur au bout de deux jours.
+   *
+   * `aucun droit` ne subsiste que pour un compte SANS organisation (le
+   * super-admin plateforme) ou une organisation introuvable : il n'y a alors
+   * rien à quoi rattacher des droits.
    *
    * @returns {Promise<{actif, source, planCode, planNom, fonctionnalites,
    *   limiteUtilisateurs, limiteChantiers, essaiEnCours, dateFin, joursRestants}>}
@@ -89,6 +98,24 @@ class DroitsService {
       limiteUtilisateurs: 0,
       limiteChantiers: 0,
       essaiEnCours: false,
+      dateFin: null,
+      joursRestants: null,
+    };
+
+    // Le socle : ni essai, ni souscription, mais l'application reste
+    // utilisable. `fonctionnalites: null` = toutes (un tableau vide
+    // signifierait « aucune » — voir `peutUtiliser`).
+    const gratuit = {
+      actif: true,
+      source: 'gratuit',
+      planCode: CODE_GRATUIT,
+      planNom: NOM_GRATUIT,
+      fonctionnalites: null,
+      limiteUtilisateurs: LIMITE_UTILISATEURS,
+      limiteChantiers: LIMITE_CHANTIERS,
+      essaiEnCours: false,
+      // Sans échéance : elle ne se périme pas, et il n'y a donc aucun compte
+      // à rebours à afficher.
       dateFin: null,
       joursRestants: null,
     };
@@ -144,7 +171,7 @@ class DroitsService {
       };
     }
 
-    return aucun;
+    return gratuit;
   }
 
   /**

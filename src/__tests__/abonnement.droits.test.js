@@ -29,6 +29,9 @@ const {
   Organisation, AbonnementSouscrit, Utilisateur, Chantier,
 } = require('../models/index.js');
 const DroitsService = require('../modules/subscription/service/droits.service.js');
+const {
+  CODE_GRATUIT, LIMITE_CHANTIERS, LIMITE_UTILISATEURS,
+} = require('../config/offreGratuite.js');
 
 const ORG = 'org-1';
 
@@ -97,23 +100,42 @@ describe('source des droits', () => {
     expect(droits.limiteUtilisateurs).toBeNull();
   });
 
-  it('un essai terminé et aucun abonnement = aucun droit', async () => {
+  it("un essai terminé et aucun abonnement = l'OFFRE GRATUITE, pas un mur", async () => {
+    // La règle a changé le 26/09/2026 : au bout des deux jours d'essai,
+    // l'organisation ne perd plus tout. Elle garde un chantier, deux
+    // utilisateurs et TOUTES les fonctionnalités — voir
+    // `config/offreGratuite.js`. Deux jours ne suffisaient pas à juger d'un
+    // outil de chantier, et l'App Store refuse une application dont l'usage
+    // exige un paiement fait ailleurs.
     Organisation.findByPk.mockResolvedValue(orgAvecEssai(-1));
 
     const droits = await DroitsService.getDroits(ORG);
 
-    expect(droits.actif).toBe(false);
-    expect(droits.fonctionnalites).toEqual([]);
+    expect(droits.actif).toBe(true);
+    expect(droits.source).toBe('gratuit');
+    expect(droits.planCode).toBe(CODE_GRATUIT);
+    // `null` = toutes. Un tableau vide signifierait « aucune ».
+    expect(droits.fonctionnalites).toBeNull();
+    expect(droits.limiteChantiers).toBe(LIMITE_CHANTIERS);
+    expect(droits.limiteUtilisateurs).toBe(LIMITE_UTILISATEURS);
+    // Sans échéance : rien à décompter, aucun compte à rebours à afficher.
+    expect(droits.dateFin).toBeNull();
+    expect(droits.joursRestants).toBeNull();
+    expect(droits.essaiEnCours).toBe(false);
   });
 
-  it('un `trial_ends_at` NUL vaut essai TERMINÉ, pas éternel', async () => {
+  it('un `trial_ends_at` NUL vaut essai TERMINÉ — l’offre gratuite, pas un essai sans fin', async () => {
     // Le piège corrigé en amont dans le modèle : une valeur nulle est falsy,
-    // donc « essai non expiré », donc accès gratuit permanent.
+    // donc « essai non expiré », donc accès ILLIMITÉ permanent. La nuance
+    // compte toujours : l'offre gratuite est bornée (un chantier, deux
+    // comptes), l'essai ne l'est pas.
     Organisation.findByPk.mockResolvedValue({ id: ORG, trial_ends_at: null, is_subscribed: false });
 
     const droits = await DroitsService.getDroits(ORG);
 
-    expect(droits.actif).toBe(false);
+    expect(droits.source).toBe('gratuit');
+    expect(droits.essaiEnCours).toBe(false);
+    expect(droits.limiteChantiers).toBe(LIMITE_CHANTIERS);
   });
 
   it('une organisation inconnue n’a aucun droit', async () => {
@@ -169,16 +191,28 @@ describe('fonctionnalités', () => {
 
   it('distingue « toutes » (null) de « aucune » (tableau vide)', async () => {
     // Les confondre ouvrirait tout aux organisations sans droits — la faute
-    // la plus coûteuse possible ici.
+    // la plus coûteuse possible ici. L'essai et l'offre gratuite ouvrent
+    // TOUT (`null`) ; c'est une formule payante qui restreint, par sa liste.
     Organisation.findByPk.mockResolvedValue(orgAvecEssai(3));
     expect((await DroitsService.peutUtiliser(ORG, 'api')).autorise).toBe(true);
 
     jest.clearAllMocks();
-    AbonnementSouscrit.findOne.mockResolvedValue(null);
+    AbonnementSouscrit.findOne.mockResolvedValue(souscription(ESSENTIEL));
     Organisation.findByPk.mockResolvedValue(orgAvecEssai(-1));
     const refus = await DroitsService.peutUtiliser(ORG, 'api');
     expect(refus.autorise).toBe(false);
-    expect(refus.raison).toBe('SUBSCRIPTION_REQUIRED');
+    expect(refus.raison).toBe('SUBSCRIPTION_FEATURE_UNAVAILABLE');
+  });
+
+  it('l’offre gratuite ouvre toutes les fonctionnalités — seuls les volumes bornent', async () => {
+    // Une entreprise qui ne gère qu'un chantier n'a aucune raison d'être
+    // privée des plans annotés ou des rapports.
+    AbonnementSouscrit.findOne.mockResolvedValue(null);
+    Organisation.findByPk.mockResolvedValue(orgAvecEssai(-1));
+
+    for (const f of ['reserves', 'rapports', 'annotations', 'api']) {
+      expect((await DroitsService.peutUtiliser(ORG, f)).autorise).toBe(true);
+    }
   });
 
   it('l’écart Essentiel / Pro correspond aux documents du client', async () => {
@@ -250,13 +284,27 @@ describe('limites de volume', () => {
     expect(Utilisateur.count.mock.calls[0][0].where.statut).toBe('actif');
   });
 
-  it('sans abonnement ni essai, toute limite est refusée', async () => {
+  it('sans abonnement ni essai, les limites sont celles de l’offre gratuite', async () => {
     Organisation.findByPk.mockResolvedValue(orgAvecEssai(-1));
+    Utilisateur.count.mockResolvedValue(1);
 
     const res = await DroitsService.verifierLimite(ORG, 'utilisateurs');
 
+    expect(res.autorise).toBe(true);
+    expect(res.limite).toBe(LIMITE_UTILISATEURS);
+  });
+
+  it('l’offre gratuite refuse au-delà de son plafond, sans parler d’abonnement', async () => {
+    // Le refus existe toujours — c'est lui qui invite à passer payant — mais
+    // il n'est plus « aucun abonnement actif ».
+    Organisation.findByPk.mockResolvedValue(orgAvecEssai(-1));
+    Chantier.count.mockResolvedValue(LIMITE_CHANTIERS);
+
+    const res = await DroitsService.verifierLimite(ORG, 'chantiers');
+
     expect(res.autorise).toBe(false);
-    expect(res.raison).toBe('SUBSCRIPTION_REQUIRED');
+    expect(res.raison).toBe('SUBSCRIPTION_LIMIT_REACHED');
+    expect(res.limite).toBe(LIMITE_CHANTIERS);
   });
 });
 

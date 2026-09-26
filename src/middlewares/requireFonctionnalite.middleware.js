@@ -88,9 +88,21 @@ function verifierLimite(ressource, aAjouter = 1) {
       }
 
       const nom = ressource === 'utilisateurs' ? 'utilisateurs' : 'chantiers';
+      const atteint = `${resultat.limite} ${nom} (${resultat.courant} utilisé${resultat.courant > 1 ? 's' : ''})`;
+
+      // Sur l'offre gratuite, on ANNONCE la limite sans dire où payer : ce
+      // message traverse l'application iOS, où toute incitation à souscrire
+      // hors achat intégré est interdite (voir `config/offreGratuite.js`).
+      // Le client sait par ailleurs comment nous joindre.
+      if (resultat.droits.source === 'gratuit') {
+        return next(new ForbiddenError(
+          `L'offre gratuite est limitée à ${atteint}.`,
+          'SUBSCRIPTION_LIMIT_REACHED'
+        ));
+      }
+
       return next(new ForbiddenError(
-        `Votre abonnement ${resultat.droits.planNom || ''} est limité à ${resultat.limite} ${nom} `
-        + `(${resultat.courant} utilisé${resultat.courant > 1 ? 's' : ''}). `
+        `Votre abonnement ${resultat.droits.planNom || ''} est limité à ${atteint}. `
         + 'Passez à une formule supérieure pour en ajouter.',
         'SUBSCRIPTION_LIMIT_REACHED'
       ));
