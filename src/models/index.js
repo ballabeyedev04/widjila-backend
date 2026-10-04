@@ -41,6 +41,7 @@ const TypePartenaire     = require('./typePartenaire.model.js');
 const TypeInspection     = require('./typeInspection.model.js');
 const PlanAbonnement     = require('./planAbonnement.model.js');
 const AbonnementSouscrit = require('./abonnementSouscrit.model.js');
+const Devis              = require('./devis.model.js');
 const EvenementPaiement  = require('./evenementPaiement.model.js');
 const PieceJointe        = require('./pieceJointe.model.js');
 const Signature          = require('./signature.model.js');
@@ -178,6 +179,17 @@ PlanAbonnement.hasMany(AbonnementSouscrit, { foreignKey: 'planAbonnementId', as:
 AbonnementSouscrit.belongsTo(PlanAbonnement, { foreignKey: 'planAbonnementId', as: 'plan' });
 
 Organisation.hasMany(AbonnementSouscrit, { foreignKey: 'organisationId', as: 'souscriptions', onDelete: 'CASCADE' });
+
+// ── Devis (« Premium sur devis ») ────────────────────────────────────────
+//
+// Le devis porte ce qui a été NÉGOCIÉ ; la souscription, ce qui a été PAYÉ.
+// Le lien va dans les deux sens : on remonte d'un abonnement au contrat qui
+// le justifie, et d'un devis à l'abonnement qui en est né.
+Organisation.hasMany(Devis, { foreignKey: 'organisationId', as: 'devis', onDelete: 'CASCADE' });
+Devis.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisation' });
+Devis.belongsTo(PlanAbonnement, { foreignKey: 'planAbonnementId', as: 'plan' });
+Devis.belongsTo(Utilisateur, { foreignKey: 'demande_par', as: 'demandeur' });
+AbonnementSouscrit.belongsTo(Devis, { foreignKey: 'devisId', as: 'devis' });
 AbonnementSouscrit.belongsTo(Organisation, { foreignKey: 'organisationId', as: 'organisation' });
 
 // Catalogue des corps d'état (métiers BTP) — voir corpsEtat.model.js.
@@ -382,6 +394,7 @@ module.exports = {
   CodeAppartement,
   PlanAbonnement,
   AbonnementSouscrit,
+  Devis,
   EvenementPaiement,
   PieceJointe,
   Signature,

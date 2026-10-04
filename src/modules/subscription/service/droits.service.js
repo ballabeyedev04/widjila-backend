@@ -140,8 +140,13 @@ class DroitsService {
         // abonnés Pro en bénéficient immédiatement. Seul le PRIX est figé
         // dans l'historique — c'est lui qui engage, pas le périmètre.
         fonctionnalites: Array.isArray(plan?.fonctionnalites) ? plan.fonctionnalites : [],
-        limiteUtilisateurs: plan ? plan.limite_utilisateurs : null,
-        limiteChantiers: plan ? plan.limite_chantiers : null,
+        // Les limites NÉGOCIÉES priment sur celles du catalogue : un contrat
+        // sur devis fixe ses propres plafonds, et ceux-ci ne doivent pas
+        // bouger parce qu'un administrateur a modifié la formule après la
+        // vente. `null` sur la souscription = pas de négociation, on lit le
+        // plan ; `null` sur le plan = illimité.
+        limiteUtilisateurs: souscription.limite_utilisateurs ?? (plan ? plan.limite_utilisateurs : null),
+        limiteChantiers: souscription.limite_chantiers ?? (plan ? plan.limite_chantiers : null),
         essaiEnCours: false,
         dateFin: souscription.date_fin,
         joursRestants: DroitsService.joursRestants(souscription.date_fin),

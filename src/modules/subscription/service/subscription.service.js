@@ -3,12 +3,13 @@
 const Stripe = require('stripe');
 const { UniqueConstraintError, Op } = require('sequelize');
 const {
-  Organisation, PlanAbonnement, AbonnementSouscrit, EvenementPaiement,
+  Organisation, PlanAbonnement, AbonnementSouscrit, EvenementPaiement, Devis,
 } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const RecuPaiementService = require('./recuPaiement.service.js');
 const DroitsService = require('./droits.service.js');
+const DevisService = require('./devis.service.js');
 
 /**
  * Abonnements et paiement.
@@ -95,7 +96,14 @@ function vuePublique(plan) {
  * bissextile), et les renouvellements, chaînés sur l'échéance précédente,
  * gardaient ce décalage indéfiniment. Même chose pour un 29 février + 1 an.
  */
-function calculerDateFin(debut, periode) {
+function calculerDateFin(debut, periode, dureeMois = null) {
+  // Un contrat NÉGOCIÉ porte sa propre durée (18, 36 mois…), que ni « mois »
+  // ni « an » ne savent exprimer. Elle prime donc, quand elle existe.
+  if (dureeMois) return DevisService.echeance(debut, dureeMois);
+  return calculerDateFinPeriode(debut, periode);
+}
+
+function calculerDateFinPeriode(debut, periode) {
   const d = new Date(debut);
   const mois = periode === 'an' ? 12 : 1;
   const cible = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + mois, 1,
@@ -424,6 +432,115 @@ class SubscriptionService {
   }
 
   /**
+   * Session Stripe Checkout pour un DEVIS accepté — « Premium sur devis ».
+   *
+   * Même garantie que le catalogue, pour la même raison : le montant vient de
+   * la BASE (`devis.montant_ttc`, posé par un super-admin), la souscription
+   * naît `en_attente` référencée par la session, et seul le webhook — signé,
+   * montant comparé — l'active. Elle porte en plus la DURÉE et les LIMITES
+   * négociées : elles ne se lisent pas dans le catalogue, qui peut changer
+   * après la signature.
+   *
+   * Moyens de paiement : carte par défaut, et ce que `STRIPE_METHODES_DEVIS`
+   * ajoute (`customer_balance` pour le virement, une fois activé dans le
+   * tableau de bord Stripe). Un virement n'est pas instantané : la session
+   * reste `unpaid` et c'est `checkout.session.async_payment_succeeded` qui
+   * confirmera — l'abonnement reste donc en attente jusqu'à l'encaissement
+   * réel, jamais sur déclaration.
+   */
+  static async creerSessionDevis(organisationId, devisId, utilisateurId = null) {
+    return DevisService.preparerPaiement(
+      organisationId,
+      devisId,
+      utilisateurId,
+      async ({ devis, montant, souscriptionExistante }) => {
+        const org = await Organisation.findByPk(organisationId);
+        if (!org) throw new Error('Organisation introuvable');
+
+        const stripe = requireStripe();
+        const customerId = await SubscriptionService._clientStripe(org, stripe);
+
+        const base = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const metadata = {
+          organisationId: org.id,
+          devisId: devis.id,
+          devisNumero: devis.numero,
+          planCode: devis.plan_code || 'premium',
+        };
+
+        const methodes = (process.env.STRIPE_METHODES_DEVIS || '')
+          .split(',').map((m) => m.trim()).filter(Boolean);
+
+        const session = await stripe.checkout.sessions.create({
+          mode: 'payment',
+          customer: customerId,
+          client_reference_id: org.id,
+          ...(methodes.length ? { payment_method_types: methodes } : {}),
+          line_items: [{
+            quantity: 1,
+            price_data: {
+              currency: (devis.devise || 'EUR').toLowerCase(),
+              unit_amount: montantStripe(montant, devis.devise),
+              product_data: {
+                name: `Widjila — ${devis.plan_nom || 'Premium'} (devis ${devis.numero})`,
+                description: `Abonnement ${devis.duree_mois} mois selon devis ${devis.numero}`,
+              },
+            },
+          }],
+          metadata,
+          payment_intent_data: { metadata },
+          success_url: `${base}/abonnement?paiement=retour&session={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${base}/abonnement?paiement=annule`,
+          expires_at: Math.floor(Date.now() / 1000) + 35 * 60,
+          locale: 'auto',
+        });
+
+        const champs = {
+          organisationId: org.id,
+          devisId: devis.id,
+          planAbonnementId: devis.planAbonnementId,
+          plan_code: devis.plan_code || 'premium',
+          plan_nom: devis.plan_nom || 'Premium',
+          // Le TTC : c'est ce que Stripe débite, et donc ce que le webhook
+          // comparera à l'encaissement.
+          prix_paye: montant,
+          devise: devis.devise,
+          // Conservée pour les écrans qui l'affichent ; c'est `duree_mois`
+          // qui fera foi pour l'échéance.
+          periode: devis.duree_mois === 12 ? 'an' : 'mois',
+          duree_mois: devis.duree_mois,
+          limite_utilisateurs: devis.limite_utilisateurs,
+          limite_chantiers: devis.limite_chantiers,
+          statut: 'en_attente',
+          fournisseur: 'stripe',
+          reference_paiement: session.id,
+          stripe_customer_id: customerId,
+          activee_par: utilisateurId || null,
+        };
+
+        // Une session abandonnée laisse une ligne en attente : on la RECYCLE
+        // plutôt que d'en empiler une par tentative.
+        if (souscriptionExistante) await souscriptionExistante.update(champs);
+        else await AbonnementSouscrit.create(champs);
+
+        return { url: session.url, sessionId: session.id, montant, devise: devis.devise };
+      }
+    );
+  }
+
+  /** Client Stripe de l'organisation, créé une seule fois et mémorisé. */
+  static async _clientStripe(org, stripe) {
+    if (org.stripe_customer_id) return org.stripe_customer_id;
+    const customer = await stripe.customers.create({
+      email: org.email || undefined,
+      name: org.nom,
+      metadata: { organisationId: org.id },
+    });
+    await org.update({ stripe_customer_id: customer.id });
+    return customer.id;
+  }
+
+  /**
    * Ce qu'ont en commun les deux parcours de paiement : la formule (relue en
    * base — le client n'envoie qu'un identifiant), l'organisation, son client
    * Stripe et le montant dans l'unité de la devise.
@@ -454,16 +571,7 @@ class SubscriptionService {
 
     // Client Stripe réutilisé d'une souscription à l'autre : en recréer un
     // dupliquerait le contact et disperserait l'historique de facturation.
-    let customerId = org.stripe_customer_id;
-    if (!customerId) {
-      const customer = await stripe.customers.create({
-        email: org.email || undefined,
-        name: org.nom,
-        metadata: { organisationId: org.id },
-      });
-      customerId = customer.id;
-      await org.update({ stripe_customer_id: customerId });
-    }
+    const customerId = await SubscriptionService._clientStripe(org, stripe);
 
     const prix = Number(plan.prix);
     // Plus petite unité de la devise : centimes pour l'euro, unités pour le
@@ -731,6 +839,13 @@ class SubscriptionService {
         await SubscriptionService._resilierParClient(objet.customer);
         break;
 
+      // Remboursement : le droit d'accès tombe avec l'encaissement. Sans
+      // cette branche, une organisation remboursée gardait son abonnement
+      // actif jusqu'à l'échéance payée — c'est-à-dire un accès gratuit.
+      case 'charge.refunded':
+        await SubscriptionService._rembourser(objet.payment_intent, objet.id);
+        break;
+
       // PayTech (Mobile Money) — même chemin que Stripe : prix relu en base,
       // souscription historisée, idempotence assurée par `traiterEvenement`.
       case 'sale_complete':
@@ -820,7 +935,9 @@ class SubscriptionService {
           await fraiche.update({
             statut: 'active',
             date_debut: debut,
-            date_fin: calculerDateFin(debut, fraiche.periode),
+            // `duree_mois` : l'échéance d'un contrat négocié, quand il y en a
+            // un (18 mois ne tiennent ni dans « mois » ni dans « an »).
+            date_fin: calculerDateFin(debut, fraiche.periode, fraiche.duree_mois),
             stripe_customer_id: stripeCustomerId || fraiche.stripe_customer_id,
           }, { transaction: t });
           return fraiche;
@@ -830,6 +947,10 @@ class SubscriptionService {
     if (!activee) return;
 
     logger.info(`[paiement] Abonnement ${activee.plan_code} activé pour ${activee.organisationId}`);
+
+    // Le devis est RÉGLÉ : sa trace comptable se referme ici, après le
+    // commit, et jamais avant l'encaissement confirmé.
+    if (activee.devisId) await DevisService.marquerPaye(activee.devisId, activee.id);
 
     // Le reçu part APRÈS le commit, et sans jamais pouvoir faire échouer ce
     // qui précède : l'abonnement est payé et actif, un PDF manquant se
@@ -903,6 +1024,36 @@ class SubscriptionService {
     if (souscription && souscription.statut === 'en_attente') {
       await souscription.update({ statut: 'annulee', note: 'Session de paiement expirée sans règlement.' });
     }
+  }
+
+  /**
+   * Encaissement remboursé : la souscription correspondante est close.
+   *
+   * On remonte par la RÉFÉRENCE de paiement — PaymentIntent pour un achat au
+   * catalogue, session pour un parcours Checkout, à quoi s'ajoute la
+   * PaymentIntent que Stripe rattache à la charge remboursée.
+   */
+  static async _rembourser(paymentIntentId, chargeId) {
+    const references = [paymentIntentId, chargeId].filter(Boolean);
+    if (!references.length) return;
+
+    const souscription = await AbonnementSouscrit.findOne({
+      where: { reference_paiement: { [Op.in]: references } },
+    });
+    if (!souscription) {
+      logger.info(`[paiement] Remboursement sans souscription connue : ${references.join(', ')}`);
+      return;
+    }
+    if (souscription.statut === 'annulee') return;
+
+    await souscription.update({
+      statut: 'annulee',
+      note: [souscription.note, 'Paiement remboursé — accès clos.'].filter(Boolean).join(' '),
+    });
+    await SubscriptionService._synchroniserOrganisation(
+      { ...souscription.get(), statut: 'annulee' }
+    );
+    logger.warn(`[paiement] Abonnement ${souscription.id} clos après remboursement`);
   }
 
   /** Prolonge la souscription active d'un client Stripe (renouvellement). */
@@ -1125,5 +1276,6 @@ class SubscriptionService {
 module.exports = SubscriptionService;
 module.exports.vuePublique = vuePublique;
 module.exports.calculerDateFin = calculerDateFin;
+module.exports.calculerDateFinPeriode = calculerDateFinPeriode;
 module.exports.montantStripe = montantStripe;
 module.exports.debutPeriode = debutPeriode;

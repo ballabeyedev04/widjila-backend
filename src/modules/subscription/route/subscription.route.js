@@ -10,6 +10,10 @@ const validate = require('../../../middlewares/validate.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const { FACTURATION } = require('../../../config/roles.js');
 const { creerPaymentIntentSchema, etatPaiementSchema } = require('../validation/subscription.validation.js');
+const devisController = require('../controller/devis.controller.js');
+const {
+  demanderDevisSchema, refuserDevisSchema,
+} = require('../validation/devis.validation.js');
 
 // ── Page d'abonnement (accessible même sans abonnement) ─────────────────────────
 // Plans publics
@@ -72,6 +76,68 @@ router.get(
   checkActiveUser,
   validate(etatPaiementSchema, 'query'),
   subscriptionController.getEtatPaiement
+);
+
+// ── DEVIS « Premium sur devis » ─────────────────────────────────────────────────
+//
+// Le parcours complet côté client : demander, consulter, accepter ou refuser,
+// puis payer. `FACTURATION` partout — demander un devis engage la discussion
+// commerciale de l'organisation, l'accepter l'engage tout court.
+//
+// Le CHIFFRAGE n'est pas ici : il vit dans les routes d'administration
+// (`abonnementAdmin.route.js`), réservées au super-admin. Le schéma de
+// demande ne comporte d'ailleurs aucun champ de montant.
+
+router.post(
+  '/devis',
+  auth,
+  checkActiveUser,
+  requireRole(...FACTURATION),
+  validate(demanderDevisSchema),
+  devisController.demander
+);
+
+router.get(
+  '/devis',
+  auth,
+  checkActiveUser,
+  requireRole(...FACTURATION),
+  devisController.lister
+);
+
+router.get(
+  '/devis/:id',
+  auth,
+  checkActiveUser,
+  requireRole(...FACTURATION),
+  devisController.obtenir
+);
+
+router.post(
+  '/devis/:id/accepter',
+  auth,
+  checkActiveUser,
+  requireRole(...FACTURATION),
+  devisController.accepter
+);
+
+router.post(
+  '/devis/:id/refuser',
+  auth,
+  checkActiveUser,
+  requireRole(...FACTURATION),
+  validate(refuserDevisSchema),
+  devisController.refuser
+);
+
+// Paiement du devis accepté : rend l'adresse de la page Stripe. Aucun
+// montant en entrée — il est relu en base.
+router.post(
+  '/devis/:id/paiement',
+  auth,
+  checkActiveUser,
+  requireRole(...FACTURATION),
+  devisController.payer
 );
 
 // ── Changement de plan (abonnement existant) ────────────────────────────────────

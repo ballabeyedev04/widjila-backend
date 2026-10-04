@@ -99,6 +99,44 @@ const AbonnementSouscrit = sequelize.define('AbonnementSouscrit', {
     allowNull: true,
     unique: true
   },
+  /**
+   * Devis dont cet abonnement découle — `null` pour un achat au catalogue.
+   *
+   * Ce qui suit (durée et limites) n'a de sens que dans ce cas : un contrat
+   * négocié ne se lit pas dans le catalogue, et le catalogue peut changer
+   * après la signature.
+   */
+  devisId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+
+  /**
+   * Durée couverte, en mois. `null` → c'est `periode` qui s'applique
+   * (mensuel ou annuel). 18 ou 36 mois, courants en BTP, ne tiennent dans
+   * aucun des deux.
+   */
+  duree_mois: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+
+  /**
+   * Limites NÉGOCIÉES, qui priment sur celles de la formule.
+   *
+   * `null` → on lit celles du plan (voir `DroitsService.getDroits`). Les
+   * figer ici est délibéré : une limite contractuelle ne doit pas bouger
+   * parce qu'un administrateur a modifié le catalogue après la vente.
+   */
+  limite_utilisateurs: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  limite_chantiers: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+
   stripe_customer_id: {
     type: DataTypes.STRING(100),
     allowNull: true
