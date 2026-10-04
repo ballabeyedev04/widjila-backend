@@ -8,6 +8,7 @@ const { startCleanupExpiredTokensJob } = require('./jobs/cleanupExpiredTokens.jo
 const { startEnRetardJob } = require('./jobs/markReservesEnRetard.job.js');
 const { startRemindersJob } = require('./jobs/reminders.job.js');
 const { startPurgeDonneesPersonnellesJob } = require('./jobs/purgeDonneesPersonnelles.job.js');
+const { startRappelsAbonnementJob } = require('./jobs/rappelsAbonnement.job.js');
 const { reprendreApresDemarrage, annulerReprises } = require('./utils/executerJob.js');
 const etatApplication = require('./utils/etatApplication.js');
 const metrics = require('./utils/metrics.js');
@@ -141,6 +142,10 @@ async function demarrer() {
         // Durées de conservation du cahier des charges (journaux 12–36 mois,
         // notifications 12 mois) — sans ce job, la conservation était illimitée.
         startPurgeDonneesPersonnellesJob(),
+        // Rappels avant échéance d'abonnement (J-30, J-7, J-1), clôture des
+        // abonnements échus et des devis périmés — cahier des charges
+        // « Premium sur devis » § 9.
+        startRappelsAbonnementJob(),
       ];
     } else {
       logger.info(`Worker #${instanceId} : seed et tâches planifiées ignorés (réservés au worker 0)`);
