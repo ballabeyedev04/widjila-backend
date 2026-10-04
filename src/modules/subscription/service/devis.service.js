@@ -7,6 +7,7 @@ const {
 const sequelize = require('../../../config/db.js');
 const logger = require('../../../utils/logger.js');
 const NotificationService = require('../../notification/service/notification.service.js');
+const { sendDevisEmail } = require('../../../infrastructure/emailService.js');
 
 /**
  * DEVIS d'abonnement — « Premium sur devis ».
@@ -456,39 +457,138 @@ class DevisService {
     return true;
   }
 
-  /** Prévient les super-admins qu'une demande attend un chiffrage. */
+  /**
+   * Prévient les super-admins qu'une demande attend un chiffrage, ET accuse
+   * réception au client.
+   *
+   * Les deux par notification ET par courriel : une demande commerciale qui
+   * dort trois jours parce que personne n'a ouvert l'application coûte une
+   * vente. Best-effort de bout en bout — la demande est déjà enregistrée,
+   * rien de ce qui suit ne doit la faire échouer.
+   */
   static async _prevenirAdministration(devis, organisation) {
+    const donnees = { devisId: devis.id, numero: devis.numero, organisationId: organisation.id };
+
     try {
       const admins = await Utilisateur.findAll({
         where: { role: 'Admin', statut: 'actif' },
-        attributes: ['id'],
+        attributes: ['id', 'email'],
       });
+
       await Promise.all(admins.map((a) => NotificationService.notifier({
         utilisateurId: a.id,
         type: 'devis_demande',
         titre: 'Nouvelle demande de devis',
         message: `${organisation.nom} demande une proposition (${devis.numero}).`,
-        donnees: { devisId: devis.id, numero: devis.numero, organisationId: organisation.id },
+        donnees,
       })));
+
+      // Un seul envoi pour tous les super-admins : `sendEmail` accepte une
+      // liste, et la demande doit atteindre celui qui est disponible.
+      const adresses = admins.map((a) => a.email).filter(Boolean);
+      if (adresses.length > 0) {
+        await sendDevisEmail({
+          to: adresses,
+          variante: 'demande',
+          numero: devis.numero,
+          organisationNom: organisation.nom,
+          demande: devis.demande || {},
+        });
+      }
     } catch (err) {
-      logger.warn(`[devis] Notification de la demande ${devis.numero} impossible : ${err.message}`);
+      logger.warn(`[devis] Alerte de la demande ${devis.numero} impossible : ${err.message}`);
+    }
+
+    await DevisService._accuserReception(devis, organisation);
+  }
+
+  /**
+   * Accuse réception au client.
+   *
+   * Sans ce message, la demande part dans le silence : l'utilisateur ne sait
+   * pas si elle est arrivée, et il recommence ou appelle.
+   */
+  static async _accuserReception(devis, organisation) {
+    try {
+      const destinataire = devis.demande?.email
+        || (devis.demande_par
+          ? (await Utilisateur.findByPk(devis.demande_par, { attributes: ['email'] }))?.email
+          : null)
+        || organisation.email;
+      if (!destinataire) return;
+
+      await sendDevisEmail({
+        to: destinataire,
+        variante: 'accuse',
+        numero: devis.numero,
+        prenom: devis.demande?.contact || null,
+        organisationNom: organisation.nom,
+      });
+    } catch (err) {
+      logger.warn(`[devis] Accusé de réception ${devis.numero} impossible : ${err.message}`);
     }
   }
 
-  /** Prévient le demandeur que sa proposition est disponible. */
+  /**
+   * Prévient le demandeur que sa proposition est disponible — notification
+   * ET courriel.
+   *
+   * C'est le message le plus important du parcours : un devis qu'on attend
+   * et qui arrive sans prévenir reste à prendre la poussière. Le courriel
+   * porte le MONTANT, parce que c'est l'information qu'on attend d'un devis
+   * et que la cacher pour forcer l'ouverture de l'application serait un
+   * procédé. Il ne porte PAS de bouton « accepter » : une acceptation
+   * engage, elle se fait dans le produit, authentifiée.
+   */
   static async _prevenirClient(devis) {
+    const donnees = { devisId: devis.id, numero: devis.numero };
+
     try {
-      if (!devis.demande_par) return;
-      await NotificationService.notifier({
-        utilisateurId: devis.demande_par,
-        type: 'devis_envoye',
-        titre: 'Votre devis est disponible',
-        message: `Le devis ${devis.numero} vous attend : ${devis.montant_ttc} ${devis.devise} `
-          + `pour ${devis.duree_mois} mois.`,
-        donnees: { devisId: devis.id, numero: devis.numero },
-      });
+      if (devis.demande_par) {
+        await NotificationService.notifier({
+          utilisateurId: devis.demande_par,
+          type: 'devis_envoye',
+          titre: 'Votre devis est disponible',
+          message: `Le devis ${devis.numero} vous attend : ${devis.montant_ttc} ${devis.devise} `
+            + `pour ${devis.duree_mois} mois.`,
+          donnees,
+        });
+      }
     } catch (err) {
       logger.warn(`[devis] Notification du devis ${devis.numero} impossible : ${err.message}`);
+    }
+
+    try {
+      const organisation = await Organisation.findByPk(devis.organisationId, {
+        attributes: ['id', 'nom', 'email'],
+      });
+      // L'adresse SAISIE dans la demande d'abord : c'est celle de
+      // l'interlocuteur commercial, qui n'est pas toujours celle du compte.
+      const destinataire = devis.demande?.email
+        || (devis.demande_par
+          ? (await Utilisateur.findByPk(devis.demande_par, { attributes: ['email'] }))?.email
+          : null)
+        || organisation?.email;
+      if (!destinataire) {
+        logger.warn(`[devis] Aucune adresse pour le devis ${devis.numero} — courriel non envoyé`);
+        return;
+      }
+
+      await sendDevisEmail({
+        to: destinataire,
+        variante: 'pret',
+        numero: devis.numero,
+        prenom: devis.demande?.contact || null,
+        organisationNom: organisation?.nom || null,
+        montantTtc: `${Number(devis.montant_ttc)} ${devis.devise}`,
+        dureeMois: devis.duree_mois,
+        limiteUtilisateurs: devis.limite_utilisateurs,
+        validiteJusquau: devis.expire_le
+          ? new Date(devis.expire_le).toLocaleDateString('fr-FR')
+          : null,
+      });
+    } catch (err) {
+      logger.warn(`[devis] Courriel du devis ${devis.numero} impossible : ${err.message}`);
     }
   }
 }

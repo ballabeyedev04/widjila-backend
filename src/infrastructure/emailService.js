@@ -325,6 +325,46 @@ async function sendEcheanceAbonnementEmail({
   });
 }
 
+/**
+ * Courriels du parcours « Premium sur devis ».
+ *
+ * Une demande de devis est une conversation commerciale, pas une action dans
+ * un logiciel : ni le client qui attend sa proposition, ni le super-admin
+ * qui doit la chiffrer n'ouvrent l'application chaque jour. Le courriel est
+ * le canal qui convient à ce rythme — la notification reste dans l'app, les
+ * deux partent ensemble.
+ *
+ * `to` accepte une liste (l'alerte de demande part à tous les super-admins).
+ */
+async function sendDevisEmail({
+  to, variante, numero, prenom, organisationNom, montantTtc, dureeMois,
+  limiteUtilisateurs, validiteJusquau, demande,
+}) {
+  const template = require('../templates/mail/devis.template.js');
+  const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/[/]$/, '');
+
+  const SUJETS = {
+    accuse: `Votre demande de devis ${numero} est bien reçue`,
+    demande: `Nouvelle demande de devis — ${organisationNom || numero}`,
+    pret: `Votre devis ${numero} est disponible`,
+  };
+
+  // Le super-admin va CHIFFRER : on l'envoie là où il le fera, pas sur
+  // l'écran d'abonnement du client.
+  const lien = variante === 'demande'
+    ? `${frontendUrl}/plateforme/devis`
+    : `${frontendUrl}/abonnement`;
+
+  return sendEmail({
+    to,
+    subject: SUJETS[variante],
+    html: template({
+      variante, numero, prenom, organisationNom, montantTtc, dureeMois,
+      limiteUtilisateurs, validiteJusquau, demande, lien,
+    }),
+  });
+}
+
 async function sendDemandeSuppressionEmail({ email, objet, date, ip }) {
   const template = require('../templates/mail/demandeSuppression.template.js');
   const destinataire = process.env.DELETION_REQUEST_EMAIL || 'ballabeye.dev04@gmail.com';
@@ -345,6 +385,7 @@ module.exports = {
   sendRecuPaiementEmail,
   sendNouveauMembreEmail,
   sendEcheanceAbonnementEmail,
+  sendDevisEmail,
   sendDemandeSuppressionEmail,
   disjoncteurEmail,
   masquerEmails,

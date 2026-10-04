@@ -41,7 +41,9 @@ jest.mock('../models/index.js', () => ({
   },
   EvenementPaiement: { create: jest.fn(), findOne: jest.fn(), update: jest.fn() },
   Devis: { findOne: jest.fn(), findByPk: jest.fn(), findAll: jest.fn(), findAndCountAll: jest.fn(), create: jest.fn() },
-  Utilisateur: { count: jest.fn(), findAll: jest.fn().mockResolvedValue([]) },
+  Utilisateur: {
+    count: jest.fn(), findAll: jest.fn().mockResolvedValue([]), findByPk: jest.fn(),
+  },
   Chantier: { count: jest.fn() },
 }));
 
@@ -51,6 +53,10 @@ jest.mock('../modules/notification/service/notification.service.js', () => ({
 
 jest.mock('../modules/subscription/service/recuPaiement.service.js', () => ({
   emettre: jest.fn().mockResolvedValue(),
+}));
+
+jest.mock('../infrastructure/emailService.js', () => ({
+  sendDevisEmail: jest.fn().mockResolvedValue(),
 }));
 
 const sequelizeReel = require('../config/db.js');
@@ -63,6 +69,7 @@ process.env.STRIPE_SECRET_KEY = 'sk_test_pour_les_tests';
 process.env.STRIPE_WEBHOOK_SECRET = 'whsec_pour_les_tests';
 process.env.FRONTEND_URL = 'https://app.widjila.test';
 
+const { sendDevisEmail } = require('../infrastructure/emailService.js');
 const DevisService = require('../modules/subscription/service/devis.service.js');
 const SubscriptionService = require('../modules/subscription/service/subscription.service.js');
 const DroitsService = require('../modules/subscription/service/droits.service.js');
@@ -237,6 +244,99 @@ describe('le chiffrage — réservé à l’administration', () => {
     expect(d.statut).toBe('envoye');
     expect(d.envoye_le).toBeInstanceOf(Date);
     expect(notifier).toHaveBeenCalledWith(expect.objectContaining({ utilisateurId: USER, type: 'devis_envoye' }));
+  });
+});
+
+describe('les courriels — un devis se suit par courriel, pas en rouvrant l’application', () => {
+  const { Utilisateur } = require('../models/index.js');
+
+  beforeEach(() => {
+    Utilisateur.findAll.mockResolvedValue([
+      { id: 'admin-1', email: 'admin@widjila.com' },
+      { id: 'admin-2', email: 'support@widjila.com' },
+    ]);
+    Utilisateur.findByPk.mockResolvedValue({ email: 'compte@example.com' });
+  });
+
+  it('à la DEMANDE : alerte les super-admins, et accuse réception au client', async () => {
+    Devis.findOne.mockResolvedValue(null);
+    Devis.create.mockImplementation(async (v) => ({ ...devis(), ...v, statut: 'brouillon' }));
+
+    await DevisService.demander(ORG, USER, {
+      email: 'patron@btp.sn', contact: 'Balla', nbUtilisateurs: 25, besoins: 'Multi-agences',
+    });
+
+    expect(sendDevisEmail).toHaveBeenCalledTimes(2);
+
+    // 1. Les super-admins, en UN envoi : la demande doit atteindre celui qui
+    //    est disponible, pas le premier de la liste.
+    const alerte = sendDevisEmail.mock.calls.find(([a]) => a.variante === 'demande')[0];
+    expect(alerte.to).toEqual(['admin@widjila.com', 'support@widjila.com']);
+    expect(alerte.demande).toMatchObject({ nbUtilisateurs: 25, besoins: 'Multi-agences' });
+
+    // 2. Le client : sans accusé, il ne sait pas si sa demande est arrivée.
+    const accuse = sendDevisEmail.mock.calls.find(([a]) => a.variante === 'accuse')[0];
+    expect(accuse.to).toBe('patron@btp.sn');
+    expect(accuse.numero).toMatch(/^WDJ-/);
+  });
+
+  it('à l’ENVOI : le client reçoit le MONTANT, pas une invitation à se connecter', async () => {
+    const d = devis({ statut: 'brouillon', demande: { email: 'patron@btp.sn', contact: 'Balla' } });
+    Devis.findByPk.mockResolvedValue(d);
+
+    await DevisService.envoyer('dev-1', ADMIN);
+
+    const envoi = sendDevisEmail.mock.calls.find(([a]) => a.variante === 'pret')[0];
+    expect(envoi).toMatchObject({
+      to: 'patron@btp.sn',
+      numero: 'WDJ-2026-0001',
+      montantTtc: '7800 EUR',
+      dureeMois: 12,
+      limiteUtilisateurs: 25,
+    });
+    expect(envoi.validiteJusquau).toBeTruthy();
+  });
+
+  it('écrit à l’adresse SAISIE dans la demande avant celle du compte', async () => {
+    // L'interlocuteur commercial n'est pas toujours le titulaire du compte.
+    const d = devis({ statut: 'brouillon', demande: { email: 'achats@btp.sn' } });
+    Devis.findByPk.mockResolvedValue(d);
+
+    await DevisService.envoyer('dev-1', ADMIN);
+
+    expect(sendDevisEmail.mock.calls.find(([a]) => a.variante === 'pret')[0].to).toBe('achats@btp.sn');
+  });
+
+  it('retombe sur l’adresse du compte, puis sur celle de l’organisation', async () => {
+    const d = devis({ statut: 'brouillon', demande: {} });
+    Devis.findByPk.mockResolvedValue(d);
+
+    await DevisService.envoyer('dev-1', ADMIN);
+    expect(sendDevisEmail.mock.calls.find(([a]) => a.variante === 'pret')[0].to).toBe('compte@example.com');
+
+    jest.clearAllMocks();
+    Utilisateur.findByPk.mockResolvedValue(null);
+    Organisation.findByPk.mockResolvedValue(organisation());
+    const d2 = devis({ statut: 'brouillon', demande: {} });
+    Devis.findByPk.mockResolvedValue(d2);
+
+    await DevisService.envoyer('dev-1', ADMIN);
+    expect(sendDevisEmail.mock.calls.find(([a]) => a.variante === 'pret')[0].to).toBe('contact@example.com');
+  });
+
+  it('un SMTP en panne n’empêche ni l’envoi du devis ni la notification', async () => {
+    // Le devis est transmis dans le produit : un courriel perdu ne doit pas
+    // annuler un geste commercial déjà accompli.
+    sendDevisEmail.mockRejectedValue(new Error('SMTP injoignable'));
+    const d = devis({ statut: 'brouillon' });
+    Devis.findByPk.mockResolvedValue(d);
+    const { notifier } = require('../modules/notification/service/notification.service.js');
+
+    const res = await DevisService.envoyer('dev-1', ADMIN);
+
+    expect(res.success).toBe(true);
+    expect(d.statut).toBe('envoye');
+    expect(notifier).toHaveBeenCalledWith(expect.objectContaining({ type: 'devis_envoye' }));
   });
 });
 
