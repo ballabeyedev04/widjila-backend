@@ -294,6 +294,37 @@ async function sendNouveauMembreEmail({
  * d'environnement a été oubliée — une demande RGPD silencieusement perdue
  * coûte plus cher qu'un email envoyé à la mauvaise boîte.
  */
+/**
+ * Échéance d'abonnement — rappel avant terme, ou constat après.
+ *
+ * `to` accepte une liste : le message part à TOUS ceux qui peuvent
+ * reconduire le contrat, pas au premier trouvé. Un seul destinataire en
+ * congé suffirait sinon à laisser une échéance passer inaperçue.
+ */
+async function sendEcheanceAbonnementEmail({
+  to, variante, prenom, organisationNom, planNom, dateFin, jours,
+  limiteChantiers, limiteUtilisateurs,
+}) {
+  const template = require('../templates/mail/echeanceAbonnement.template.js');
+  const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+
+  const sujet = variante === 'approche'
+    ? (jours <= 1
+      ? `Votre abonnement ${planNom} expire demain`
+      : `Votre abonnement ${planNom} expire dans ${jours} jours`)
+    : `Votre abonnement ${planNom} est arrivé à échéance`;
+
+  return sendEmail({
+    to,
+    subject: sujet,
+    html: template({
+      variante, prenom, organisationNom, planNom, dateFin, jours,
+      limiteChantiers, limiteUtilisateurs,
+      lien: `${frontendUrl}/abonnement`,
+    }),
+  });
+}
+
 async function sendDemandeSuppressionEmail({ email, objet, date, ip }) {
   const template = require('../templates/mail/demandeSuppression.template.js');
   const destinataire = process.env.DELETION_REQUEST_EMAIL || 'ballabeye.dev04@gmail.com';
@@ -313,6 +344,7 @@ module.exports = {
   sendChantierValidationEmail,
   sendRecuPaiementEmail,
   sendNouveauMembreEmail,
+  sendEcheanceAbonnementEmail,
   sendDemandeSuppressionEmail,
   disjoncteurEmail,
   masquerEmails,

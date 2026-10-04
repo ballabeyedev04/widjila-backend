@@ -7,6 +7,7 @@ const {
 } = require('../models/index.js');
 const NotificationService = require('../modules/notification/service/notification.service.js');
 const SubscriptionService = require('../modules/subscription/service/subscription.service.js');
+const { sendEcheanceAbonnementEmail } = require('../infrastructure/emailService.js');
 const logger = require('../utils/logger.js');
 const { envelopperJob } = require('../utils/executerJob.js');
 const { FACTURATION } = require('../config/roles.js');
@@ -38,6 +39,19 @@ const { LIMITE_CHANTIERS, LIMITE_UTILISATEURS } = require('../config/offreGratui
  * seule : les données restent accessibles, seuls les volumes se resserrent.
  * Le message le dit explicitement — une échéance qui fait peur pousse à
  * exporter, pas à renouveler.
+ *
+ * ── Deux canaux, une seule décision d'envoi ───────────────────────────────
+ *
+ * Chaque rappel part en NOTIFICATION dans l'application et en COURRIEL. Le
+ * second n'est pas un luxe : le responsable qui signe le renouvellement
+ * n'ouvre pas l'application tous les jours, et une échéance manquée se paie
+ * en interruption de service.
+ *
+ * Le courriel est best-effort : son échec (serveur SMTP injoignable,
+ * disjoncteur ouvert) ne doit jamais empêcher la notification ni faire
+ * échouer la tâche. C'est l'anti-doublon de la NOTIFICATION qui décide des
+ * deux envois — ainsi un courriel perdu n'est pas renvoyé en boucle le
+ * lendemain, et le destinataire garde la trace dans l'application.
  *
  * ── Pourquoi pas de colonne « dernier rappel » ────────────────────────────
  *
@@ -72,6 +86,42 @@ function palierPour(jours) {
     }
   }
   return null;
+}
+
+/**
+ * Envoie le courriel d'échéance, sans jamais faire échouer la tâche.
+ *
+ * Un seul appel pour tous les destinataires : `sendEmail` accepte une liste,
+ * et le message part à TOUS ceux qui peuvent reconduire — un responsable en
+ * congé ne doit pas suffire à laisser passer une échéance.
+ */
+async function prevenirParCourriel(variante, souscription, comptes, jours = null) {
+  const adresses = comptes.map((c) => c.email).filter(Boolean);
+  if (adresses.length === 0) return;
+
+  try {
+    await sendEcheanceAbonnementEmail({
+      to: adresses,
+      variante,
+      // Le prénom n'est personnalisé que s'il y a UN destinataire : « Bonjour
+      // Balla » adressé à trois personnes sonne faux.
+      prenom: adresses.length === 1 ? comptes[0].prenom : null,
+      organisationNom: souscription.organisation?.nom ?? null,
+      planNom: souscription.plan_nom,
+      dateFin: souscription.date_fin
+        ? new Date(souscription.date_fin).toLocaleDateString('fr-FR')
+        : null,
+      jours,
+      limiteChantiers: LIMITE_CHANTIERS,
+      limiteUtilisateurs: LIMITE_UTILISATEURS,
+    });
+  } catch (err) {
+    // Best-effort : la notification dans l'application est déjà partie, et
+    // c'est elle qui porte la trace. Un SMTP en panne n'annule pas un rappel.
+    logger.warn(
+      `[abonnement] Courriel d'échéance non envoyé pour ${souscription.organisationId} : ${err.message}`
+    );
+  }
 }
 
 /** Qui doit être prévenu dans l'organisation : ceux qui peuvent renouveler. */
@@ -119,8 +169,13 @@ async function rappelerEcheances() {
     // confondre les deux.
     const donnees = { souscriptionId: souscription.id, palier };
 
+    // Ceux qui n'avaient pas encore reçu CE palier : eux seuls reçoivent le
+    // courriel, pour qu'un second passage dans la journée n'en renvoie pas.
+    const aPrevenir = [];
+
     for (const compte of comptes) {
       if (await NotificationService.dejaNotifie(compte.id, 'abonnement.echeance', donnees)) continue;
+      aPrevenir.push(compte);
 
       await NotificationService.notifier({
         utilisateurId: compte.id,
@@ -135,9 +190,12 @@ async function rappelerEcheances() {
       });
     }
 
+    if (aPrevenir.length === 0) continue;
+    await prevenirParCourriel('approche', souscription, aPrevenir, jours);
+
     logger.info(
       `[abonnement] Rappel J-${palier} envoyé pour ${souscription.organisationId} `
-      + `(${comptes.length} destinataire(s))`
+      + `(${aPrevenir.length} destinataire(s))`
     );
   }
 }
@@ -171,8 +229,11 @@ async function cloturerEchus() {
 
     const comptes = await destinataires(souscription.organisationId);
     const donnees = { souscriptionId: souscription.id };
+    const aPrevenir = [];
+
     for (const compte of comptes) {
       if (await NotificationService.dejaNotifie(compte.id, 'abonnement.expire', donnees)) continue;
+      aPrevenir.push(compte);
       await NotificationService.notifier({
         utilisateurId: compte.id,
         type: 'abonnement.expire',
@@ -184,6 +245,8 @@ async function cloturerEchus() {
         donnees,
       });
     }
+
+    if (aPrevenir.length > 0) await prevenirParCourriel('expire', souscription, aPrevenir);
   }
 
   return echus.length;

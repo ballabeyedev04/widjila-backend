@@ -40,8 +40,13 @@ jest.mock('../modules/subscription/service/subscription.service.js', () => ({
 
 jest.mock('node-cron', () => ({ schedule: jest.fn(() => ({ stop: jest.fn() })) }));
 
+jest.mock('../infrastructure/emailService.js', () => ({
+  sendEcheanceAbonnementEmail: jest.fn().mockResolvedValue(),
+}));
+
 const { AbonnementSouscrit, Utilisateur, Devis } = require('../models/index.js');
 const NotificationService = require('../modules/notification/service/notification.service.js');
+const { sendEcheanceAbonnementEmail } = require('../infrastructure/emailService.js');
 const SubscriptionService = require('../modules/subscription/service/subscription.service.js');
 const {
   rappelerEcheances, cloturerEchus, fermerDevisPerimes, palierPour, joursRestants,
@@ -72,6 +77,7 @@ const titulaire = { id: 'u1', email: 'patron@example.com', prenom: 'Balla', nom:
 beforeEach(() => {
   jest.clearAllMocks();
   NotificationService.dejaNotifie.mockResolvedValue(false);
+  sendEcheanceAbonnementEmail.mockResolvedValue();
   Utilisateur.findAll.mockResolvedValue([titulaire]);
   AbonnementSouscrit.findAll.mockResolvedValue([]);
   Devis.update.mockResolvedValue([0]);
@@ -183,6 +189,87 @@ describe('les rappels', () => {
 
     await expect(rappelerEcheances()).resolves.toBeUndefined();
     expect(NotificationService.notifier).not.toHaveBeenCalled();
+  });
+});
+
+describe('le courriel', () => {
+  it('double la notification : le signataire n’ouvre pas l’application chaque jour', async () => {
+    AbonnementSouscrit.findAll.mockResolvedValue([souscription(6)]);
+
+    await rappelerEcheances();
+
+    expect(sendEcheanceAbonnementEmail).toHaveBeenCalledTimes(1);
+    expect(sendEcheanceAbonnementEmail.mock.calls[0][0]).toMatchObject({
+      to: ['patron@example.com'],
+      variante: 'approche',
+      prenom: 'Balla',
+      organisationNom: 'Widjila BTP',
+      planNom: 'Pro',
+      jours: 7,
+      limiteChantiers: LIMITE_CHANTIERS,
+      limiteUtilisateurs: LIMITE_UTILISATEURS,
+    });
+  });
+
+  it('part à TOUS ceux qui peuvent reconduire, en un seul envoi', async () => {
+    // Un responsable en congé ne doit pas suffire à laisser passer une
+    // échéance. Et sans prénom : « Bonjour Balla » à trois personnes sonne faux.
+    Utilisateur.findAll.mockResolvedValue([
+      titulaire,
+      { id: 'u2', email: 'dg@example.com', prenom: 'Awa' },
+    ]);
+    AbonnementSouscrit.findAll.mockResolvedValue([souscription(6)]);
+
+    await rappelerEcheances();
+
+    expect(sendEcheanceAbonnementEmail).toHaveBeenCalledTimes(1);
+    const envoi = sendEcheanceAbonnementEmail.mock.calls[0][0];
+    expect(envoi.to).toEqual(['patron@example.com', 'dg@example.com']);
+    expect(envoi.prenom).toBeNull();
+  });
+
+  it('n’est pas renvoyé quand le palier a déjà été notifié', async () => {
+    NotificationService.dejaNotifie.mockResolvedValue(true);
+    AbonnementSouscrit.findAll.mockResolvedValue([souscription(6)]);
+
+    await rappelerEcheances();
+
+    expect(sendEcheanceAbonnementEmail).not.toHaveBeenCalled();
+  });
+
+  it('un SMTP en panne ne fait échouer ni la tâche ni la notification', async () => {
+    // La notification est déjà partie, et c'est elle qui porte la trace :
+    // un courriel perdu ne doit pas faire rejouer le rappel le lendemain.
+    sendEcheanceAbonnementEmail.mockRejectedValue(new Error('SMTP injoignable'));
+    AbonnementSouscrit.findAll.mockResolvedValue([souscription(6)]);
+
+    await expect(rappelerEcheances()).resolves.toBeUndefined();
+    expect(NotificationService.notifier).toHaveBeenCalledTimes(1);
+  });
+
+  it('un compte sans adresse n’empêche pas l’envoi aux autres', async () => {
+    Utilisateur.findAll.mockResolvedValue([
+      { id: 'u3', email: null, prenom: 'Sans' },
+      titulaire,
+    ]);
+    AbonnementSouscrit.findAll.mockResolvedValue([souscription(6)]);
+
+    await rappelerEcheances();
+
+    expect(sendEcheanceAbonnementEmail.mock.calls[0][0].to).toEqual(['patron@example.com']);
+  });
+
+  it('annonce l’échéance passée après la clôture', async () => {
+    AbonnementSouscrit.findAll.mockResolvedValue([
+      souscription(-1, { date_fin: new Date(Date.now() - JOUR) }),
+    ]);
+
+    await cloturerEchus();
+
+    expect(sendEcheanceAbonnementEmail.mock.calls[0][0]).toMatchObject({
+      variante: 'expire',
+      planNom: 'Pro',
+    });
   });
 });
 
