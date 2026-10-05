@@ -40,53 +40,76 @@ const JOUR = 24 * 60 * 60 * 1000;
 
 beforeEach(() => jest.clearAllMocks());
 
-describe('checkSubscription — abonnement échu', () => {
+describe('checkSubscription — ne ferme plus la porte', () => {
+  // Ce garde-barrière était le mur de fin d'essai. Depuis que l'offre
+  // gratuite est permanente (src/config/offreGratuite.js), aucun état ne
+  // justifie plus de refuser : une organisation sans souscription garde un
+  // chantier, deux utilisateurs et des réserves illimitées.
+  //
+  // Ce qu'il reste à vérifier, c'est qu'il ne refuse RIEN et qu'il renseigne
+  // correctement le contexte — les plafonds de volume, eux, sont la
+  // responsabilité de `verifierLimite` (requireFonctionnalite.middleware.js).
   const executer = (organisation, path = '/chantiers') => {
     Organisation.findByPk.mockResolvedValue(organisation);
     const req = { user: { role: 'Entreprise', organisationId: ORG }, path };
-    return new Promise((resolve) => checkSubscription(req, {}, resolve));
+    return new Promise((resolve) => checkSubscription(req, {}, resolve))
+      .then((err) => ({ err, req }));
   };
   const essaiFini = { id: ORG, trial_ends_at: new Date(Date.now() - JOUR), is_subscribed: true };
 
-  it('REFUSE quand toutes les souscriptions sont échues malgré is_subscribed=true', async () => {
+  it('laisse passer une organisation dont toutes les souscriptions sont échues', async () => {
+    // C'est le cas qui répondait « Votre période d'essai est terminée ».
     DroitsService.souscriptionActive.mockResolvedValue(null);
     AbonnementSouscrit.count.mockResolvedValue(1);
 
-    const err = await executer(essaiFini);
+    const { err, req } = await executer({ ...essaiFini, is_subscribed: false });
 
-    expect(err).toBeDefined();
-    expect(err.code).toBe('SUBSCRIPTION_REQUIRED');
+    expect(err).toBeUndefined();
+    expect(req.subscription.trialEnded).toBe(true);
   });
 
   it('laisse passer une souscription en vigueur', async () => {
     DroitsService.souscriptionActive.mockResolvedValue({ id: 's1' });
-    expect(await executer(essaiFini)).toBeUndefined();
+    const { err } = await executer(essaiFini);
+    expect(err).toBeUndefined();
   });
 
-  it('ne coupe pas un drapeau hérité sans aucun historique (filiale, données anciennes)', async () => {
-    DroitsService.souscriptionActive.mockResolvedValue(null);
-    AbonnementSouscrit.count.mockResolvedValue(0);
-    expect(await executer(essaiFini)).toBeUndefined();
+  it('laisse passer un essai encore en cours', async () => {
+    const { err, req } = await executer({
+      id: ORG, trial_ends_at: new Date(Date.now() + JOUR), is_subscribed: false,
+    });
+    expect(err).toBeUndefined();
+    expect(req.subscription.trialEnded).toBe(false);
   });
 
-  it('un paiement seulement LANCÉ ou échoué ne compte pas comme historique', async () => {
-    // Sinon, ouvrir la page de paiement coupait une organisation au drapeau hérité.
-    DroitsService.souscriptionActive.mockResolvedValue(null);
-    AbonnementSouscrit.count.mockResolvedValue(0);
-
-    await executer(essaiFini);
-
-    const { where } = AbonnementSouscrit.count.mock.calls[0][0];
-    const statuts = Object.getOwnPropertySymbols(where.statut).map((s) => where.statut[s])[0];
-    expect(statuts).toEqual(['active', 'expiree', 'annulee']);
-  });
-
-  it('les routes partenaires (/organisation/partenaires) ne sont plus exemptées', async () => {
-    const err = await executer(
+  it('les routes partenaires reçoivent le contexte comme les autres', async () => {
+    // Elles échappaient autrefois au mur par un chemin d'exemption trop
+    // large. Plus de mur, mais elles ne doivent pas redevenir un angle mort.
+    const { err, req } = await executer(
       { id: ORG, trial_ends_at: new Date(Date.now() - JOUR), is_subscribed: false },
       '/organisation/partenaires'
     );
-    expect(err && err.code).toBe('SUBSCRIPTION_REQUIRED');
+    expect(err).toBeUndefined();
+    expect(req.subscription).toBeDefined();
+  });
+
+  it("ne lit plus l'historique des souscriptions pour décider", async () => {
+    // Deux requêtes par appel servaient à trancher un refus qui n'existe
+    // plus. Les laisser serait payer pour une décision qu'on ne prend pas.
+    DroitsService.souscriptionActive.mockResolvedValue(null);
+    AbonnementSouscrit.count.mockClear();
+
+    await executer(essaiFini);
+
+    expect(AbonnementSouscrit.count).not.toHaveBeenCalled();
+    expect(DroitsService.souscriptionActive).not.toHaveBeenCalled();
+  });
+
+  it('refuse encore une organisation introuvable', async () => {
+    // Ce n'est pas une question d'abonnement : c'est un jeton qui désigne
+    // une organisation qui n'existe pas.
+    const { err } = await executer(null);
+    expect(err).toBeDefined();
   });
 });
 

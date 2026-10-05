@@ -281,21 +281,22 @@ describe('les gardes lisent NULL comme un essai terminé', () => {
   function executer(organisation) {
     Organisation.findByPk.mockResolvedValue(organisation);
     const req = { user: { role: 'Entreprise', organisationId: ORG }, path: '/chantiers' };
-    return new Promise((resolve) => checkSubscription(req, {}, resolve));
+    return new Promise((resolve) => checkSubscription(req, {}, resolve))
+      .then((err) => ({ err, req }));
   }
 
-  it('refuse un `trial_ends_at` NUL', async () => {
-    // Règle inchangée, et c'est délibéré : NULL signifie désormais aussi
-    // « essai pas encore démarré », mais un compte dans cet état ne peut pas
-    // s'authentifier — il n'arrive jamais ici. Fermer reste le bon défaut.
-    const err = await executer({ id: ORG, trial_ends_at: null, is_subscribed: false });
+  it('marque un `trial_ends_at` NUL comme essai terminé, sans fermer l’accès', async () => {
+    // La LECTURE de NULL est inchangée : pas de date, pas d'essai en cours.
+    // Ce qui a changé, c'est la conséquence — l'offre gratuite permanente
+    // prend le relais, il n'y a plus de porte à fermer.
+    const { err, req } = await executer({ id: ORG, trial_ends_at: null, is_subscribed: false });
 
-    expect(err).toBeDefined();
-    expect(err.code).toBe('SUBSCRIPTION_REQUIRED');
+    expect(err).toBeUndefined();
+    expect(req.subscription.trialEnded).toBe(true);
   });
 
   it('laisse passer un essai en cours', async () => {
-    const err = await executer({
+    const { err } = await executer({
       id: ORG,
       trial_ends_at: new Date(Date.now() + JOUR_MS),
       is_subscribed: false,
@@ -304,16 +305,19 @@ describe('les gardes lisent NULL comme un essai terminé', () => {
     expect(err).toBeUndefined();
   });
 
-  it(`annonce la durée réelle de l'essai (${TRIAL_JOURS} jours)`, async () => {
-    // Le message citait « 7 jours » en dur. Un chiffre faux dans le seul écran
-    // que voit une entreprise bloquée coûte un appel au support.
-    const err = await executer({
+  it("n'oppose plus de message de fin d'essai", async () => {
+    // Ce test vérifiait que le refus annonçait la bonne durée (le message
+    // citait « 7 jours » en dur pour un essai qui n'en durait plus autant).
+    // Il n'y a plus de refus du tout : l'offre gratuite est permanente, et
+    // c'est désormais `verifierLimite` qui annonce les plafonds, au moment
+    // de créer.
+    const { err } = await executer({
       id: ORG,
       trial_ends_at: new Date(Date.now() - JOUR_MS),
       is_subscribed: false,
     });
 
-    expect(err.message).toContain(`${TRIAL_JOURS} jours`);
+    expect(err).toBeUndefined();
   });
 });
 

@@ -1,27 +1,51 @@
 'use strict';
 
-const { ForbiddenError } = require('../errors/AppError.js');
-const { TRIAL_JOURS } = require('../config/essai.js');
-
 /**
- * Middleware de vérification d'abonnement / trial.
- * Bloque l'accès aux routes protégées si :
- * - l'organisation n'a pas d'abonnement actif (is_subscribed = false)
- * - ET la période d'essai est expirée (trial_ends_at < now)
+ * Contexte d'abonnement de la requête.
  *
- * Les routes exemptées : /abonnement, /webhook/stripe, /auth/*
- * À placer APRÈS checkOrganisation et checkActiveUser.
+ * ── Ce middleware ne REFUSE plus rien ─────────────────────────────────────
+ *
+ * Il a longtemps été le mur de fin d'essai : passé deux jours sans
+ * souscription, toute route protégée répondait « Votre période d'essai est
+ * terminée. Veuillez souscrire un abonnement pour continuer. » Plus un
+ * chantier, plus une réserve, plus un plan.
+ *
+ * Ce mur n'a plus lieu d'être : l'OFFRE GRATUITE (src/config/offreGratuite.js)
+ * est permanente. Une organisation sans souscription garde un chantier, deux
+ * utilisateurs et des réserves illimitées — pour toujours. Il n'existe donc
+ * plus aucun état où l'on doive fermer la porte faute d'avoir payé.
+ *
+ * Ce que coûtait l'oubli : l'offre gratuite avait été posée dans
+ * `DroitsService` — qui dit ce à quoi on a droit — sans que ce garde-barrière
+ * en soit informé. L'application annonçait une offre gratuite et répondait
+ * 403 sur chaque écran. C'est ce qu'ont vu les premiers utilisateurs iOS.
+ *
+ * ── Où les limites s'appliquent, alors ────────────────────────────────────
+ *
+ * Là où elles ont un sens : au moment de CRÉER. `verifierLimite('chantiers')`
+ * et `verifierLimite('utilisateurs')` (requireFonctionnalite.middleware.js)
+ * refusent le deuxième chantier ou le troisième compte, en annonçant le
+ * plafond. Lire, modifier et travailler sur l'existant reste ouvert.
+ *
+ * Conséquence assumée : une organisation qui avait dix chantiers sous une
+ * formule payante échue les garde accessibles, et ne peut simplement plus en
+ * créer. C'est voulu — on ne prend pas en otage le travail déjà fait.
+ *
+ * ── Ce qu'il fait encore ──────────────────────────────────────────────────
+ *
+ * Il attache `req.subscription` pour les contrôleurs qui veulent adapter leur
+ * réponse. La source de vérité des droits reste `DroitsService.getDroits`.
+ *
+ * Il reste monté sur les routes : le jour où un état devrait de nouveau
+ * fermer l'accès, c'est ici, et seulement ici, que cela s'écrirait.
  */
 
-// Routes qui restent accessibles même sans abonnement.
+// Routes pour lesquelles ce contexte n'apporte rien : on s'épargne la
+// lecture de l'organisation.
 //
-// `req.path` est RELATIF au routeur qui monte ce middleware. '/organisation'
-// figurait ici « pour modifier l'org, voir les membres » : il ne couvrait en
-// réalité AUCUNE route du routeur organisation (monté sur /api/v1/organisation,
-// ses chemins relatifs sont '/', '/membres'…), mais bien celles des
-// partenaires, montées sur /api/v1 sous '/organisation/partenaires' — qui
-// échappaient ainsi au mur de fin d'essai. Retiré : le comportement réel des
-// routes organisation ne change pas, la brèche des partenaires se referme.
+// Elles étaient autrefois « exemptées du mur de fin d'essai » — il fallait
+// bien pouvoir atteindre la page d'abonnement pour en sortir. Le mur n'existe
+// plus ; la liste ne fait désormais qu'éviter une requête inutile.
 const EXEMPT_PATHS = [
   '/abonnement',
   '/webhook/stripe',
@@ -30,29 +54,6 @@ const EXEMPT_PATHS = [
 
 function isExempt(path) {
   return EXEMPT_PATHS.some((p) => path.startsWith(p));
-}
-
-/**
- * Vrai si l'organisation a une souscription en vigueur, OU si elle n'a jamais
- * eu de souscription enregistrée (drapeau hérité : on ne peut rien confirmer,
- * on ne retire rien). Faux uniquement quand toutes ses souscriptions sont
- * échues ou terminées.
- */
-async function _souscriptionEnVigueur(organisationId) {
-  // Requires paresseux : même précaution que le chargement des modèles plus bas.
-  const DroitsService = require('../modules/subscription/service/droits.service.js');
-  if (await DroitsService.souscriptionActive(organisationId)) return true;
-
-  // Seules comptent les souscriptions qui ONT ÉTÉ actives. Un paiement
-  // simplement lancé (`en_attente`) ou échoué (`echec`) crée aussi une ligne :
-  // le compter aurait coupé une organisation au drapeau hérité dès qu'elle
-  // ouvrait la page de paiement — et durablement si elle abandonnait.
-  const { Op } = require('sequelize');
-  const { AbonnementSouscrit } = require('../models/index.js');
-  const historique = await AbonnementSouscrit.count({
-    where: { organisationId, statut: { [Op.in]: ['active', 'expiree', 'annulee'] } },
-  });
-  return historique === 0;
 }
 
 const checkSubscription = async (req, res, next) => {
@@ -91,51 +92,25 @@ const checkSubscription = async (req, res, next) => {
       return next(new ForbiddenError('Organisation introuvable'));
     }
 
-    const now = new Date();
-    // Un `trial_ends_at` NULL comptait comme « essai en cours », donc accès
-    // gratuit ILLIMITÉ. Les organisations créées hors du parcours d'inscription
-    // (filiales, agences, création par l'admin plateforme) n'avaient jamais de
-    // date d'essai. Absence de date ⇒ essai terminé.
-    //
-    // NULL signifie désormais aussi « essai pas encore démarré », le cas d'une
-    // inscription en attente de validation. La règle ne change pas pour
-    // autant : ce compte-là ne peut pas s'authentifier (checkActiveUser), donc
-    // il n'arrive jamais ici. Et fermer l'accès reste le bon défaut — c'est
-    // l'ouvrir qui avait créé la faille.
-    const trialEnded = !organisation.trial_ends_at || new Date(organisation.trial_ends_at) < now;
-    let hasActiveSubscription = organisation.is_subscribed === true;
+    // Un `trial_ends_at` NULL vaut « essai terminé ». Deux situations le
+    // produisent : une organisation créée hors du parcours d'inscription
+    // (filiale, agence, création par l'administration), et une inscription
+    // pas encore validée. Dans les deux cas, l'offre gratuite prend le
+    // relais — c'est une information, plus une sanction.
+    const trialEnded = !organisation.trial_ends_at
+      || new Date(organisation.trial_ends_at) < new Date();
 
-    // `is_subscribed` n'est remis à faux que par une résiliation explicite :
-    // AUCUN traitement ne le fait quand `date_fin` est dépassée. Un seul mois
-    // payé ouvrait donc l'accès indéfiniment. On confirme le drapeau par la
-    // souscription elle-même (même règle que DroitsService).
-    //
-    // Seule une organisation qui A un historique de souscriptions, toutes
-    // échues, est refusée : une organisation marquée abonnée sans aucune
-    // ligne (filiale qui hérite du drapeau, données antérieures au catalogue)
-    // garde son comportement — la couper serait une régression, pas un
-    // correctif.
-    if (hasActiveSubscription) {
-      hasActiveSubscription = await _souscriptionEnVigueur(organisationId);
-    }
+    req.subscription = {
+      // Le drapeau STOCKÉ, pas un droit : il n'est remis à faux que par une
+      // résiliation explicite. Qui veut savoir ce que l'organisation peut
+      // réellement faire interroge `DroitsService.getDroits`, qui tranche
+      // entre souscription active, essai en cours et offre gratuite.
+      isSubscribed: organisation.is_subscribed === true,
+      trialEnded,
+      trialEndsAt: organisation.trial_ends_at,
+    };
 
-    // Accès autorisé si abonnement actif OU trial en cours
-    if (hasActiveSubscription || !trialEnded) {
-      // Attacher l'info d'abonnement pour les contrôleurs qui en ont besoin
-      req.subscription = {
-        isSubscribed: hasActiveSubscription,
-        trialEnded,
-        trialEndsAt: organisation.trial_ends_at,
-      };
-      return next();
-    }
-
-    // Trial expiré et pas d'abonnement → bloquer
-    return next(new ForbiddenError(
-      `Votre période d'essai de ${TRIAL_JOURS} jours est terminée. Veuillez souscrire un abonnement pour continuer.`,
-      'SUBSCRIPTION_REQUIRED',
-      { trialEnded: true, trialEndsAt: organisation.trial_ends_at }
-    ));
+    return next();
 
   } catch (err) {
     next(err);
