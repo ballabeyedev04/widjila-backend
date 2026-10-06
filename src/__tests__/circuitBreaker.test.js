@@ -95,18 +95,31 @@ describe('Disjoncteur', () => {
     const d = new Disjoncteur('t-100', { seuilEchecs: 5, dureeOuvertureMs: 10_000, delaiAppelMs: 50 });
     const appel = jest.fn(jamais);
 
-    let debut = Date.now();
-    const vague1 = await Promise.allSettled(Array.from({ length: 100 }, () => d.executer(appel)));
-    const dureeVague1 = Date.now() - debut;
+    // Première vague : les 100 appels sont tous PARTIS avant que le premier
+    // ne tombe en délai. Ils attendent donc ensemble, et non l'un après
+    // l'autre — sérialisés, le 100ᵉ ne serait lancé qu'après 99 délais.
+    const enVol = Array.from({ length: 100 }, () => d.executer(appel));
+    await null; // un tour de micro-tâches : le temps que les 100 appels démarrent
+    expect(appel).toHaveBeenCalledTimes(100);
 
-    debut = Date.now();
-    const vague2 = await Promise.allSettled(Array.from({ length: 100 }, () => d.executer(appel)));
-    const dureeVague2 = Date.now() - debut;
-
+    const vague1 = await Promise.allSettled(enVol);
     expect(vague1.every((r) => r.status === 'rejected' && r.reason.code === 'DELAI_DEPASSE')).toBe(true);
-    expect(dureeVague1).toBeLessThan(1000);
+
+    // Seconde vague, circuit ouvert : servie SANS horloge. Les minuteurs sont
+    // gelés ici, donc si un seul de ces 100 appels attendait le délai ou le
+    // fournisseur, rien ne se réglerait et le test expirerait.
+    jest.useFakeTimers();
+    let vague2;
+    try {
+      vague2 = await Promise.allSettled(Array.from({ length: 100 }, () => d.executer(appel)));
+    } finally {
+      jest.useRealTimers();
+    }
+
     expect(vague2.every((r) => r.status === 'rejected' && r.reason.code === 'SERVICE_EXTERNE_INDISPONIBLE')).toBe(true);
-    expect(dureeVague2).toBeLessThan(50);
     expect(appel).toHaveBeenCalledTimes(100); // la seconde vague n'a pas touché le fournisseur
+    expect(metrics.instantane().dependances['t-100']).toMatchObject({
+      echecs: 100, rejetsCircuit: 100, circuit: 'ouvert',
+    });
   });
 });
