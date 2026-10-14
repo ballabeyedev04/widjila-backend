@@ -45,16 +45,18 @@ describe('nettoyage des jetons expirés', () => {
     await expect(cleanupExpiredTokens()).resolves.toEqual({ refreshTokens: 12, otps: 3 });
   });
 
-  it('supprime les jetons EXPIRÉS ou RÉVOQUÉS, et eux seuls', async () => {
+  it('supprime les jetons EXPIRÉS ou révoqués VOLONTAIREMENT, et eux seuls', async () => {
     RefreshToken.destroy.mockResolvedValue(0);
     UserOtp.destroy.mockResolvedValue(0);
 
     await cleanupExpiredTokens();
 
+    // Un jeton remplacé par une rotation (`rotatedAt`) reste jusqu'à son
+    // expiration : c'est la trace qui permet de détecter son rejeu (SC-04).
     const { where } = RefreshToken.destroy.mock.calls[0][0];
     expect(where[Op.or]).toEqual([
       { expiresAt: { [Op.lt]: expect.any(Date) } },
-      { revoked: true },
+      { revoked: true, rotatedAt: null },
     ]);
   });
 

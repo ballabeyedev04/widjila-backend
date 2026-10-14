@@ -19,10 +19,10 @@
 
 function chargerGarde({ obligatoire }) {
   jest.resetModules();
-  if (obligatoire) {
-    process.env.MFA_ADMIN_OBLIGATOIRE = 'true';
-  } else {
+  if (obligatoire === undefined) {
     delete process.env.MFA_ADMIN_OBLIGATOIRE;
+  } else {
+    process.env.MFA_ADMIN_OBLIGATOIRE = obligatoire ? 'true' : 'false';
   }
   return require('../middlewares/requireMfaActive.middleware.js');
 }
@@ -33,7 +33,7 @@ function run(garde, user) {
   return next;
 }
 
-describe('requireMfaActive.middleware — MFA optionnel (défaut)', () => {
+describe('requireMfaActive.middleware — MFA optionnel (MFA_ADMIN_OBLIGATOIRE=false explicite)', () => {
   let garde;
   beforeEach(() => {
     garde = chargerGarde({ obligatoire: false });
@@ -81,6 +81,20 @@ describe('requireMfaActive.middleware — MFA exigé (MFA_ADMIN_OBLIGATOIRE=true
   });
 
   test('laisse passer un Admin avec MFA active', () => {
+    expect(run(garde, { role: 'Admin', mfa_active: true })).toHaveBeenCalledWith();
+  });
+});
+
+describe('requireMfaActive.middleware — variable ABSENTE : MFA exigé (défaut sûr, audit SC-03)', () => {
+  test('refuse un Admin sans MFA quand la variable n’est pas définie', () => {
+    const garde = chargerGarde({ obligatoire: undefined });
+    const next = run(garde, { role: 'Admin', mfa_active: false });
+    expect(next.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(next.mock.calls[0][0].statusCode).toBe(403);
+  });
+
+  test('laisse passer un Admin avec MFA actif', () => {
+    const garde = chargerGarde({ obligatoire: undefined });
     expect(run(garde, { role: 'Admin', mfa_active: true })).toHaveBeenCalledWith();
   });
 });

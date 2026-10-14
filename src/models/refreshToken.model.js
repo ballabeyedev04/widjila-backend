@@ -30,6 +30,14 @@ const RefreshToken = sequelize.define('RefreshToken', {
     type: DataTypes.BOOLEAN,
     defaultValue: false,
     allowNull: false
+  },
+  // Date à laquelle ce jeton a été REMPLACÉ par une rotation (null sinon).
+  // Son rejeu après cette date signale un vol — voir AuthService.refresh
+  // (audit sécurité SC-04). Une révocation volontaire (déconnexion,
+  // changement de mot de passe) laisse ce champ à null.
+  rotatedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'refresh_tokens',

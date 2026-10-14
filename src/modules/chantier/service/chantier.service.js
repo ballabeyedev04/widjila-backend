@@ -10,6 +10,10 @@ const sequelize = require('../../../config/db.js');
 const NotificationService = require('../../notification/service/notification.service.js');
 const escapeLike = require('../../../utils/escapeLike.js');
 const { GESTION } = require('../../../config/roles.js');
+
+// Rôles qui peuvent créer, dans leur organisation, un compte capable de
+// trancher une demande de chantier (voir `_refusVerdictSurSaDemande`).
+const ROLES_CREANT_DES_VALIDEURS = GESTION.filter((r) => r !== 'Admin');
 const { STATUT_CHANTIER_EN_DEMANDE, STATUTS_RESERVE_FERMES } = require('../../../config/enums.js');
 const { sendChantierValidationEmail } = require('../../../infrastructure/emailService.js');
 const logger = require('../../../utils/logger.js');
@@ -276,8 +280,25 @@ class ChantierService {
   static _refusVerdictSurSaDemande(chantier, valideur) {
     if (!valideur || valideur.role === 'Admin') return null;
     if (!chantier.demandeurId) return null;
-    if (String(chantier.demandeurId) !== String(valideur.id)) return null;
-    return 'Vous ne pouvez pas trancher votre propre demande de chantier : un autre valideur doit s’en charger.';
+    if (String(chantier.demandeurId) === String(valideur.id)) {
+      return 'Vous ne pouvez pas trancher votre propre demande de chantier : un autre valideur doit s’en charger.';
+    }
+    // CORRECTIF (audit sécurité SC-05) — validation par « prête-nom ».
+    //
+    // Comparer les identifiants ne suffisait pas : un demandeur qui GÈRE les
+    // membres de son organisation (titulaire, ChefProjet, MaitreOuvrage) peut
+    // se créer un compte ChefProjet ou MaitreOuvrage dont il connaît le mot
+    // de passe, puis valider sa propre demande sous ce second nom. Le circuit
+    // — « le super-admin voit passer chaque création » — ne contrôlait plus
+    // rien. Ces demandes-là ne se tranchent donc qu'au niveau de la
+    // plateforme. Celles des autres rôles (conducteur, bureau de contrôle,
+    // maîtrise d'œuvre…), qui ne peuvent créer aucun valideur, restent
+    // tranchées dans l'organisation.
+    const roleDemandeur = chantier.demandeur?.role;
+    if (!roleDemandeur || ROLES_CREANT_DES_VALIDEURS.includes(roleDemandeur)) {
+      return 'Cette demande a été déposée par un gestionnaire de l’organisation : seul le super-admin de la plateforme peut la trancher.';
+    }
+    return null;
   }
 
   // -------------------- VALIDER / REJETER UNE DEMANDE --------------------
@@ -289,7 +310,7 @@ class ChantierService {
    */
   static async validerChantier(chantierId, valideur) {
     const chantier = await Chantier.findByPk(chantierId, {
-      include: [{ model: Utilisateur, as: 'demandeur', attributes: ['email', 'prenom', 'nom'] }],
+      include: [{ model: Utilisateur, as: 'demandeur', attributes: ['email', 'prenom', 'nom', 'role'] }],
     });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
@@ -373,7 +394,7 @@ class ChantierService {
    */
   static async rejeterChantier(chantierId, valideur, motif) {
     const chantier = await Chantier.findByPk(chantierId, {
-      include: [{ model: Utilisateur, as: 'demandeur', attributes: ['email', 'prenom', 'nom'] }],
+      include: [{ model: Utilisateur, as: 'demandeur', attributes: ['email', 'prenom', 'nom', 'role'] }],
     });
     if (!chantier) return { success: false, message: 'Chantier introuvable' };
 
@@ -459,6 +480,17 @@ class ChantierService {
       if (utilisateurId) where.demandeurId = utilisateurId;
     } else if (demandes === 'a_valider') {
       where.statut = 'en_attente_validation';
+      // Hors super-admin, la file ne montre que ce que l'appelant peut
+      // réellement trancher : les demandes déposées par un gestionnaire de
+      // l'organisation remontent à la plateforme (audit SC-05, voir
+      // `_refusVerdictSurSaDemande`).
+      if (auteur && auteur.role !== 'Admin') {
+        where.demandeurId = {
+          [Op.notIn]: sequelize.literal(
+            `(SELECT id FROM utilisateur WHERE role IN (${ROLES_CREANT_DES_VALIDEURS.map((r) => sequelize.escape(r)).join(', ')}))`
+          ),
+        };
+      }
     } else {
       where.statut = { [Op.notIn]: STATUT_CHANTIER_EN_DEMANDE };
     }

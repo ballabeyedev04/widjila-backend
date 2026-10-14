@@ -43,7 +43,7 @@
     "firebase-admin": "^14.2.0",
     "helmet": "^8.1.0",
     "ioredis": "^6.0.0",
-    "joi": "^18.0.2",
+    "joi": "^18.2.9",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.11.0",
     "multer": "^2.0.2",
@@ -58,7 +58,7 @@
     "resend": "^6.18.1",
     "sequelize": "^6.37.7",
     "sequelize-cli": "^6.6.5",
-    "sharp": "^0.35.3",
+    "sharp": "^0.35.5",
     "stripe": "^22.5.0",
     "uuid": "^11.1.1",
     "winston": "^3.19.0"

@@ -13,8 +13,16 @@ const uploadDocumentSchema = Joi.object({
 
 });
 
+// `donnees` : tracé de la signature (image en data URL, ou points du tracé).
+// Il était `Joi.any()` — n'importe quel JSON jusqu'à la limite du corps
+// (512 ko), stocké tel quel (audit sécurité SC-06). Borné ici à ce qu'un tracé
+// peut raisonnablement peser.
 const signerDocumentSchema = Joi.object({
-  donnees: Joi.any().optional(),
+  donnees: Joi.alternatives().try(
+    Joi.string().max(300000),
+    Joi.object().max(50),
+    Joi.array().max(5000),
+  ).optional().allow(null),
 });
 
 module.exports = { uploadDocumentSchema, signerDocumentSchema };

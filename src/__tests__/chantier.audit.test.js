@@ -46,7 +46,7 @@ describe('validerChantier / rejeterChantier — pas de verdict sur sa propre dem
   });
 
   it('laisse un AUTRE valideur trancher', async () => {
-    const chantier = demande();
+    const chantier = demande({ demandeurId: 'u-conducteur', demandeur: { role: 'ConducteurTravaux' } });
     jest.spyOn(Chantier, 'findByPk').mockResolvedValue(chantier);
     jest.spyOn(models.ChantierMembre, 'findOrCreate').mockResolvedValue([{}, true]);
     jest.spyOn(models.Plan, 'update').mockResolvedValue([0]);
@@ -61,6 +61,37 @@ describe('validerChantier / rejeterChantier — pas de verdict sur sa propre dem
 
   it('le helper n’arrête jamais le super-admin', () => {
     expect(ChantierService._refusVerdictSurSaDemande({ demandeurId: 'a' }, { id: 'a', role: 'Admin' })).toBeNull();
+  });
+
+  // Audit sécurité SC-05 : le titulaire (ou un ChefProjet / MaitreOuvrage)
+  // se crée un second compte valideur dont il connaît le mot de passe, puis
+  // valide sa propre demande sous ce nom.
+  it.each(['Entreprise', 'ChefProjet', 'MaitreOuvrage'])(
+    'demande déposée par un gestionnaire (%s) : aucun valideur de l’organisation ne la tranche',
+    async (roleDemandeur) => {
+      const chantier = demande({ demandeurId: 'u-titulaire', demandeur: { role: roleDemandeur } });
+      jest.spyOn(Chantier, 'findByPk').mockResolvedValue(chantier);
+
+      const v = await ChantierService.validerChantier('c1', { id: 'u-prete-nom', role: 'ChefProjet' });
+      const r = await ChantierService.rejeterChantier('c1', { id: 'u-prete-nom', role: 'MaitreOuvrage' }, 'motif');
+
+      expect(v.success).toBe(false);
+      expect(r.success).toBe(false);
+      expect(v.message).toMatch(/super-admin/);
+      expect(chantier.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it('le super-admin tranche une demande déposée par un gestionnaire', () => {
+    expect(ChantierService._refusVerdictSurSaDemande(
+      { demandeurId: 'u-titulaire', demandeur: { role: 'Entreprise' } }, { id: 'u-admin', role: 'Admin' },
+    )).toBeNull();
+  });
+
+  it('demandeur introuvable (compte supprimé) : par prudence, seul le super-admin tranche', () => {
+    expect(ChantierService._refusVerdictSurSaDemande(
+      { demandeurId: 'u-parti', demandeur: null }, { id: 'u-moa', role: 'MaitreOuvrage' },
+    )).toMatch(/super-admin/);
   });
 });
 

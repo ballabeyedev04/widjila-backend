@@ -40,6 +40,9 @@ const activerMfaSchema = Joi.object({
     'string.pattern.base': 'Le code de vérification doit contenir 6 chiffres',
   }),
   secret: Joi.string().trim().required(),
+  // Session de l'appareil mobile qui active (le web passe par le cookie) —
+  // épargnée par la fermeture des autres sessions (audit SC-03).
+  refresh_token: Joi.string().trim().optional().allow('', null),
 });
 
 const desactiverMfaSchema = Joi.object({

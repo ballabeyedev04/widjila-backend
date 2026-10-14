@@ -228,10 +228,55 @@ describe('AccountService', () => {
       Utilisateur.findByPk.mockResolvedValue(utilisateur);
       MfaService.activer.mockResolvedValue({ success: true, message: 'Authentification à deux facteurs activée' });
 
+      utilisateur.save = jest.fn();
+      RefreshToken.update.mockResolvedValue([2]);
+
       const result = await AccountService.activerMfa('user-1', { code: '123456', secret: 'SECRET' });
 
-      expect(result).toEqual({ success: true, message: 'Authentification à deux facteurs activée' });
+      expect(result).toEqual(expect.objectContaining({ success: true, message: 'Authentification à deux facteurs activée' }));
       expect(MfaService.activer).toHaveBeenCalledWith(utilisateur, { code: '123456', secret: 'SECRET' });
+    });
+
+    // Audit SC-03 : une session ouverte AVANT l'activation (celle d'un voleur
+    // qui ne connaît que le mot de passe) ne doit pas survivre au MFA.
+    test('ferme les AUTRES sessions et périme les jetons d’accès, en épargnant l’appareil qui active', async () => {
+      const utilisateur = fakeUtilisateur({ token_version: 3 });
+      utilisateur.save = jest.fn();
+      Utilisateur.findByPk.mockResolvedValue(utilisateur);
+      MfaService.activer.mockResolvedValue({ success: true, message: 'ok' });
+      RefreshToken.update.mockResolvedValue([2]);
+
+      const result = await AccountService.activerMfa('user-1', { code: '123456', secret: 'SECRET' }, 'refresh-courant');
+
+      expect(utilisateur.token_version).toBe(4);
+      expect(utilisateur.save).toHaveBeenCalled();
+      const [valeurs, { where }] = RefreshToken.update.mock.calls[0];
+      expect(valeurs).toEqual({ revoked: true });
+      expect(where.utilisateurId).toBe('user-1');
+      expect(where.tokenHash).toBeDefined(); // la session courante est exclue
+      expect(result.sessionsRevoquees).toBe(2);
+      expect(typeof result.accessToken).toBe('string');
+    });
+
+    test('sans session désignée, révoque TOUTES les sessions', async () => {
+      const utilisateur = fakeUtilisateur();
+      utilisateur.save = jest.fn();
+      Utilisateur.findByPk.mockResolvedValue(utilisateur);
+      MfaService.activer.mockResolvedValue({ success: true, message: 'ok' });
+      RefreshToken.update.mockResolvedValue([1]);
+
+      await AccountService.activerMfa('user-1', { code: '123456', secret: 'SECRET' });
+
+      expect(RefreshToken.update.mock.calls[0][1].where.tokenHash).toBeUndefined();
+    });
+
+    test('code invalide : aucune session n’est touchée', async () => {
+      Utilisateur.findByPk.mockResolvedValue(fakeUtilisateur());
+      MfaService.activer.mockResolvedValue({ success: false, message: 'Code de vérification invalide' });
+
+      await AccountService.activerMfa('user-1', { code: '000000', secret: 'SECRET' }, 'refresh-courant');
+
+      expect(RefreshToken.update).not.toHaveBeenCalled();
     });
 
     test('échoue si l’utilisateur est introuvable', async () => {

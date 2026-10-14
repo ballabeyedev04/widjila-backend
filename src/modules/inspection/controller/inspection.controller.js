@@ -36,7 +36,7 @@ exports.detailInspection = asyncHandler(async (req, res) => {
 });
 
 exports.modifierInspection = asyncHandler(async (req, res) => {
-  const result = await InspectionService.modifierInspection(await orgDeInspection(req), req.params.id, req.body);
+  const result = await InspectionService.modifierInspection(await orgDeInspection(req), req.params.id, req.body, req.user);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message, data: { inspection: result.inspection } });
 });
@@ -53,7 +53,7 @@ exports.cocherChecklist = asyncHandler(async (req, res) => {
 });
 
 exports.supprimerInspection = asyncHandler(async (req, res) => {
-  const result = await InspectionService.supprimerInspection(await orgDeInspection(req), req.params.id);
+  const result = await InspectionService.supprimerInspection(await orgDeInspection(req), req.params.id, req.user);
   if (!result.success) throw new BadRequestError(result.message);
   res.status(200).json({ success: true, message: result.message });
 });

@@ -127,9 +127,18 @@ exports.provisionMfa = asyncHandler(async (req, res) => {
 });
 
 exports.activerMfa = asyncHandler(async (req, res) => {
-  const result = await AccountService.activerMfa(req.user.id, req.body);
+  // Session de l'appareil qui active : épargnée par la fermeture des autres
+  // sessions (SC-03). Cookie d'abord, corps en repli — comme changePassword.
+  const refreshToken = req.cookies?.refreshToken || req.body?.refresh_token || null;
+  const result = await AccountService.activerMfa(req.user.id, req.body, refreshToken);
   if (!result.success) throw new BadRequestError(result.message);
-  res.status(200).json({ success: true, message: result.message });
+  res.status(200).json({
+    success: true,
+    message: result.message,
+    // Ajouts sans rupture de contrat : le client remplace son jeton d'accès,
+    // périmé par l'incrémentation de `token_version`.
+    data: { sessionsRevoquees: result.sessionsRevoquees, accessToken: result.accessToken },
+  });
 });
 
 exports.desactiverMfa = asyncHandler(async (req, res) => {

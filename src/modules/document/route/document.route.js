@@ -9,7 +9,7 @@ const checkActiveUser = require('../../../middlewares/checkActiveUser.middleware
 const checkSubscription = require('../../../middlewares/checkSubscription.middleware.js');
 const requireRole = require('../../../middlewares/requireRole.middleware.js');
 const paginate = require('../../../middlewares/pagination.middleware.js');
-const { OPERATIONNEL, OPERATIONNEL_CONTROLE } = require('../../../config/roles.js');
+const { OPERATIONNEL, OPERATIONNEL_CONTROLE, PILOTAGE } = require('../../../config/roles.js');
 const validate = require('../../../middlewares/validate.middleware.js');
 const { uploadDocumentSchema, signerDocumentSchema } = require('../validation/document.validation.js');
 const verifierTypeReferentiel = require('../../../middlewares/verifierTypeReferentiel.middleware.js');
@@ -64,11 +64,19 @@ router.post(
 );
 
 // ── Signature (module 7) ──────────────────────────────────────────────────────
+// CORRECTIF (audit sécurité SC-06) — aucune garde de rôle : un SousTraitant ou
+// un Pilote signait un PV ou un DOE, et, premier arrivé, en devenait le
+// signataire OFFICIEL (`signataireId`), avant le maître d'ouvrage. Signer
+// engage : c'est un verdict, réservé aux rôles de PILOTAGE (dont le titulaire)
+// et au Client, qui « suit son projet (lecture, signatures, commentaires) »
+// (config/roles.js). Le web ne proposait déjà le bouton qu'aux rôles
+// opérationnels, tous compris ici.
 router.post(
   '/documents/:id/signature',
   auth,
   checkActiveUser,
   checkSubscription,
+  requireRole(...PILOTAGE, 'Client'),
   validate(signerDocumentSchema),
   documentController.signerDocument
 );

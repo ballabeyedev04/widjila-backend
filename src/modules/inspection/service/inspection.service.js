@@ -1,13 +1,16 @@
 'use strict';
 
 const {
-  Inspection, Checklist, ChecklistModele, Chantier, Utilisateur,
+  Inspection, Checklist, ChecklistModele, Chantier, Utilisateur, Signature,
 } = require('../../../models/index.js');
 const sequelize = require('../../../config/db.js');
 
 // Statut qui fige une inspection : c'est un procès-verbal signé.
 const STATUT_SIGNE = 'signee';
 const MESSAGE_FIGEE = 'Une inspection signée est figée : elle ne peut plus être modifiée.';
+// Seule une inspection TERMINÉE se signe (audit sécurité SC-07) : c'est
+// l'étape que proposent le web et le mobile (« Signer » après « Terminer »).
+const STATUT_AVANT_SIGNATURE = 'terminee';
 
 class InspectionService {
 
@@ -141,7 +144,11 @@ class InspectionService {
   }
 
   // -------------------- MODIFIER UNE INSPECTION --------------------
-  static async modifierInspection(organisationId, inspectionId, data) {
+  /**
+   * @param {object} [auteur] utilisateur authentifié — requis pour SIGNER :
+   *   la signature est désormais tracée (table `signatures`) à son nom.
+   */
+  static async modifierInspection(organisationId, inspectionId, data, auteur = null) {
     const inspection = await Inspection.findByPk(inspectionId, {
       include: [{ model: Chantier, as: 'chantier', where: { organisationId } }],
     });
@@ -159,12 +166,30 @@ class InspectionService {
       if (erreur) return { success: false, message: erreur };
     }
 
+    // CORRECTIF (audit sécurité SC-07) — signer n'était qu'un `PUT
+    // {statut:'signee'}` : n'importe quelle inspection, même à peine
+    // planifiée, devenait un PV figé sans qu'aucune trace ne dise qui l'avait
+    // signé. Désormais : seulement depuis « terminée », et la signature est
+    // enregistrée au nom de son auteur.
+    const signature = data.statut === STATUT_SIGNE;
+    if (signature) {
+      if (inspection.statut !== STATUT_AVANT_SIGNATURE) {
+        return { success: false, message: 'Une inspection ne peut être signée qu’une fois terminée.' };
+      }
+      if (!auteur?.id) return { success: false, message: 'Signataire inconnu' };
+    }
+
     const updates = {};
     for (const champ of ['inspecteurId', 'type', 'date_visite', 'statut', 'compte_rendu']) {
       if (data[champ] !== undefined) updates[champ] = data[champ];
     }
 
     await inspection.update(updates);
+    if (signature) {
+      await Signature.create({
+        cibleType: 'inspection', cibleId: inspection.id, utilisateurId: auteur.id, type: 'signature',
+      });
+    }
     return { success: true, message: 'Inspection mise à jour', inspection };
   }
 
@@ -193,11 +218,18 @@ class InspectionService {
    * désormais paranoid (cf. checklist.model.js + migration) et supprimée
    * explicitement, dans une transaction.
    */
-  static async supprimerInspection(organisationId, inspectionId) {
+  static async supprimerInspection(organisationId, inspectionId, auteur = null) {
     const inspection = await Inspection.findByPk(inspectionId, {
       include: [{ model: Chantier, as: 'chantier', where: { organisationId } }],
     });
     if (!inspection) return { success: false, message: 'Inspection introuvable dans cette organisation' };
+
+    // CORRECTIF (audit sécurité SC-07) — un PV signé se modifiait plus, mais
+    // se SUPPRIMAIT d'un simple DELETE. Seul le super-admin plateforme (support,
+    // demande légale) peut encore retirer un procès-verbal signé.
+    if (inspection.statut === STATUT_SIGNE && auteur?.role !== 'Admin') {
+      return { success: false, message: 'Une inspection signée est un procès-verbal : elle ne peut pas être supprimée.' };
+    }
 
     const t = await sequelize.transaction();
     try {

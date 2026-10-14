@@ -277,8 +277,18 @@ const cryptoConfig = {
  * redemarrage, ce qui evite qu'une variable modifiee a chaud ouvre ou ferme
  * silencieusement l'acces d'un compte qui voit toutes les organisations.
  */
+//
+// CORRECTIF (audit sécurité SC-03) — défaut SÛR : la variable ABSENTE vaut
+// désormais « obligatoire ». Le compte `Admin` traverse le cloisonnement de
+// toutes les organisations ; un oubli de configuration ne doit pas suffire à
+// le laisser protégé par un mot de passe seul. Le régime facultatif reste
+// disponible, mais il doit être CHOISI : `MFA_ADMIN_OBLIGATOIRE=false`.
+//
+// Un super-admin sans MFA n'est pas enfermé dehors : les routes
+// `/account/mfa/*` ne portent pas ce garde, il active son MFA depuis son
+// profil puis retrouve l'accès à `/admin/*`.
 const mfaConfig = {
-  obligatoirePourAdmin: process.env.MFA_ADMIN_OBLIGATOIRE === 'true',
+  obligatoirePourAdmin: process.env.MFA_ADMIN_OBLIGATOIRE !== 'false',
 };
 
 module.exports = {

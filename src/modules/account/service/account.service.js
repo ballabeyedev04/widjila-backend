@@ -483,12 +483,40 @@ class AccountService {
     return { success: true, ...data };
   }
 
-  static async activerMfa(userId, { code, secret }) {
+  /**
+   * Active le MFA puis FERME les autres sessions (audit sécurité SC-03).
+   *
+   * Sans cette fermeture, une session ouverte avant l'activation — celle d'un
+   * voleur qui ne connaît que le mot de passe — restait valable : le second
+   * facteur n'était exigé qu'aux connexions SUIVANTES. Désormais, toute
+   * session encore vivante a passé le MFA.
+   *
+   * Même mécanique que `changePassword` : `token_version` incrémenté (périme
+   * les jetons d'accès), refresh tokens révoqués sauf celui de l'appareil qui
+   * active ([refreshTokenActuel]), et un jeton d'accès neuf renvoyé pour que
+   * cet appareil continue sans reconnexion. Un client qui l'ignore rafraîchit
+   * simplement sa session avec son refresh token épargné.
+   */
+  static async activerMfa(userId, { code, secret }, refreshTokenActuel = null) {
     const utilisateur = await Utilisateur.findByPk(userId);
     if (!utilisateur) return { success: false, message: 'Utilisateur introuvable' };
     const result = await MfaService.activer(utilisateur, { code, secret });
     if (!result.success) return result;
-    return { success: true, message: result.message };
+
+    utilisateur.token_version = (utilisateur.token_version || 0) + 1;
+    await utilisateur.save();
+    const where = { utilisateurId: userId, revoked: false };
+    if (refreshTokenActuel) {
+      where.tokenHash = { [Op.ne]: hashToken(refreshTokenActuel) };
+    }
+    const sessionsRevoquees = await RefreshToken.update({ revoked: true }, { where });
+
+    return {
+      success: true,
+      message: result.message,
+      sessionsRevoquees: Array.isArray(sessionsRevoquees) ? sessionsRevoquees[0] : 0,
+      accessToken: genererAccessToken(utilisateur),
+    };
   }
 
   static async desactiverMfa(userId, { code }) {

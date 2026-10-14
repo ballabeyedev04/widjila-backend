@@ -20,7 +20,11 @@ async function cleanupExpiredTokens() {
     where: {
       [Op.or]: [
         { expiresAt: { [Op.lt]: now } },
-        { revoked: true },
+        // Un jeton REMPLACÉ par une rotation (`rotatedAt`) est conservé
+        // jusqu'à son expiration : c'est la trace qui permet de reconnaître
+        // son rejeu par un voleur (audit sécurité SC-04). Purgé ici, il
+        // deviendrait « inconnu » et la détection ne verrait plus rien.
+        { revoked: true, rotatedAt: null },
       ],
     },
   });

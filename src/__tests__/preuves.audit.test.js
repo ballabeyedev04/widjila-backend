@@ -21,7 +21,7 @@ jest.mock('../models/index.js', () => ({
   Signature: { count: jest.fn(), create: jest.fn() },
   ReserveHistorique: { create: jest.fn() },
   Document: { findByPk: jest.fn() },
-  Checklist: { findOne: jest.fn() },
+  Checklist: { findOne: jest.fn(), destroy: jest.fn() },
   ChecklistModele: { findOne: jest.fn() },
   PieceJointe: {}, Utilisateur: {}, Organisation: {}, Partenaire: {},
 }));
@@ -161,14 +161,51 @@ describe('Inspection signée — procès-verbal figé', () => {
     expect(models.Checklist.findOne).not.toHaveBeenCalled();
   });
 
-  it('laisse modifier une inspection non signée — et la signer', async () => {
+  it('laisse modifier une inspection non signée', async () => {
     const insp = inspection('en_cours');
     models.Inspection.findByPk.mockResolvedValue(insp);
 
-    const r = await InspectionService.modifierInspection('org', 'i1', { statut: 'signee' });
+    const r = await InspectionService.modifierInspection('org', 'i1', { statut: 'terminee' });
+
+    expect(r.success).toBe(true);
+    expect(insp.update).toHaveBeenCalledWith({ statut: 'terminee' });
+  });
+
+  // Audit sécurité SC-07 : signer était un simple PUT, depuis n'importe quel
+  // statut, sans aucune trace du signataire.
+  it('signe une inspection TERMINÉE et enregistre la signature au nom de son auteur', async () => {
+    const insp = inspection('terminee');
+    models.Inspection.findByPk.mockResolvedValue(insp);
+
+    const r = await InspectionService.modifierInspection('org', 'i1', { statut: 'signee' }, { id: 'u-bc', role: 'BureauControle' });
 
     expect(r.success).toBe(true);
     expect(insp.update).toHaveBeenCalledWith({ statut: 'signee' });
+    expect(models.Signature.create).toHaveBeenCalledWith(expect.objectContaining({
+      cibleType: 'inspection', cibleId: 'i1', utilisateurId: 'u-bc', type: 'signature',
+    }));
+  });
+
+  it.each(['planifiee', 'en_cours'])('refuse de signer une inspection « %s » (pas encore terminée)', async (statut) => {
+    const insp = inspection(statut);
+    models.Inspection.findByPk.mockResolvedValue(insp);
+
+    const r = await InspectionService.modifierInspection('org', 'i1', { statut: 'signee' }, { id: 'u', role: 'ChefProjet' });
+
+    expect(r.success).toBe(false);
+    expect(insp.update).not.toHaveBeenCalled();
+    expect(models.Signature.create).not.toHaveBeenCalled();
+  });
+
+  it('refuse de supprimer une inspection signée (hors super-admin)', async () => {
+    const insp = { ...inspection('signee'), destroy: jest.fn() };
+    models.Inspection.findByPk.mockResolvedValue(insp);
+
+    const r = await InspectionService.supprimerInspection('org', 'i1', { id: 'u', role: 'ConducteurTravaux' });
+
+    expect(r.success).toBe(false);
+    expect(insp.destroy).not.toHaveBeenCalled();
+    expect(models.Checklist.destroy).not.toHaveBeenCalled();
   });
 });
 

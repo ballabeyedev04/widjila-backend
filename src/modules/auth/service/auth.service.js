@@ -26,6 +26,10 @@ const BLOQUAGE_MINUTES = 15;
 
 // MFA — nombre max de codes TOTP erronés par challenge avant re-login
 const MAX_TENTATIVES_MFA = 5;
+// Fenêtre pendant laquelle le rejeu d'un refresh token tout juste remplacé est
+// pris pour une course entre deux requêtes légitimes, et non pour un vol
+// (voir `_signalerReutilisation`).
+const GRACE_ROTATION_MS = 60 * 1000;
 const MFA_CHALLENGE_MINUTES = 10;
 
 // Exiger la vérification de l'email avant connexion ? (défaut : ON en production)
@@ -484,8 +488,25 @@ class AuthService {
       return { success: false, message: 'MFA non activé sur ce compte' };
     }
 
+    // Réserver la tentative AVANT de vérifier le code — incrément ATOMIQUE et
+    // conditionnel, fait par la base (audit sécurité SC-02).
+    //
+    // L'ancien compteur lisait `challenge.tentatives`, ajoutait 1 en mémoire
+    // puis réécrivait : N requêtes parallèles portant le même mfaToken lisaient
+    // toutes 0 et testaient chacune un code. Le plafond de 5 codes par
+    // challenge ne tenait plus, et le second facteur se forçait par rafales.
+    // Ici, au plus MAX_TENTATIVES_MFA requêtes obtiennent le droit d'essayer.
+    const [reservees, lignes] = await MfaChallenge.update(
+      { tentatives: sequelize.literal('tentatives + 1') },
+      { where: { id: challenge.id, tentatives: { [Op.lt]: MAX_TENTATIVES_MFA } }, returning: true },
+    );
+    if (!reservees) {
+      await MfaChallenge.destroy({ where: { id: challenge.id } });
+      return { success: false, message: 'Trop de tentatives. Recommencez la connexion.' };
+    }
+
     if (!MfaService.verify(utilisateur.mfa_secret, code)) {
-      const tentatives = (challenge.tentatives || 0) + 1;
+      const tentatives = lignes?.[0]?.tentatives ?? MAX_TENTATIVES_MFA;
       if (tentatives >= MAX_TENTATIVES_MFA) {
         await challenge.destroy();
         await journaliserConnexion({
@@ -494,7 +515,6 @@ class AuthService {
         });
         return { success: false, message: 'Trop de tentatives. Recommencez la connexion.' };
       }
-      await challenge.update({ tentatives });
       await journaliserConnexion({
         utilisateurId: utilisateur.id, email: utilisateur.email, succes: false, type: 'mfa', meta,
         donnees: { motif: 'code_invalide', tentatives },
@@ -502,8 +522,11 @@ class AuthService {
       return { success: false, message: 'Code de vérification invalide' };
     }
 
-    // Code valide → challenge consommé (usage unique)
-    await challenge.destroy();
+    // Code valide → challenge consommé (usage unique). Suppression
+    // CONDITIONNELLE : si deux requêtes portent chacune un code valide, une
+    // seule supprime la ligne et obtient une session.
+    const consomme = await MfaChallenge.destroy({ where: { id: challenge.id } });
+    if (!consomme) return { success: false, message: 'Session MFA expirée. Recommencez la connexion.' };
 
     const { accessToken, refreshToken } = await AuthService.emettreTokens(utilisateur);
     await journaliserConnexion({
@@ -538,7 +561,10 @@ class AuthService {
     const storedToken = await RefreshToken.findOne({ where: { tokenHash } });
 
     if (!storedToken) return { success: false, message: 'Refresh token inconnu' };
-    if (storedToken.revoked) return { success: false, message: 'Refresh token révoqué' };
+    if (storedToken.revoked) {
+      await AuthService._signalerReutilisation(storedToken);
+      return { success: false, message: 'Refresh token révoqué' };
+    }
     if (storedToken.expiresAt < new Date()) return { success: false, message: 'Refresh token expiré' };
 
     // 3. Charger l'utilisateur
@@ -573,7 +599,9 @@ class AuthService {
       // d'administration — partagent parfois une session : la garantie doit
       // venir de la base, pas de la discipline du client.
       const [revoques] = await RefreshToken.update(
-        { revoked: true },
+        // `rotatedAt` : ce jeton est REMPLACÉ, pas simplement révoqué — son
+        // rejeu ultérieur sera traité comme un vol (`_signalerReutilisation`).
+        { revoked: true, rotatedAt: new Date() },
         { where: { tokenHash, revoked: false }, transaction: t }
       );
       if (revoques === 0) {
@@ -594,6 +622,40 @@ class AuthService {
       await t.rollback();
       throw err;
     }
+  }
+
+  /**
+   * Rejeu d'un refresh token déjà REMPLACÉ par une rotation (audit SC-04).
+   *
+   * Un client légitime ne présente jamais deux fois le même refresh token :
+   * il reçoit le suivant à chaque rotation. Si l'ancien revient, deux parties
+   * le détiennent — le client et un voleur. Impossible de savoir laquelle a
+   * fait la rotation : on coupe TOUTE la famille de sessions du compte
+   * (refresh tokens révoqués, `token_version` incrémenté pour périmer les
+   * jetons d'accès). L'utilisateur se reconnecte ; le voleur, lui, n'a pas
+   * le mot de passe.
+   *
+   * Deux cas ne déclenchent RIEN :
+   *   - un jeton révoqué volontairement (déconnexion, changement de mot de
+   *     passe, désactivation : `rotatedAt` à null) — un vieil appareil qui le
+   *     présente encore n'est pas une attaque ;
+   *   - un rejeu dans les `GRACE_ROTATION_MS` qui suivent la rotation : deux
+   *     onglets ou deux requêtes parties en même temps, dont l'une a perdu la
+   *     course. Couper la session sur ce cas déconnecterait des utilisateurs
+   *     honnêtes à chaque rafraîchissement concurrent.
+   */
+  static async _signalerReutilisation(storedToken) {
+    if (!storedToken.rotatedAt) return;
+    if (Date.now() - new Date(storedToken.rotatedAt).getTime() < GRACE_ROTATION_MS) return;
+
+    await RefreshToken.update(
+      { revoked: true },
+      { where: { utilisateurId: storedToken.utilisateurId, revoked: false } },
+    );
+    await Utilisateur.increment('token_version', { where: { id: storedToken.utilisateurId } });
+    logger.warn('[auth] Réutilisation d\'un refresh token déjà remplacé — toutes les sessions du compte sont révoquées', {
+      utilisateurId: storedToken.utilisateurId,
+    });
   }
 
   // -------------------- TRANSFERT MOBILE → NAVIGATEUR --------------------

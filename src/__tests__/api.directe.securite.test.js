@@ -61,6 +61,8 @@ const COMPTES = {
   attente:   { id: 'u-attente', role: 'Entreprise', statut: 'en_attente_validation', token_version: 0, organisationId: ORG },
   rejete:    { id: 'u-rejete', role: 'Entreprise', statut: 'rejete', token_version: 0, organisationId: ORG },
   admin:     { id: 'u-admin', role: 'Admin', statut: 'actif', token_version: 5, organisationId: null },
+  soustraitant: { id: 'u-st', role: 'SousTraitant', statut: 'actif', token_version: 0, organisationId: ORG },
+  pilote:    { id: 'u-pilote', role: 'Pilote', statut: 'actif', token_version: 0, organisationId: ORG },
 };
 
 /** Jeton d'accès authentique (signé avec le vrai secret), surchargeable. */
@@ -221,5 +223,23 @@ describe('garde de rôle ajoutée — photos d’inspection', () => {
   it('un client ne dépose pas de preuve sur une inspection : 403', async () => {
     const r = await appel('post', `/api/v1/inspections/${UUID}/photos`, jeton(COMPTES.client));
     expect(r.status).toBe(403);
+  });
+});
+
+// Audit sécurité SC-06 : la signature d'un document n'avait aucune garde de
+// rôle — le premier signataire, quel qu'il soit, devenait le signataire
+// officiel d'un PV ou d'un DOE.
+describe('POST /documents/:id/signature — réservé aux rôles qui engagent', () => {
+  const url = `/api/v1/documents/${UUID}/signature`;
+
+  it.each(['soustraitant', 'pilote'])('%s : 403 avant tout accès au document', async (compte) => {
+    const r = await appel('post', url, jeton(COMPTES[compte]));
+    expect(r.status).toBe(403);
+  });
+
+  it('données de signature hors bornes : rejetées par la validation', async () => {
+    const r = await request(app).post(url).set('Authorization', `Bearer ${jeton(COMPTES.titulaire)}`)
+      .send({ donnees: Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`k${i}`, i])) });
+    expect([400, 422]).toContain(r.status);
   });
 });

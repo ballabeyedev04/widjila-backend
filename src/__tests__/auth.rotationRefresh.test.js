@@ -125,7 +125,8 @@ describe('refresh — rotation', () => {
     await AuthService.refresh({ refreshToken: jetonValide() });
 
     const [valeurs, options] = RefreshToken.update.mock.calls[0];
-    expect(valeurs).toEqual({ revoked: true });
+    // `rotatedAt` : le jeton est REMPLACÉ, son rejeu sera traité comme un vol (SC-04).
+    expect(valeurs).toEqual({ revoked: true, rotatedAt: expect.any(Date) });
     expect(options.where).toMatchObject({ revoked: false });
     expect(options.where.tokenHash).toBeTruthy();
     expect(options.transaction).toBe(transaction);

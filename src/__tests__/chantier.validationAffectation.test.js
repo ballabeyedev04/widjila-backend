@@ -39,7 +39,9 @@ const ChantierService = require('../modules/chantier/service/chantier.service.js
 const VALIDEUR = { id: 'gestionnaire-1', role: 'ChefProjet' };
 
 /** Demande en attente, telle que la renvoie `findByPk`. */
-const demandeEnAttente = ({ demandeurId = 'entreprise-1', demandeur = null } = {}) => ({
+// Demande déposée par un rôle qui ne gère pas les membres (conducteur de
+// travaux) : la seule que l'organisation tranche elle-même (audit SC-05).
+const demandeEnAttente = ({ demandeurId = 'conducteur-1', demandeur = { role: 'ConducteurTravaux' } } = {}) => ({
   id: 'chantier-1',
   nom: 'Résidence Les Acacias',
   code: 'CH-001',
@@ -82,7 +84,7 @@ describe('validerChantier — rattachement du demandeur', () => {
     expect(res.success).toBe(true);
     expect(ChantierMembre.findOrCreate).toHaveBeenCalledTimes(1);
     const [args] = ChantierMembre.findOrCreate.mock.calls[0];
-    expect(args.where).toEqual({ chantierId: 'chantier-1', utilisateurId: 'entreprise-1' });
+    expect(args.where).toEqual({ chantierId: 'chantier-1', utilisateurId: 'conducteur-1' });
   });
 
   it('passe par findOrCreate : revalider ne crée pas de doublon', async () => {
